@@ -231,8 +231,8 @@
         "Typecheck passes"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "POST /auth/register with bcrypt password hashing. Validates username, password (min 8 chars), name. Returns 201 with pending status. 409 for duplicate username. golang.org/x/crypto v0.31.0 added for bcrypt."
     },
     {
       "id": "US-016",

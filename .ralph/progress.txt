@@ -35,6 +35,9 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - SQLite pragmas: WAL mode, busy_timeout=5000, foreign_keys=ON
 - Migration mechanism: `_migrations` table tracks applied versions; each migration is a numbered struct with SQL; runs in transaction
 - DB path configurable via `DB_PATH` env var (default `/data/sentinel.db`)
+- `writeJSON(w, status, data)` helper in auth.go for consistent JSON responses — reuse across all handlers
+- `golang.org/x/crypto` v0.31.0 for bcrypt — compatible with Go 1.22
+- SQLite UNIQUE constraint errors contain "UNIQUE constraint failed" in error string
 
 ---
 
@@ -267,4 +270,20 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - SQLite WAL mode is important for concurrent reads during HTTP handling
   - `database/sql` driver name for modernc.org/sqlite is just "sqlite" (not "sqlite3")
   - DB path is /data/sentinel.db, matching the db-data volume mount in docker-compose.yml
+---
+
+## 2026-03-21 - US-015
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Implemented POST /auth/register endpoint in web-backend
+- Created auth.go with registration handler: validates username/password/name, bcrypt hashes password, inserts into users table
+- Added writeJSON helper for consistent JSON responses
+- Added golang.org/x/crypto v0.31.0 for bcrypt support
+- Registered route in main.go
+- Verified: 201 success (pending status), 409 duplicate, 400 validation errors, bcrypt hash stored in DB
+- Files changed: services/web-backend/auth.go (new), services/web-backend/main.go, services/web-backend/go.mod
+- **Learnings for future iterations:**
+  - golang.org/x/crypto v0.31.0 works with Go 1.22 — used for bcrypt password hashing
+  - writeJSON helper in auth.go can be reused by all handlers (sets Content-Type, status, encodes JSON)
+  - SQLite UNIQUE constraint error message contains "UNIQUE constraint failed" — use strings.Contains to detect duplicates
+  - web-backend port 8080 is internal only (Docker network), not exposed to host — test via docker exec
 ---
