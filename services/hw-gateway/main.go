@@ -8,11 +8,30 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
+
+// DeviceStatus tracks the alive/dead state of a device based on heartbeats.
+type DeviceStatus struct {
+	DeviceID      string `json:"deviceId"`
+	SiteID        string `json:"siteId"`
+	Alive         bool   `json:"alive"`
+	LastHeartbeat string `json:"lastHeartbeat"`
+	lastSeen      time.Time
+}
+
+// equipmentStore holds in-memory device statuses keyed by "siteId:deviceId".
+var equipmentStore = struct {
+	sync.RWMutex
+	devices map[string]*DeviceStatus
+}{devices: make(map[string]*DeviceStatus)}
+
+var heartbeatTimeout = 30 * time.Second
 
 // AlertPayload received from MQTT safety/+/alert topic.
 type AlertPayload struct {
@@ -70,10 +89,21 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+func init() {
+	if v := os.Getenv("HEARTBEAT_TIMEOUT_SEC"); v != "" {
+		if sec, err := strconv.Atoi(v); err == nil && sec > 0 {
+			heartbeatTimeout = time.Duration(sec) * time.Second
+		}
+	}
+}
+
 func main() {
 	brokerURL := getEnv("MQTT_BROKER_URL", "tcp://mosquitto:1883")
 	notifierURL := getEnv("NOTIFIER_URL", "http://notifier:8080")
 	webBackendURL := getEnv("WEB_BACKEND_URL", "http://web-backend:8080")
+
+	// Start background heartbeat checker
+	go heartbeatChecker()
 
 	// Setup MQTT client options
 	opts := mqtt.NewClientOptions().
@@ -107,6 +137,8 @@ func main() {
 	mux.HandleFunc("POST /api/restart", func(w http.ResponseWriter, r *http.Request) {
 		handleRestart(w, r, mqttClient)
 	})
+
+	mux.HandleFunc("GET /api/equipment/status", handleEquipmentStatus)
 
 	log.Println("hw-gateway listening on :8080")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
@@ -250,8 +282,68 @@ func handleHeartbeat(msg mqtt.Message) {
 		return
 	}
 
+	// Use siteId from topic for consistency
+	parts := strings.Split(msg.Topic(), "/")
+	if len(parts) >= 2 {
+		hb.SiteID = parts[1]
+	}
+
+	now := time.Now().UTC()
+	key := hb.SiteID + ":" + hb.DeviceID
+
+	equipmentStore.Lock()
+	ds, exists := equipmentStore.devices[key]
+	if !exists {
+		ds = &DeviceStatus{
+			DeviceID: hb.DeviceID,
+			SiteID:   hb.SiteID,
+		}
+		equipmentStore.devices[key] = ds
+		log.Printf("[HEARTBEAT] New device registered: %s", key)
+	}
+	ds.Alive = true
+	ds.LastHeartbeat = now.Format(time.RFC3339)
+	ds.lastSeen = now
+	equipmentStore.Unlock()
+
 	log.Printf("[HEARTBEAT] deviceId=%s siteId=%s status=%s", hb.DeviceID, hb.SiteID, hb.Status)
-	// In-memory device status tracking will be implemented in US-008
+}
+
+// heartbeatChecker periodically marks devices as dead if no heartbeat within timeout.
+func heartbeatChecker() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		now := time.Now()
+		equipmentStore.Lock()
+		for key, ds := range equipmentStore.devices {
+			if ds.Alive && now.Sub(ds.lastSeen) > heartbeatTimeout {
+				ds.Alive = false
+				log.Printf("[HEARTBEAT] Device %s marked as dead (no heartbeat for %v)", key, heartbeatTimeout)
+			}
+		}
+		equipmentStore.Unlock()
+	}
+}
+
+// handleEquipmentStatus returns all device statuses.
+func handleEquipmentStatus(w http.ResponseWriter, r *http.Request) {
+	equipmentStore.RLock()
+	statuses := make([]DeviceStatus, 0, len(equipmentStore.devices))
+	for _, ds := range equipmentStore.devices {
+		statuses = append(statuses, DeviceStatus{
+			DeviceID:      ds.DeviceID,
+			SiteID:        ds.SiteID,
+			Alive:         ds.Alive,
+			LastHeartbeat: ds.LastHeartbeat,
+		})
+	}
+	equipmentStore.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(statuses)
 }
 
 func handleRestart(w http.ResponseWriter, r *http.Request, mqttClient mqtt.Client) {
