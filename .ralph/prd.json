@@ -343,8 +343,8 @@
         "Typecheck passes"
       ],
       "priority": 22,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "POST /api/equipment/restart on apiMux (any authenticated user). Forwards {siteId, deviceId, requestedBy, reason} to hw-gateway POST /api/restart. Logs user info. HW_GATEWAY_URL env var (default http://hw-gateway:8080)."
     },
     {
       "id": "US-023",

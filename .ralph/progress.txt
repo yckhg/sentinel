@@ -52,6 +52,7 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - WebSocket auth: JWT via `?token=` query param; tries parseJWT() first (user), then parseTempLinkJWT() (temp viewer)
 - WebSocket broadcast filtering: nil filter = all clients, function filter for role-based (e.g., admin-only for system_alarm)
 - POST /api/incidents registered on main mux (not apiMux) — internal service call from hw-gateway, no JWT auth required
+- web-backend forwards equipment restart to hw-gateway via HW_GATEWAY_URL env var (default http://hw-gateway:8080)
 
 ---
 
@@ -403,4 +404,17 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - Per-client send channel (buffered 64) with non-blocking select — drops messages for slow clients instead of blocking
   - POST /api/incidents registered on main mux with specific method pattern — Go 1.22 routes specific patterns before generic /api/ prefix
   - BroadcastCrisisAlert(nil filter) sends to all clients; BroadcastSystemAlarm filters role=="admin"
+---
+
+## 2026-03-21 - US-022
+- Implemented POST /api/equipment/restart in web-backend (equipment.go)
+- Forwards restart request to hw-gateway POST /api/restart with user info
+- Any authenticated user can trigger (registered on apiMux behind authMiddleware)
+- Logs restart request with userId, role, siteId, deviceId, reason
+- Added HW_GATEWAY_URL env var to web-backend in docker-compose.yml
+- Files changed: services/web-backend/equipment.go (new), services/web-backend/main.go, docker-compose.yml
+- **Learnings for future iterations:**
+  - web-backend needs HW_GATEWAY_URL env var to forward requests to hw-gateway (default http://hw-gateway:8080)
+  - Equipment restart is accessible to any authenticated user (not admin-only) per AC
+  - Forward pattern: proxy HTTP response status code and body from upstream service back to client
 ---
