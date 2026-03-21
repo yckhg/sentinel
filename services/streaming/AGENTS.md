@@ -6,7 +6,7 @@ HLS streaming server. Receives raw H.264 streams from cctv-adapter and serves th
 
 ## Scope
 
-- Receive video streams from cctv-adapter
+- Receive video streams from cctv-adapter via RTMP on port 1935
 - Remux H.264 to HLS (m3u8 + ts segments) without transcoding
 - Serve multiple camera streams simultaneously
 - Provide HLS URL list to web-backend
@@ -17,18 +17,28 @@ HLS streaming server. Receives raw H.264 streams from cctv-adapter and serves th
 ### Inbound
 | Source | Method | Description |
 |--------|--------|-------------|
-| cctv-adapter | Stream push | Raw H.264 video streams |
+| cctv-adapter | RTMP push to `:1935/live/{cameraId}` | Raw H.264 video streams |
 | web-backend | HTTP GET `/api/streams` | Query available HLS URLs |
 
 ### Outbound
 | Target | Method | Description |
 |--------|--------|-------------|
-| Client (via web-frontend) | HLS (HTTP) | m3u8 playlist + ts segments |
+| Client (via web-frontend) | HLS (HTTP) | m3u8 playlist + ts segments at `/live/{cameraId}/index.m3u8` |
+
+## Architecture
+
+Hybrid container with two processes:
+- **nginx-rtmp** (port 1935 RTMP + port 8080 HTTP): Accepts RTMP streams, converts to HLS segments in `/tmp/hls/{cameraId}/`, serves HLS files at `/live/`
+- **Go streaming-api** (port 8081): Serves `/healthz` and `/api/streams` (scans `/tmp/hls` for active streams)
+
+nginx proxies `/healthz` and `/api/*` requests from :8080 to the Go binary on :8081.
 
 ## Implementation Notes
 
 - **NO TRANSCODING** — Remux only (H.264 -> HLS container). CPU usage must stay minimal.
-- HLS segment duration should be short (2-3s) for low latency
-- Must handle multiple simultaneous camera streams
-- Clean up old segments to prevent disk fill
-- Stream URLs should follow a predictable pattern: `/live/{cameraId}/index.m3u8`
+- HLS fragment: 2s, playlist length: 10s (5 segments)
+- `hls_nested on` creates per-camera subdirectories under `/tmp/hls/`
+- `hls_cleanup on` automatically removes old .ts segments
+- Stream is considered "active" if playlist was modified within the last 15 seconds
+- `startedAt` in `/api/streams` reflects playlist file mtime (proxy for stream start)
+- entrypoint.sh starts Go binary in background, then nginx in foreground

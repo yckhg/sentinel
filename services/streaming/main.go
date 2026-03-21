@@ -1,20 +1,75 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"time"
 )
+
+const hlsDir = "/tmp/hls"
+
+type StreamInfo struct {
+	CameraID  string `json:"cameraId"`
+	HlsURL    string `json:"hlsUrl"`
+	Active    bool   `json:"active"`
+	StartedAt string `json:"startedAt"`
+}
 
 func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok","service":"streaming"}`))
 	})
 
-	log.Println("streaming listening on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	mux.HandleFunc("GET /api/streams", handleStreams)
+
+	log.Println("streaming-api listening on :8081")
+	if err := http.ListenAndServe(":8081", mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func handleStreams(w http.ResponseWriter, r *http.Request) {
+	streams := []StreamInfo{}
+
+	entries, err := os.ReadDir(hlsDir)
+	if err != nil {
+		// No HLS directory yet — return empty list
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(streams)
+		return
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		cameraID := entry.Name()
+		playlistPath := filepath.Join(hlsDir, cameraID, "index.m3u8")
+
+		info, err := os.Stat(playlistPath)
+		if err != nil {
+			continue
+		}
+
+		// Consider stream active if playlist was modified in the last 15 seconds
+		active := time.Since(info.ModTime()) < 15*time.Second
+
+		streams = append(streams, StreamInfo{
+			CameraID:  cameraID,
+			HlsURL:    "/live/" + cameraID + "/index.m3u8",
+			Active:    active,
+			StartedAt: info.ModTime().UTC().Format(time.RFC3339),
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(streams)
 }
