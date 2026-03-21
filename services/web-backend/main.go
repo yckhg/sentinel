@@ -32,6 +32,9 @@ func main() {
 		w.Write([]byte(`{"status":"ok","service":"web-backend"}`))
 	})
 
+	// Auth routes (public)
+	mux.HandleFunc("POST /auth/register", handleRegister(db))
+
 	log.Println("web-backend listening on :8080")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatal(err)

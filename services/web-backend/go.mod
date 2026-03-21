@@ -2,4 +2,7 @@ module sentinel/web-backend
 
 go 1.22
 
-require modernc.org/sqlite v1.34.5
+require (
+	golang.org/x/crypto v0.31.0
+	modernc.org/sqlite v1.34.5
+)
