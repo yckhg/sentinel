@@ -25,6 +25,12 @@ func main() {
 		log.Fatalf("failed to run migrations: %v", err)
 	}
 
+	initJWTSecret()
+
+	if err := seedAdminUser(db); err != nil {
+		log.Fatalf("failed to seed admin user: %v", err)
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -34,6 +40,22 @@ func main() {
 
 	// Auth routes (public)
 	mux.HandleFunc("POST /auth/register", handleRegister(db))
+	mux.HandleFunc("POST /auth/login", handleLogin(db))
+
+	// Protected API routes (JWT required)
+	apiMux := http.NewServeMux()
+	// Placeholder for future /api/* handlers
+	apiMux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
+		user := getAuthUser(r)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "ok",
+			"userId": user.UserID,
+			"role":   user.Role,
+		})
+	})
+
+	// Mount protected routes behind auth middleware
+	mux.Handle("/api/", authMiddleware(apiMux))
 
 	log.Println("web-backend listening on :8080")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
