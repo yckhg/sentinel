@@ -59,6 +59,9 @@ services:
       - KAKAO_API_KEY=${KAKAO_API_KEY:-}
       - KAKAO_SENDER_KEY=${KAKAO_SENDER_KEY:-}
       - KAKAO_TEMPLATE_CODE=${KAKAO_TEMPLATE_CODE:-CRISIS_ALERT}
+      - NHN_SMS_APP_KEY=${NHN_SMS_APP_KEY:-}
+      - NHN_SMS_SECRET_KEY=${NHN_SMS_SECRET_KEY:-}
+      - NHN_SMS_SENDER_NO=${NHN_SMS_SENDER_NO:-}
     depends_on:
       - web-backend
     networks:

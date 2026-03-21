@@ -57,14 +57,33 @@ type NotifyResult struct {
 	Error       string `json:"error,omitempty"`
 }
 
+type SMSSendRequest struct {
+	Body       string   `json:"body"`
+	SendNo     string   `json:"sendNo"`
+	RecipientList []SMSRecipient `json:"recipientList"`
+}
+
+type SMSRecipient struct {
+	RecipientNo string `json:"recipientNo"`
+}
+
+type AlarmPayload struct {
+	Type    string                 `json:"type"`
+	Message string                 `json:"message"`
+	Details map[string]interface{} `json:"details,omitempty"`
+}
+
 // --- Config ---
 
 type Config struct {
-	WebBackendURL   string
-	KakaoAPIURL     string
-	KakaoAPIKey     string
-	KakaoSenderKey  string
+	WebBackendURL     string
+	KakaoAPIURL       string
+	KakaoAPIKey       string
+	KakaoSenderKey    string
 	KakaoTemplateCode string
+	NHNAppKey         string
+	NHNSecretKey      string
+	NHNSenderNo       string
 }
 
 func loadConfig() Config {
@@ -74,6 +93,9 @@ func loadConfig() Config {
 		KakaoAPIKey:       getEnv("KAKAO_API_KEY", ""),
 		KakaoSenderKey:    getEnv("KAKAO_SENDER_KEY", ""),
 		KakaoTemplateCode: getEnv("KAKAO_TEMPLATE_CODE", "CRISIS_ALERT"),
+		NHNAppKey:         getEnv("NHN_SMS_APP_KEY", ""),
+		NHNSecretKey:      getEnv("NHN_SMS_SECRET_KEY", ""),
+		NHNSenderNo:       getEnv("NHN_SMS_SENDER_NO", ""),
 	}
 }
 
@@ -185,6 +207,96 @@ func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink str
 	return nil
 }
 
+// --- NHN Cloud SMS Sending ---
+
+func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
+	if cfg.NHNAppKey == "" || cfg.NHNSecretKey == "" {
+		log.Printf("[sms] NHN Cloud SMS not configured, skipping SMS for %s (%s)", contact.Name, contact.Phone)
+		return fmt.Errorf("NHN Cloud SMS not configured")
+	}
+
+	body := fmt.Sprintf("[위기알림] %s\n현장: %s\n장비: %s\n심각도: %s\n시각: %s",
+		alert.Description, alert.SiteID, alert.DeviceID, alert.Severity, alert.Timestamp)
+	if cctvLink != "" {
+		body += fmt.Sprintf("\nCCTV: %s", cctvLink)
+	}
+
+	smsReq := SMSSendRequest{
+		Body:   body,
+		SendNo: cfg.NHNSenderNo,
+		RecipientList: []SMSRecipient{
+			{RecipientNo: contact.Phone},
+		},
+	}
+
+	payload, err := json.Marshal(smsReq)
+	if err != nil {
+		return fmt.Errorf("marshal SMS request: %w", err)
+	}
+
+	url := fmt.Sprintf("https://api-sms.cloud.toast.com/sms/v3.0/appKeys/%s/sender/sms", cfg.NHNAppKey)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create SMS request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	req.Header.Set("X-Secret-Key", cfg.NHNSecretKey)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("SMS API call: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("SMS API error: status %d, body: %s", resp.StatusCode, string(respBody))
+	}
+
+	log.Printf("[sms] Successfully sent to %s (%s)", contact.Name, contact.Phone)
+	return nil
+}
+
+// --- System Alarm ---
+
+func sendSystemAlarm(cfg Config, contact Contact, alert AlertPayload, kakaoErr, smsErr error) {
+	alarm := AlarmPayload{
+		Type:    "notification_failure",
+		Message: fmt.Sprintf("Failed to deliver crisis alert to contact %s (KakaoTalk + SMS both failed)", contact.Name),
+		Details: map[string]interface{}{
+			"contactId":   contact.ID,
+			"contactName": contact.Name,
+			"contactPhone": contact.Phone,
+			"siteId":      alert.SiteID,
+			"deviceId":    alert.DeviceID,
+			"kakaoError":  kakaoErr.Error(),
+			"smsError":    smsErr.Error(),
+			"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+
+	payload, err := json.Marshal(alarm)
+	if err != nil {
+		log.Printf("[alarm] Failed to marshal alarm payload: %v", err)
+		return
+	}
+
+	resp, err := httpClient.Post(cfg.WebBackendURL+"/api/alarms", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("[alarm] Failed to send system alarm: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		log.Printf("[alarm] System alarm failed: status %d, body: %s", resp.StatusCode, string(respBody))
+		return
+	}
+
+	log.Printf("[alarm] System alarm sent for contact %s (%s) — both KakaoTalk and SMS failed", contact.Name, contact.Phone)
+}
+
 // --- Notification Dispatch ---
 
 func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult) {
@@ -213,7 +325,7 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 		log.Printf("[notify] Temp CCTV link created: %s (expires %s)", tempLink.URL, tempLink.ExpiresAt)
 	}
 
-	// 3. Send KakaoTalk to all contacts in parallel
+	// 3. Send to all contacts in parallel with fallback chain: KakaoTalk → SMS → Web alarm
 	var wg sync.WaitGroup
 	results := make([]NotifyResult, len(contacts))
 
@@ -224,19 +336,35 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 			result := NotifyResult{
 				ContactID:   c.ID,
 				ContactName: c.Name,
-				Channel:     "kakaotalk",
 			}
 
-			err := sendKakaoTalk(cfg, c, alert, cctvLink)
-			if err != nil {
-				result.Success = false
-				result.Error = err.Error()
-				log.Printf("[notify] KakaoTalk FAILED for %s (%s): %v", c.Name, c.Phone, err)
-			} else {
+			// Step 1: Try KakaoTalk
+			kakaoErr := sendKakaoTalk(cfg, c, alert, cctvLink)
+			if kakaoErr == nil {
+				result.Channel = "kakaotalk"
 				result.Success = true
 				log.Printf("[notify] KakaoTalk SUCCESS for %s (%s)", c.Name, c.Phone)
+				results[idx] = result
+				return
 			}
+			log.Printf("[notify] KakaoTalk FAILED for %s (%s): %v — falling back to SMS", c.Name, c.Phone, kakaoErr)
 
+			// Step 2: Fallback to SMS
+			smsErr := sendSMS(cfg, c, alert, cctvLink)
+			if smsErr == nil {
+				result.Channel = "sms"
+				result.Success = true
+				log.Printf("[notify] SMS SUCCESS for %s (%s)", c.Name, c.Phone)
+				results[idx] = result
+				return
+			}
+			log.Printf("[notify] SMS FAILED for %s (%s): %v — sending system alarm", c.Name, c.Phone, smsErr)
+
+			// Step 3: Both failed — send system alarm to web-backend
+			sendSystemAlarm(cfg, c, alert, kakaoErr, smsErr)
+			result.Channel = "alarm"
+			result.Success = false
+			result.Error = fmt.Sprintf("kakao: %s; sms: %s", kakaoErr.Error(), smsErr.Error())
 			results[idx] = result
 		}(i, contact)
 	}
@@ -288,13 +416,15 @@ func handleNotify(cfg Config) http.HandlerFunc {
 		go func() {
 			contactCount, results := dispatchNotifications(cfg, alert)
 			successCount := 0
+			channels := map[string]int{}
 			for _, r := range results {
 				if r.Success {
 					successCount++
+					channels[r.Channel]++
 				}
 			}
-			log.Printf("[notify] Dispatch complete: %d/%d contacts notified via KakaoTalk",
-				successCount, contactCount)
+			log.Printf("[notify] Dispatch complete: %d/%d contacts notified (kakao:%d sms:%d failed:%d)",
+				successCount, contactCount, channels["kakaotalk"], channels["sms"], contactCount-successCount)
 		}()
 
 		// Return immediately (accepted, processing async)
@@ -322,7 +452,8 @@ func main() {
 
 	mux.HandleFunc("POST /api/notify", handleNotify(cfg))
 
-	log.Printf("notifier listening on :8080 (kakao configured: %v)", cfg.KakaoAPIURL != "")
+	log.Printf("notifier listening on :8080 (kakao configured: %v, sms configured: %v)",
+		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatal(err)
 	}
