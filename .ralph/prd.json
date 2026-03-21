@@ -536,8 +536,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 34,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "URL-based routing via window.location.pathname match for /view/{token}. ViewerPage validates token via GET /api/links/verify/{token}, then fetches cameras with temp link JWT. Auth middleware updated to accept temp link JWTs as 'viewer' role with blacklist check. No tab bar, no management UI — CCTV player only."
     },
     {
       "id": "US-035",

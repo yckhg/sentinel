@@ -69,6 +69,8 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - Auth headers: `getAuthHeaders()` pattern — read `localStorage.getItem("token")`, return `{ Authorization: Bearer, Content-Type: application/json }`
 - Phone input: auto-format with `formatPhoneInput()` — strips non-digits, inserts dashes. Validate with `01[016789]-\d{3,4}-\d{4}` regex
 - Inline edit pattern: `editId` state to switch card rendering between view/edit mode. Cancel restores previous values
+- Auth middleware accepts both user JWT and temp link JWT (fallback chain); temp link viewers get role="viewer"
+- URL routing: `window.location.pathname` match for special routes (/view/{token}), bypassing tab navigation
 
 ---
 
@@ -598,4 +600,19 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - `tel:` URI scheme for initiating phone calls from mobile browsers
   - TypeScript strict null check: array access `arr[0]` can be undefined, use temp variable + guard
   - Reuse mgmt-modal-overlay/mgmt-modal CSS for any dialog (consistent with RestartDialog pattern)
+---
+
+## 2026-03-21 - US-034
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Created ViewerPage component for /view/{token} temporary link access
+- URL routing via window.location.pathname match (no React Router needed)
+- ViewerPage validates token via GET /api/links/verify/{token}, then fetches cameras with temp link JWT
+- Updated auth middleware to accept temp link JWTs as fallback, granting "viewer" role with blacklist check
+- No tab bar, no crisis banner, no management UI — CCTV player only
+- Files changed: ViewerPage.tsx (new), App.tsx, App.css, auth.go
+- **Learnings for future iterations:**
+  - Auth middleware can accept multiple JWT types with fallback chain: try user JWT first, then temp link JWT
+  - Temp link JWT blacklist must be checked wherever the token is accepted (not just in verify handler)
+  - URL-based routing without React Router: `window.location.pathname.match()` in a top-level function called before state-based tab rendering
+  - TypeScript: `match?.[1] ?? null` pattern for regex capture group access (avoids undefined-to-null type error)
 ---
