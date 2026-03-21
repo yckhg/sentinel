@@ -281,8 +281,8 @@
         "Typecheck passes"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "GET /api/contacts (any auth user), POST/PUT/DELETE admin-only. Phone validation via regex (01X-XXXX-XXXX). PUT supports partial updates (name or phone). DELETE returns 204. contacts.go file with 4 handlers."
     },
     {
       "id": "US-019",

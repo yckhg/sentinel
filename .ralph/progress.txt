@@ -326,3 +326,21 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - UPDATE with `WHERE status = 'pending'` naturally returns 0 rows affected for already-approved/rejected users — use RowsAffected() for 404 detection
   - `fmt.Sscanf` is a simple way to parse path value to int64 with validation
 ---
+
+## 2026-03-21 - US-018
+- Implemented Contacts CRUD API in web-backend
+- Created contacts.go with 4 handlers: handleListContacts, handleCreateContact, handleUpdateContact, handleDeleteContact
+- GET /api/contacts: returns all contacts (any authenticated user)
+- POST /api/contacts: creates contact with name+phone (admin only)
+- PUT /api/contacts/{id}: partial update — name and/or phone (admin only)
+- DELETE /api/contacts/{id}: removes contact, returns 204 (admin only)
+- Phone number validation via regex: `^01[016789]-\d{3,4}-\d{4}$`
+- Registered routes on apiMux (behind authMiddleware)
+- Files changed: services/web-backend/contacts.go (new), services/web-backend/main.go
+- **Learnings for future iterations:**
+  - BusyBox wget in alpine containers doesn't support --method flag — use curl from host via container IP for PUT/DELETE testing
+  - Phone regex `01[016789]-\d{3,4}-\d{4}` covers Korean mobile formats (010, 011, 016, 017, 018, 019)
+  - PUT partial update pattern: load existing record, apply non-empty fields from request, save back
+  - Admin check in /api/* handlers: `getAuthUser(r).Role != "admin"` — middleware already validated JWT
+  - DELETE returns 204 (no content body) on success, consistent with REST conventions
+---
