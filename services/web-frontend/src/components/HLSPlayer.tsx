@@ -8,6 +8,7 @@ interface HLSPlayerProps {
   status: "connected" | "disconnected";
   expanded: boolean;
   onToggleExpand: () => void;
+  onRestart?: () => void;
 }
 
 export default function HLSPlayer({
@@ -17,6 +18,7 @@ export default function HLSPlayer({
   status,
   expanded,
   onToggleExpand,
+  onRestart,
 }: HLSPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -86,6 +88,18 @@ export default function HLSPlayer({
         <span className="camera-name">{cameraName}</span>
         <span className="camera-zone">{zone}</span>
       </div>
+      {expanded && onRestart && (
+        <button
+          className="camera-restart-btn"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRestart();
+          }}
+          title="장비 재시작"
+        >
+          &#x21BB;
+        </button>
+      )}
       {disconnected && (
         <div className="camera-disconnected">
           <span className="disconnected-icon">&#x26A0;</span>

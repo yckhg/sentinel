@@ -163,6 +163,31 @@ body {
   font-size: 0.75rem;
 }
 
+/* Restart button on expanded camera */
+.camera-restart-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 1.25rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s;
+}
+
+.camera-restart-btn:hover {
+  background: rgba(211, 47, 47, 0.8);
+}
+
 /* Crisis Alert Banner */
 .crisis-banner-container {
   position: fixed;

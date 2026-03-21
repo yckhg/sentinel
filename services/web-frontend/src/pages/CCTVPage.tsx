@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import HLSPlayer from "../components/HLSPlayer";
+import RestartDialog from "../components/RestartDialog";
 
 interface Camera {
   id: number;
@@ -8,6 +9,8 @@ interface Camera {
   zone: string;
   hlsUrl: string;
   status: "connected" | "disconnected";
+  siteId?: string;
+  deviceId?: string;
 }
 
 export default function CCTVPage() {
@@ -15,6 +18,7 @@ export default function CCTVPage() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [restartCamera, setRestartCamera] = useState<Camera | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -53,6 +57,10 @@ export default function CCTVPage() {
 
   const handleToggleExpand = (id: number) => {
     setExpandedId((prev) => (prev === id ? null : id));
+  };
+
+  const handleRestartClick = (cam: Camera) => {
+    setRestartCamera(cam);
   };
 
   if (loading) {
@@ -95,9 +103,18 @@ export default function CCTVPage() {
             status={cam.status}
             expanded={expandedId === cam.id}
             onToggleExpand={() => handleToggleExpand(cam.id)}
+            onRestart={() => handleRestartClick(cam)}
           />
         ))}
       </div>
+      {restartCamera && (
+        <RestartDialog
+          cameraName={restartCamera.name}
+          siteId={restartCamera.siteId || "site1"}
+          deviceId={restartCamera.deviceId || String(restartCamera.id)}
+          onClose={() => setRestartCamera(null)}
+        />
+      )}
     </div>
   );
 }
