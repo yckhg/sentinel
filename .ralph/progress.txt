@@ -523,3 +523,17 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - `formatPhoneInput` strips non-digits and re-inserts dashes — prevents invalid chars while allowing natural typing
   - Form validation happens client-side before API call; server errors also displayed
 ---
+
+## 2026-03-21 - US-029
+- Site info management UI added to ManagementPage
+- Displays site address, manager name, manager phone in card view
+- Inline edit mode with save/cancel, same pattern as contacts
+- Validation on all required fields (address, manager name, phone format)
+- Phone auto-formatting reuses existing formatPhoneInput()
+- Section divider CSS added between sites and contacts sections
+- Files changed: src/pages/ManagementPage.tsx, src/App.css
+- **Learnings for future iterations:**
+  - ManagementPage is now sectioned: sites at top, contacts below, separated by `.mgmt-section-divider`
+  - Site API: GET /api/sites returns array, PUT /api/sites/{id} for updates (admin-only)
+  - Same inline edit pattern (editId state) used for both contacts and sites — keep consistent for links/accounts
+---

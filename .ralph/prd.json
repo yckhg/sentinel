@@ -454,8 +454,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 29,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Site info section added to ManagementPage.tsx above contacts. View mode shows address + manager info, edit mode with inline form (address, managerName, managerPhone). Phone validation with formatPhoneInput. Uses mgmt-* CSS classes. Section divider between sites and contacts."
     },
     {
       "id": "US-030",
