@@ -595,3 +595,53 @@ body {
     box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.08);
   }
 }
+
+/* Viewer Page (temporary link access) */
+.viewer-content {
+  padding-bottom: 1rem;
+}
+
+.viewer-page {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.viewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.viewer-header h2 {
+  font-size: 1.25rem;
+  margin: 0;
+}
+
+.viewer-status {
+  text-align: center;
+  color: #666;
+  padding: 2rem 0;
+}
+
+.viewer-error {
+  text-align: center;
+  padding: 4rem 1rem;
+}
+
+.viewer-error-icon {
+  font-size: 3rem;
+  display: block;
+  margin-bottom: 1rem;
+}
+
+.viewer-error h2 {
+  font-size: 1.5rem;
+  color: #d32f2f;
+  margin-bottom: 0.5rem;
+}
+
+.viewer-error p {
+  color: #666;
+  font-size: 1rem;
+}

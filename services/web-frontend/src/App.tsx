@@ -3,6 +3,7 @@ import CCTVPage from "./pages/CCTVPage";
 import IncidentsPage from "./pages/IncidentsPage";
 import ManagementPage from "./pages/ManagementPage";
 import SettingsPage from "./pages/SettingsPage";
+import ViewerPage from "./pages/ViewerPage";
 import CrisisAlertBanner from "./components/CrisisAlertBanner";
 import "./App.css";
 
@@ -15,8 +16,24 @@ const tabs: { key: Tab; label: string; icon: string }[] = [
   { key: "settings", label: "설정", icon: "👤" },
 ];
 
+function getViewerToken(): string | null {
+  const match = window.location.pathname.match(/^\/view\/(.+)$/);
+  return match?.[1] ?? null;
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>("cctv");
+  const viewerToken = getViewerToken();
+
+  if (viewerToken) {
+    return (
+      <div className="app">
+        <main className="content viewer-content">
+          <ViewerPage token={viewerToken} />
+        </main>
+      </div>
+    );
+  }
 
   const renderPage = () => {
     switch (activeTab) {

@@ -256,14 +256,34 @@ func authMiddleware(next http.Handler) http.Handler {
 		}
 
 		claims, err := parseJWT(parts[1])
-		if err != nil {
+		if err == nil {
+			ctx := context.WithValue(r.Context(), userContextKey, AuthUser{
+				UserID: claims.UserID,
+				Role:   claims.Role,
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// Fallback: try temp link JWT for viewer access (read-only)
+		tempClaims, tempErr := parseTempLinkJWT(parts[1])
+		if tempErr != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired token"})
 			return
 		}
 
+		// Check blacklist
+		linkStore.mu.RLock()
+		_, revoked := linkStore.blacklist[tempClaims.LinkID]
+		linkStore.mu.RUnlock()
+		if revoked {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "link has been revoked"})
+			return
+		}
+
 		ctx := context.WithValue(r.Context(), userContextKey, AuthUser{
-			UserID: claims.UserID,
-			Role:   claims.Role,
+			UserID: 0,
+			Role:   "viewer",
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
