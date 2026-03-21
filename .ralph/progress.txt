@@ -56,6 +56,9 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - web-backend aggregates data from streaming + cctv-adapter + DB to serve public /api/cameras; uses 10s TTL cache for internal service responses
 - Service URL env vars: HW_GATEWAY_URL, STREAMING_URL, CCTV_ADAPTER_URL — all default to http://{service}:8080
 - SQLite ORDER BY on datetime columns: always use `datetime(col)` in ORDER BY to handle mixed format storage (ISO 8601 vs space-separated)
+- Frontend tab navigation: React state-based (no router), switch/case in renderPage(). Tabs defined as typed array for consistency
+- CSS: use `env(safe-area-inset-bottom)` for mobile notch/home-bar spacing, `100dvh` for full viewport height
+- Typecheck in Docker: `docker run --rm -v ./services/web-frontend:/app -w /app node:20-alpine sh -c "npm install && npm run typecheck"` (production image has no node)
 
 ---
 
@@ -450,4 +453,18 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - SQLite date ordering requires `datetime()` function in ORDER BY when dates may be stored in mixed formats (ISO 8601 with T/Z vs space-separated)
   - `WHERE 1=1` + optional `AND` clauses is a clean pattern for building dynamic SQL queries in Go
   - `append(args, limit, offset)` safely extends the args slice for paginated queries
+---
+
+## 2026-03-21 - US-025
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Implemented mobile-first bottom tab bar layout with 4 tabs: CCTV, Incidents, Management, Settings
+- React state-based tab switching (no router library needed)
+- CSS bottom fixed tab bar with safe-area-inset-bottom for mobile devices
+- Desktop responsive: centered tab bar with max-width, wider content area
+- Placeholder page components created in src/pages/ for each tab
+- Files changed: services/web-frontend/src/App.tsx, services/web-frontend/src/App.css (new), services/web-frontend/src/pages/CCTVPage.tsx (new), services/web-frontend/src/pages/IncidentsPage.tsx (new), services/web-frontend/src/pages/ManagementPage.tsx (new), services/web-frontend/src/pages/SettingsPage.tsx (new)
+- **Learnings for future iterations:**
+  - Production nginx image has no node/npm — typecheck via standalone node:20-alpine container with volume mount
+  - `100dvh` (dynamic viewport height) works better than `100vh` for mobile (accounts for browser chrome)
+  - Tab navigation with React state is simpler than adding react-router for this use case — can add router later if /view/{token} route needs it
 ---
