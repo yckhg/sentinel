@@ -26,6 +26,7 @@ func main() {
 	}
 
 	initJWTSecret()
+	initHWGatewayURL()
 
 	if err := seedAdminUser(db); err != nil {
 		log.Fatalf("failed to seed admin user: %v", err)
@@ -77,6 +78,9 @@ func main() {
 	// Sites management
 	apiMux.HandleFunc("GET /api/sites", handleListSites(db))
 	apiMux.HandleFunc("PUT /api/sites/{id}", handleUpdateSite(db))
+
+	// Equipment restart (any authenticated user)
+	apiMux.HandleFunc("POST /api/equipment/restart", handleEquipmentRestart())
 
 	// Temporary links management (admin only)
 	apiMux.HandleFunc("GET /api/links", handleListTempLinks())

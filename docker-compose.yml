@@ -73,6 +73,8 @@ services:
     build: ./services/web-backend
     container_name: sentinel-web-backend
     restart: unless-stopped
+    environment:
+      - HW_GATEWAY_URL=http://hw-gateway:8080
     volumes:
       - db-data:/data
     networks:
