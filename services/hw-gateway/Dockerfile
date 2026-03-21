@@ -2,7 +2,7 @@ FROM golang:1.22-alpine AS builder
 WORKDIR /app
 COPY go.mod ./
 COPY *.go ./
-RUN go build -o hw-gateway .
+RUN go mod tidy && go build -o hw-gateway .
 
 FROM alpine:3.19
 WORKDIR /app

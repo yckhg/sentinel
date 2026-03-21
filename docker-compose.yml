@@ -2,10 +2,26 @@
 # Industrial safety real-time monitoring system
 
 services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: sentinel-mosquitto
+    restart: unless-stopped
+    command: mosquitto -c /mosquitto-no-auth.conf
+    networks:
+      - sentinel-net
+    # ports: internal only (1883)
+
   hw-gateway:
     build: ./services/hw-gateway
     container_name: sentinel-hw-gateway
     restart: unless-stopped
+    environment:
+      - MQTT_BROKER_URL=tcp://mosquitto:1883
+      - NOTIFIER_URL=http://notifier:8080
+      - WEB_BACKEND_URL=http://web-backend:8080
+      - HEARTBEAT_TIMEOUT=30
+    depends_on:
+      - mosquitto
     networks:
       - sentinel-net
     # ports: internal only

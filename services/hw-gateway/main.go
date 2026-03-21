@@ -1,11 +1,85 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"log"
+	"math"
 	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
+// AlertPayload received from MQTT safety/+/alert topic.
+type AlertPayload struct {
+	DeviceID    string `json:"deviceId"`
+	SiteID      string `json:"siteId"`
+	Type        string `json:"type"`
+	Description string `json:"description"`
+	Severity    string `json:"severity"`
+	Timestamp   string `json:"timestamp"`
+}
+
+// IncidentPayload forwarded to web-backend POST /api/incidents.
+type IncidentPayload struct {
+	SiteID      string `json:"siteId"`
+	Description string `json:"description"`
+	OccurredAt  string `json:"occurredAt"`
+}
+
+// HeartbeatPayload received from MQTT safety/+/heartbeat topic.
+type HeartbeatPayload struct {
+	DeviceID  string `json:"deviceId"`
+	SiteID    string `json:"siteId"`
+	Status    string `json:"status"`
+	Timestamp string `json:"timestamp"`
+}
+
+var httpClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		ResponseHeaderTimeout: 5 * time.Second,
+	},
+}
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
 func main() {
+	brokerURL := getEnv("MQTT_BROKER_URL", "tcp://mosquitto:1883")
+	notifierURL := getEnv("NOTIFIER_URL", "http://notifier:8080")
+	webBackendURL := getEnv("WEB_BACKEND_URL", "http://web-backend:8080")
+
+	// Setup MQTT client options
+	opts := mqtt.NewClientOptions().
+		AddBroker(brokerURL).
+		SetClientID("sentinel-hw-gateway").
+		SetCleanSession(true).
+		SetKeepAlive(60 * time.Second).
+		SetAutoReconnect(true).
+		SetMaxReconnectInterval(60 * time.Second).
+		SetConnectionLostHandler(func(_ mqtt.Client, err error) {
+			log.Printf("[MQTT] Connection lost: %v", err)
+		}).
+		SetOnConnectHandler(func(client mqtt.Client) {
+			log.Println("[MQTT] Connected to broker")
+			subscribeTopics(client, notifierURL, webBackendURL)
+		})
+
+	mqttClient := mqtt.NewClient(opts)
+
+	// Connect in background with retry
+	go connectWithRetry(mqttClient)
+
+	// HTTP server
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -17,4 +91,144 @@ func main() {
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func connectWithRetry(client mqtt.Client) {
+	backoff := 1 * time.Second
+	maxBackoff := 60 * time.Second
+	lastLog := time.Time{}
+
+	for {
+		token := client.Connect()
+		token.Wait()
+		if token.Error() == nil {
+			return
+		}
+
+		now := time.Now()
+		if now.Sub(lastLog) >= 30*time.Second {
+			log.Printf("[MQTT] Broker unreachable: %v (retrying with %.0fs backoff)", token.Error(), backoff.Seconds())
+			lastLog = now
+		}
+
+		time.Sleep(backoff)
+		backoff = time.Duration(math.Min(float64(backoff*2), float64(maxBackoff)))
+	}
+}
+
+func subscribeTopics(client mqtt.Client, notifierURL, webBackendURL string) {
+	// Subscribe to alert topic (QoS 2 — exactly once)
+	alertToken := client.Subscribe("safety/+/alert", 2, func(_ mqtt.Client, msg mqtt.Message) {
+		handleAlert(msg, notifierURL, webBackendURL)
+	})
+	alertToken.Wait()
+	if alertToken.Error() != nil {
+		log.Printf("[MQTT] Failed to subscribe to safety/+/alert: %v", alertToken.Error())
+	} else {
+		log.Println("[MQTT] Subscribed to safety/+/alert (QoS 2)")
+	}
+
+	// Subscribe to heartbeat topic (QoS 0 — at most once)
+	hbToken := client.Subscribe("safety/+/heartbeat", 0, func(_ mqtt.Client, msg mqtt.Message) {
+		handleHeartbeat(msg)
+	})
+	hbToken.Wait()
+	if hbToken.Error() != nil {
+		log.Printf("[MQTT] Failed to subscribe to safety/+/heartbeat: %v", hbToken.Error())
+	} else {
+		log.Println("[MQTT] Subscribed to safety/+/heartbeat (QoS 0)")
+	}
+}
+
+func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
+	log.Printf("[MQTT] Received alert on topic: %s", msg.Topic())
+
+	var alert AlertPayload
+	if err := json.Unmarshal(msg.Payload(), &alert); err != nil {
+		log.Printf("[MQTT] Malformed JSON payload on %s: %v", msg.Topic(), err)
+		return
+	}
+
+	if alert.DeviceID == "" || alert.SiteID == "" || alert.Type == "" || alert.Timestamp == "" {
+		log.Printf("[MQTT] Missing required fields in alert payload: %s", string(msg.Payload()))
+		return
+	}
+
+	// Use siteId from topic for consistency
+	parts := strings.Split(msg.Topic(), "/")
+	if len(parts) >= 2 {
+		alert.SiteID = parts[1]
+	}
+
+	log.Printf("[ALERT] deviceId=%s siteId=%s type=%s severity=%s", alert.DeviceID, alert.SiteID, alert.Type, alert.Severity)
+
+	// Forward to notifier and web-backend in parallel
+	done := make(chan struct{}, 2)
+
+	go func() {
+		defer func() { done <- struct{}{} }()
+		forwardToNotifier(notifierURL, &alert)
+	}()
+
+	go func() {
+		defer func() { done <- struct{}{} }()
+		forwardToWebBackend(webBackendURL, &alert)
+	}()
+
+	<-done
+	<-done
+}
+
+func forwardToNotifier(notifierURL string, alert *AlertPayload) {
+	body, _ := json.Marshal(alert)
+	url := fmt.Sprintf("%s/api/notify", notifierURL)
+
+	resp, err := httpClient.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[FORWARD] Failed to send alert to notifier: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	log.Printf("[FORWARD] Notifier response: %d", resp.StatusCode)
+}
+
+func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
+	incident := IncidentPayload{
+		SiteID:      alert.SiteID,
+		Description: alert.Description,
+		OccurredAt:  alert.Timestamp,
+	}
+	body, _ := json.Marshal(incident)
+	url := fmt.Sprintf("%s/api/incidents", webBackendURL)
+
+	resp, err := httpClient.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[FORWARD] Failed to send incident to web-backend: %v (retrying in 1s)", err)
+		time.Sleep(1 * time.Second)
+		resp, err = httpClient.Post(url, "application/json", bytes.NewReader(body))
+		if err != nil {
+			log.Printf("[FORWARD] Retry failed for web-backend: %v", err)
+			return
+		}
+	}
+	defer resp.Body.Close()
+	log.Printf("[FORWARD] Web-backend response: %d", resp.StatusCode)
+}
+
+func handleHeartbeat(msg mqtt.Message) {
+	log.Printf("[MQTT] Received heartbeat on topic: %s", msg.Topic())
+
+	var hb HeartbeatPayload
+	if err := json.Unmarshal(msg.Payload(), &hb); err != nil {
+		log.Printf("[MQTT] Malformed JSON heartbeat payload on %s: %v", msg.Topic(), err)
+		return
+	}
+
+	if hb.DeviceID == "" || hb.SiteID == "" {
+		log.Printf("[MQTT] Missing required fields in heartbeat payload: %s", string(msg.Payload()))
+		return
+	}
+
+	log.Printf("[HEARTBEAT] deviceId=%s siteId=%s status=%s", hb.DeviceID, hb.SiteID, hb.Status)
+	// In-memory device status tracking will be implemented in US-008
 }
