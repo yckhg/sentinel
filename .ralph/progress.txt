@@ -537,3 +537,18 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - Site API: GET /api/sites returns array, PUT /api/sites/{id} for updates (admin-only)
   - Same inline edit pattern (editId state) used for both contacts and sites — keep consistent for links/accounts
 ---
+## 2026-03-21 - US-030
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Temporary link create/manage UI added to ManagementPage
+- Create button calls POST /api/links/temp, shows copyable URL in a text input with copy button
+- Clipboard copy with navigator.clipboard API + fallback for older browsers
+- Active links list showing label, creation time, expiry time (localized ko-KR)
+- Revoke button per link with confirmation modal dialog
+- Section placed between sites and contacts, with dividers
+- Files changed: src/pages/ManagementPage.tsx, src/App.css
+- **Learnings for future iterations:**
+  - GET /api/links returns active (non-expired, non-revoked) links; POST /api/links/temp creates new one
+  - DELETE /api/links/{id} returns 204 No Content — check for both !res.ok and status !== 204
+  - Clipboard API may fail in non-HTTPS contexts — always provide execCommand fallback
+  - Temp link label is optional; display "임시 링크" as default when empty
+---

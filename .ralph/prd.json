@@ -470,8 +470,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 30,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Temp links section in ManagementPage.tsx between sites and contacts. Create button calls POST /api/links/temp, shows copyable URL. Active links list with creation/expiry times. Revoke with confirmation modal (DELETE /api/links/{id}). Clipboard copy with fallback. mgmt-link-* CSS classes."
     },
     {
       "id": "US-031",
