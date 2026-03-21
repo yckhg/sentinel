@@ -64,6 +64,10 @@ func main() {
 	apiMux.HandleFunc("PUT /api/contacts/{id}", handleUpdateContact(db))
 	apiMux.HandleFunc("DELETE /api/contacts/{id}", handleDeleteContact(db))
 
+	// Sites management
+	apiMux.HandleFunc("GET /api/sites", handleListSites(db))
+	apiMux.HandleFunc("PUT /api/sites/{id}", handleUpdateSite(db))
+
 	// Mount protected routes behind auth middleware
 	mux.Handle("/api/", authMiddleware(apiMux))
 
