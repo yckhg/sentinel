@@ -75,6 +75,8 @@ services:
     restart: unless-stopped
     environment:
       - HW_GATEWAY_URL=http://hw-gateway:8080
+      - STREAMING_URL=http://streaming:8080
+      - CCTV_ADAPTER_URL=http://cctv-adapter:8080
     volumes:
       - db-data:/data
     networks:
