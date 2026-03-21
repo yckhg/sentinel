@@ -95,6 +95,25 @@ services:
       - web-backend
       - streaming
 
+  # E2E test services (run with: docker compose --profile test run --rm e2e-crisis)
+  e2e-crisis:
+    build: ./tests/e2e-crisis
+    container_name: sentinel-e2e-crisis
+    profiles:
+      - test
+    environment:
+      - WEB_BACKEND_URL=http://web-backend:8080
+      - MQTT_BROKER_URL=tcp://mosquitto:1883
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-sentinel1234}
+    depends_on:
+      - mosquitto
+      - hw-gateway
+      - notifier
+      - web-backend
+    networks:
+      - sentinel-net
+
 networks:
   sentinel-net:
     driver: bridge

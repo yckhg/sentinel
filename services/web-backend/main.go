@@ -53,7 +53,8 @@ func main() {
 	// WebSocket endpoint (JWT via query param)
 	mux.HandleFunc("/ws", handleWebSocket())
 
-	// Temporary link routes (public or internal service calls)
+	// Internal service routes (no auth — accessed by other services via Docker network)
+	mux.HandleFunc("GET /api/contacts", handleListContacts(db))
 	mux.HandleFunc("POST /api/links/temp", handleCreateTempLink())
 	mux.HandleFunc("GET /api/links/verify/{token}", handleVerifyTempLink())
 
