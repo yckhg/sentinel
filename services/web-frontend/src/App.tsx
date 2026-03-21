@@ -4,6 +4,7 @@ import IncidentsPage from "./pages/IncidentsPage";
 import ManagementPage from "./pages/ManagementPage";
 import SettingsPage from "./pages/SettingsPage";
 import ViewerPage from "./pages/ViewerPage";
+import LoginPage from "./pages/LoginPage";
 import CrisisAlertBanner from "./components/CrisisAlertBanner";
 import "./App.css";
 
@@ -23,6 +24,9 @@ function getViewerToken(): string | null {
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>("cctv");
+  const [token, setToken] = useState<string | null>(
+    localStorage.getItem("token")
+  );
   const viewerToken = getViewerToken();
 
   if (viewerToken) {
@@ -35,6 +39,22 @@ function App() {
     );
   }
 
+  if (!token) {
+    return (
+      <LoginPage
+        onLoginSuccess={(t) => {
+          localStorage.setItem("token", t);
+          setToken(t);
+        }}
+      />
+    );
+  }
+
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    setToken(null);
+  };
+
   const renderPage = () => {
     switch (activeTab) {
       case "cctv":
@@ -44,7 +64,7 @@ function App() {
       case "management":
         return <ManagementPage />;
       case "settings":
-        return <SettingsPage />;
+        return <SettingsPage onLogout={handleLogout} />;
     }
   };
 
