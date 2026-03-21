@@ -372,8 +372,8 @@
         "Typecheck passes"
       ],
       "priority": 24,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "GET /api/incidents on apiMux (any authenticated user). Supports page, limit (max 100), from, to query params. Sorted by datetime(occurred_at) DESC. Uses datetime() in ORDER BY to handle mixed date formats in SQLite. Returns {data: [], pagination: {page, limit, total}}."
     },
     {
       "id": "US-025",

@@ -55,6 +55,7 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - web-backend forwards equipment restart to hw-gateway via HW_GATEWAY_URL env var (default http://hw-gateway:8080)
 - web-backend aggregates data from streaming + cctv-adapter + DB to serve public /api/cameras; uses 10s TTL cache for internal service responses
 - Service URL env vars: HW_GATEWAY_URL, STREAMING_URL, CCTV_ADAPTER_URL — all default to http://{service}:8080
+- SQLite ORDER BY on datetime columns: always use `datetime(col)` in ORDER BY to handle mixed format storage (ISO 8601 vs space-separated)
 
 ---
 
@@ -435,4 +436,18 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - Internal HTTP timeouts: 5s for service-to-service calls in camera handler
   - Cache pattern: sync.RWMutex with TTL check on read, refresh on miss — simple and effective
   - Camera name in DB is the join key to cameraId in streaming/adapter configs
+---
+
+## 2026-03-21 - US-024
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Implemented GET /api/incidents with pagination and date filtering
+- Registered on apiMux (any authenticated user)
+- Supports query params: page (default 1), limit (default 20, max 100), from, to
+- Sorted by occurred_at DESC (newest first)
+- Returns {data: [], pagination: {page, limit, total}} matching API spec
+- Files changed: services/web-backend/incidents.go, services/web-backend/main.go
+- **Learnings for future iterations:**
+  - SQLite date ordering requires `datetime()` function in ORDER BY when dates may be stored in mixed formats (ISO 8601 with T/Z vs space-separated)
+  - `WHERE 1=1` + optional `AND` clauses is a clean pattern for building dynamic SQL queries in Go
+  - `append(args, limit, offset)` safely extends the args slice for paginated queries
 ---
