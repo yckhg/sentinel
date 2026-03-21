@@ -6,6 +6,13 @@ interface Contact {
   phone: string;
 }
 
+interface Site {
+  id: number;
+  address: string;
+  managerName: string;
+  managerPhone: string;
+}
+
 const PHONE_REGEX = /^01[016789]-\d{3,4}-\d{4}$/;
 
 function formatPhoneInput(value: string): string {
@@ -26,6 +33,17 @@ export default function ManagementPage() {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Site info state
+  const [sites, setSites] = useState<Site[]>([]);
+  const [sitesLoading, setSitesLoading] = useState(true);
+  const [sitesError, setSitesError] = useState<string | null>(null);
+  const [siteEditId, setSiteEditId] = useState<number | null>(null);
+  const [siteEditAddress, setSiteEditAddress] = useState("");
+  const [siteEditManagerName, setSiteEditManagerName] = useState("");
+  const [siteEditManagerPhone, setSiteEditManagerPhone] = useState("");
+  const [siteEditError, setSiteEditError] = useState<string | null>(null);
+  const [siteEditLoading, setSiteEditLoading] = useState(false);
 
   // Add form
   const [showAddForm, setShowAddForm] = useState(false);
@@ -61,9 +79,78 @@ export default function ManagementPage() {
     }
   };
 
+  const fetchSites = async () => {
+    try {
+      const res = await fetch("/api/sites", { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: Site[] = await res.json();
+      setSites(data);
+      setSitesError(null);
+    } catch (err) {
+      setSitesError(
+        err instanceof Error ? err.message : "현장 정보를 불러올 수 없습니다"
+      );
+    } finally {
+      setSitesLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchContacts();
+    fetchSites();
   }, []);
+
+  const startSiteEdit = (site: Site) => {
+    setSiteEditId(site.id);
+    setSiteEditAddress(site.address);
+    setSiteEditManagerName(site.managerName);
+    setSiteEditManagerPhone(site.managerPhone);
+    setSiteEditError(null);
+  };
+
+  const cancelSiteEdit = () => {
+    setSiteEditId(null);
+    setSiteEditError(null);
+  };
+
+  const handleSiteEdit = async () => {
+    if (siteEditId === null) return;
+    setSiteEditError(null);
+    if (!siteEditAddress.trim()) {
+      setSiteEditError("주소를 입력하세요");
+      return;
+    }
+    if (!siteEditManagerName.trim()) {
+      setSiteEditError("담당자 이름을 입력하세요");
+      return;
+    }
+    if (!PHONE_REGEX.test(siteEditManagerPhone)) {
+      setSiteEditError("전화번호 형식이 올바르지 않습니다 (예: 010-1234-5678)");
+      return;
+    }
+    setSiteEditLoading(true);
+    try {
+      const res = await fetch(`/api/sites/${siteEditId}`, {
+        method: "PUT",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          address: siteEditAddress.trim(),
+          managerName: siteEditManagerName.trim(),
+          managerPhone: siteEditManagerPhone,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      setSiteEditId(null);
+      await fetchSites();
+    } catch (err) {
+      setSiteEditError(err instanceof Error ? err.message : "수정 실패");
+    } finally {
+      setSiteEditLoading(false);
+    }
+  };
 
   const handleAdd = async () => {
     setAddError(null);
@@ -178,6 +265,96 @@ export default function ManagementPage() {
 
   return (
     <div className="page">
+      {/* Site info section */}
+      <div className="mgmt-header">
+        <h2>현장 정보</h2>
+      </div>
+      {sitesLoading ? (
+        <p className="mgmt-loading">로딩 중...</p>
+      ) : sitesError ? (
+        <p className="mgmt-error">{sitesError}</p>
+      ) : sites.length === 0 ? (
+        <p className="mgmt-empty">등록된 현장 정보가 없습니다</p>
+      ) : (
+        <div className="mgmt-list">
+          {sites.map((site) =>
+            siteEditId === site.id ? (
+              <div key={site.id} className="mgmt-card mgmt-card-editing">
+                <div className="mgmt-form-field">
+                  <label>주소</label>
+                  <input
+                    type="text"
+                    value={siteEditAddress}
+                    onChange={(e) => setSiteEditAddress(e.target.value)}
+                    placeholder="현장 주소"
+                    autoFocus
+                  />
+                </div>
+                <div className="mgmt-form-field">
+                  <label>담당자 이름</label>
+                  <input
+                    type="text"
+                    value={siteEditManagerName}
+                    onChange={(e) => setSiteEditManagerName(e.target.value)}
+                    placeholder="홍길동"
+                  />
+                </div>
+                <div className="mgmt-form-field">
+                  <label>담당자 전화번호</label>
+                  <input
+                    type="tel"
+                    value={siteEditManagerPhone}
+                    onChange={(e) =>
+                      setSiteEditManagerPhone(formatPhoneInput(e.target.value))
+                    }
+                    placeholder="010-1234-5678"
+                    maxLength={13}
+                  />
+                </div>
+                {siteEditError && (
+                  <p className="mgmt-form-error">{siteEditError}</p>
+                )}
+                <div className="mgmt-form-actions">
+                  <button
+                    className="mgmt-btn mgmt-btn-primary"
+                    onClick={handleSiteEdit}
+                    disabled={siteEditLoading}
+                  >
+                    {siteEditLoading ? "저장 중..." : "저장"}
+                  </button>
+                  <button
+                    className="mgmt-btn mgmt-btn-secondary"
+                    onClick={cancelSiteEdit}
+                  >
+                    취소
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div key={site.id} className="mgmt-card">
+                <div className="mgmt-card-info">
+                  <span className="mgmt-card-name">{site.address || "주소 미등록"}</span>
+                  <span className="mgmt-card-phone">
+                    담당자: {site.managerName || "-"} / {site.managerPhone || "-"}
+                  </span>
+                </div>
+                <div className="mgmt-card-actions">
+                  <button
+                    className="mgmt-btn mgmt-btn-small"
+                    onClick={() => startSiteEdit(site)}
+                  >
+                    수정
+                  </button>
+                </div>
+              </div>
+            )
+          )}
+        </div>
+      )}
+
+      <div className="mgmt-section-divider" />
+
+      {/* Contacts section */}
       <div className="mgmt-header">
         <h2>연락처 관리</h2>
         {!showAddForm && (
