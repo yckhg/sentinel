@@ -602,8 +602,8 @@
         "Typecheck passes"
       ],
       "priority": 38,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Go E2E test in tests/e2e-restart/ runs as Docker service with profile 'test'. Tests: admin login → MQTT subscribe safety/site1/cmd/restart → POST /api/equipment/restart → verify MQTT message received with correct payload (deviceId, siteId, reason, requestedBy, timestamp). Full chain completes in ~13ms. Run: docker compose --profile test run --rm e2e-restart"
     }
   ]
 }
