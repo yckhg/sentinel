@@ -57,6 +57,10 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - Service URL env vars: HW_GATEWAY_URL, STREAMING_URL, CCTV_ADAPTER_URL — all default to http://{service}:8080
 - SQLite ORDER BY on datetime columns: always use `datetime(col)` in ORDER BY to handle mixed format storage (ISO 8601 vs space-separated)
 - Frontend tab navigation: React state-based (no router), switch/case in renderPage(). Tabs defined as typed array for consistency
+- nginx.conf proxies: /api/ and /auth/ → web-backend:8080, /ws → web-backend:8080 (WebSocket upgrade), /live/ → streaming:8080
+- HLS playback: hls.js with `Hls.isSupported()` + Safari native fallback; low-latency config for live streams
+- Frontend auth: JWT stored in `localStorage` as `token`, sent via `Authorization: Bearer {token}` header
+- Camera list from GET /api/cameras, polled every 30s; response: `{id, name, location, zone, hlsUrl, status}`
 - CSS: use `env(safe-area-inset-bottom)` for mobile notch/home-bar spacing, `100dvh` for full viewport height
 - Typecheck in Docker: `docker run --rm -v ./services/web-frontend:/app -w /app node:20-alpine sh -c "npm install && npm run typecheck"` (production image has no node)
 
@@ -467,4 +471,22 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - Production nginx image has no node/npm — typecheck via standalone node:20-alpine container with volume mount
   - `100dvh` (dynamic viewport height) works better than `100vh` for mobile (accounts for browser chrome)
   - Tab navigation with React state is simpler than adding react-router for this use case — can add router later if /view/{token} route needs it
+---
+
+## 2026-03-21 - US-026
+- CCTV multi-view with camera switching
+- Added hls.js v1.5.7 dependency for HLS playback (Safari native fallback)
+- Created HLSPlayer component with low-latency config, autoplay, muted playback
+- CCTVPage: fetches camera list from GET /api/cameras with 30s polling interval
+- 2x2 grid layout on mobile, tap/click a camera to expand full-width (hides others)
+- Camera name and zone overlaid on each feed with gradient background
+- Disconnected overlay when stream unavailable or HLS error occurs
+- Updated nginx.conf to proxy /api/, /auth/, /ws, /live/ to backend services
+- Files changed: services/web-frontend/package.json, services/web-frontend/nginx.conf, services/web-frontend/src/pages/CCTVPage.tsx, services/web-frontend/src/components/HLSPlayer.tsx (new), services/web-frontend/src/App.css
+- **Learnings for future iterations:**
+  - nginx.conf must proxy /api/, /auth/, /ws (WebSocket upgrade), /live/ (HLS streams) to respective backend services
+  - HLS.js needs `Hls.isSupported()` check + Safari native fallback via `canPlayType('application/vnd.apple.mpegurl')`
+  - For HLS low-latency: `liveSyncDurationCount: 2` and `liveMaxLatencyDurationCount: 4` keep latency minimal
+  - Camera API returns hlsUrl as internal Docker URL — nginx proxy rewrites /live/ to streaming service transparently
+  - Use `localStorage.getItem('token')` for JWT auth header pattern (to be set by login page later)
 ---
