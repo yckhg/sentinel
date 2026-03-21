@@ -295,8 +295,8 @@
         "Typecheck passes"
       ],
       "priority": 19,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "GET /api/sites and PUT /api/sites/{id}, both admin-only. PUT supports partial updates (address, managerName, managerPhone). Phone validation reuses existing phoneRegex. Follows contacts.go pattern."
     },
     {
       "id": "US-020",

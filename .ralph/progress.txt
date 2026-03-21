@@ -344,3 +344,17 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - Admin check in /api/* handlers: `getAuthUser(r).Role != "admin"` — middleware already validated JWT
   - DELETE returns 204 (no content body) on success, consistent with REST conventions
 ---
+
+## 2026-03-21 - US-019
+- Implemented Site info management API in web-backend
+- Created sites.go with 2 handlers: handleListSites (GET /api/sites), handleUpdateSite (PUT /api/sites/{id})
+- Both endpoints admin-only (role check via getAuthUser)
+- PUT supports partial updates: address, managerName, managerPhone (non-empty fields applied)
+- Phone validation reuses existing phoneRegex from contacts.go
+- Registered routes on apiMux (behind authMiddleware)
+- Files changed: services/web-backend/sites.go (new), services/web-backend/main.go
+- **Learnings for future iterations:**
+  - Sites table already exists from migration 1 — no schema changes needed
+  - Same partial-update pattern as contacts: load existing → apply non-empty fields → save
+  - validatePhone() from contacts.go is package-level, reusable across handlers
+---
