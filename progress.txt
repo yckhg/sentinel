@@ -1,0 +1,25 @@
+# Sentinel — Progress
+
+## 2026-03-21: Project Bootstrap (Iteration 0)
+
+### Completed
+- Project folder structure created (6 services)
+- Root AGENTS.md: architecture, design principles, data model, communication, Ralph Loop workflow
+- Service AGENTS.md files: hw-gateway, cctv-adapter, streaming, notifier, web-backend, web-frontend
+- prd.json: 36 user stories (US-000 ~ US-035), all passes: false
+- docker-compose.yml: skeleton with 6 containers defined
+
+### Design Decisions
+- SQLite for persistence (single mini PC, no need for separate DB container)
+- JWT for temporary links (self-contained, blacklist in memory only)
+- No transcoding anywhere in the pipeline (H.264 cameras -> remux to HLS)
+- MQTT for H/W communication, HTTP for inter-service S/W communication
+- Mobile-first web UI with bottom tab navigation
+
+### Current State
+- All documentation and structure in place
+- No code written yet
+- Next step: US-000 (docker-compose base setup), then Group 1 (API design)
+
+### Learnings
+- First iteration — no prior learnings yet

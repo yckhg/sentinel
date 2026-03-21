@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+vendor/
+__pycache__/
+*.pyc
+
+# Build outputs
+dist/
+build/
+*.o
+*.so
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes (data persisted via Docker volumes, not in repo)
+data/
+
+# SQLite
+*.db
+*.db-journal
+*.db-wal
+
+# Logs
+*.log
+logs/
+
+# HLS segments (generated at runtime)
+*.ts
+*.m3u8

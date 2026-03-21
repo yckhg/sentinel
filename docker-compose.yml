@@ -1,0 +1,65 @@
+# Sentinel — Docker Compose
+# Industrial safety real-time monitoring system
+
+services:
+  hw-gateway:
+    build: ./services/hw-gateway
+    container_name: sentinel-hw-gateway
+    restart: unless-stopped
+    networks:
+      - sentinel-net
+    # ports: internal only
+
+  cctv-adapter:
+    build: ./services/cctv-adapter
+    container_name: sentinel-cctv-adapter
+    restart: unless-stopped
+    networks:
+      - sentinel-net
+    # ports: internal only
+
+  streaming:
+    build: ./services/streaming
+    container_name: sentinel-streaming
+    restart: unless-stopped
+    networks:
+      - sentinel-net
+    # ports: internal only
+
+  notifier:
+    build: ./services/notifier
+    container_name: sentinel-notifier
+    restart: unless-stopped
+    networks:
+      - sentinel-net
+    # ports: internal only
+
+  web-backend:
+    build: ./services/web-backend
+    container_name: sentinel-web-backend
+    restart: unless-stopped
+    volumes:
+      - db-data:/data
+    networks:
+      - sentinel-net
+    # ports: internal only
+
+  web-frontend:
+    build: ./services/web-frontend
+    container_name: sentinel-web-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - sentinel-net
+    depends_on:
+      - web-backend
+      - streaming
+
+networks:
+  sentinel-net:
+    driver: bridge
+
+volumes:
+  db-data:

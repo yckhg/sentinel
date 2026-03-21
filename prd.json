@@ -1,0 +1,306 @@
+{
+  "project": "sentinel",
+  "description": "Industrial safety real-time monitoring system",
+  "groups": [
+    {
+      "id": 0,
+      "name": "Foundation",
+      "stories": [
+        {
+          "id": "US-000",
+          "title": "Project folder structure and docker-compose base setup",
+          "description": "Create the project directory structure with all service folders, AGENTS.md files, and a base docker-compose.yml defining all 6 containers with networking.",
+          "acceptance": "All service directories exist. docker-compose.yml defines hw-gateway, cctv-adapter, streaming, notifier, web-backend, web-frontend containers on a shared network.",
+          "passes": false
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "name": "API Design",
+      "stories": [
+        {
+          "id": "US-001",
+          "title": "REST API spec document (web-backend)",
+          "description": "Create a complete REST API specification for web-backend covering all endpoints: auth, contacts, sites, cameras, incidents, links, equipment, alarms.",
+          "acceptance": "API spec document exists with all endpoints, request/response schemas, and status codes defined.",
+          "passes": false
+        },
+        {
+          "id": "US-002",
+          "title": "WebSocket event spec document",
+          "description": "Define WebSocket event types, payload schemas, and connection lifecycle for real-time client communication.",
+          "acceptance": "WebSocket spec document exists with event types (crisis alert, equipment status change, system alarm) and payload schemas.",
+          "passes": false
+        },
+        {
+          "id": "US-003",
+          "title": "MQTT topic spec document (hw-gateway)",
+          "description": "Define MQTT topic structure, message payloads, and QoS levels for H/W communication.",
+          "acceptance": "MQTT spec document exists covering safety/{siteId}/alert, heartbeat, cmd/restart topics with payload schemas.",
+          "passes": false
+        },
+        {
+          "id": "US-004",
+          "title": "Inter-service HTTP API spec document",
+          "description": "Define internal HTTP APIs between S/W services: hw-gateway<->notifier, hw-gateway<->web-backend, notifier<->web-backend, streaming<->web-backend.",
+          "acceptance": "Internal API spec document exists with all service-to-service endpoints, payloads, and error responses.",
+          "passes": false
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "H/W Gateway",
+      "stories": [
+        {
+          "id": "US-005",
+          "title": "MQTT client: crisis signal and heartbeat subscription",
+          "description": "Implement MQTT client that subscribes to alert and heartbeat topics, parses messages, and forwards crisis events to notifier and web-backend via HTTP.",
+          "acceptance": "hw-gateway connects to MQTT broker, receives alert messages, and successfully forwards to notifier and web-backend.",
+          "passes": false
+        },
+        {
+          "id": "US-006",
+          "title": "Restart command MQTT publish",
+          "description": "Implement HTTP endpoint that receives restart commands from web-backend and publishes them to MQTT.",
+          "acceptance": "POST /api/restart receives command and publishes to safety/{siteId}/cmd/restart topic.",
+          "passes": false
+        },
+        {
+          "id": "US-007",
+          "title": "Heartbeat equipment status in-memory management",
+          "description": "Track equipment alive/dead status based on heartbeat messages. Expose status via HTTP GET endpoint.",
+          "acceptance": "Equipment status reflects last heartbeat. Devices marked dead after configurable timeout. GET /api/equipment/status returns current state.",
+          "passes": false
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "CCTV Pipeline",
+      "stories": [
+        {
+          "id": "US-008",
+          "title": "CCTV adapter single camera connection",
+          "description": "Connect to a single CCTV camera via RTSP and forward the raw H.264 stream to the streaming server without transcoding.",
+          "acceptance": "cctv-adapter connects to one camera via RTSP and streams to streaming server. No transcoding occurs.",
+          "passes": false
+        },
+        {
+          "id": "US-009",
+          "title": "Multi-camera stream management",
+          "description": "Manage multiple simultaneous camera connections with health monitoring and disconnect/reconnect handling.",
+          "acceptance": "Multiple cameras stream simultaneously. Disconnected cameras show status. Reconnection is automatic.",
+          "passes": false
+        },
+        {
+          "id": "US-010",
+          "title": "Streaming server HLS serving",
+          "description": "Receive H.264 streams and serve as HLS (remux only). Provide stream URL list API.",
+          "acceptance": "HLS streams available at /live/{cameraId}/index.m3u8. GET /api/streams returns URL list. No transcoding.",
+          "passes": false
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "Notifier",
+      "stories": [
+        {
+          "id": "US-011",
+          "title": "KakaoTalk API integration",
+          "description": "Integrate with KakaoTalk API to send crisis notification messages including site info and temporary CCTV link.",
+          "acceptance": "Crisis event triggers KakaoTalk message to all contacts with correct content.",
+          "passes": false
+        },
+        {
+          "id": "US-012",
+          "title": "SMS fallback logic",
+          "description": "When KakaoTalk fails, retry via SMS. When both fail, send system alarm to web-backend.",
+          "acceptance": "KakaoTalk failure triggers SMS. SMS failure triggers web alarm. All attempts logged.",
+          "passes": false
+        },
+        {
+          "id": "US-013",
+          "title": "Temporary link request and message inclusion",
+          "description": "Request temporary CCTV link from web-backend and include it in notification messages.",
+          "acceptance": "Notification messages contain a valid temporary link. Link works for 24h CCTV access.",
+          "passes": false
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "Web Backend",
+      "stories": [
+        {
+          "id": "US-014",
+          "title": "SQLite schema initialization and migration",
+          "description": "Initialize SQLite database with contacts, cameras, sites, incidents tables. Support schema migration.",
+          "acceptance": "Database created on first run with correct schema. Migration mechanism in place.",
+          "passes": false
+        },
+        {
+          "id": "US-015",
+          "title": "Authentication: login, sign-up, admin approval",
+          "description": "Implement JWT-based auth with login, registration (pending approval), and admin approval endpoints.",
+          "acceptance": "Users can register, admin can approve. Login returns JWT. Unapproved users cannot access protected endpoints.",
+          "passes": false
+        },
+        {
+          "id": "US-016",
+          "title": "Contacts CRUD API",
+          "description": "Full CRUD for notification target contacts (name, phone).",
+          "acceptance": "GET/POST/PUT/DELETE /api/contacts work correctly with validation.",
+          "passes": false
+        },
+        {
+          "id": "US-017",
+          "title": "Site info management API",
+          "description": "API for managing site information (address, manager name, manager phone).",
+          "acceptance": "GET/PUT /api/sites work correctly.",
+          "passes": false
+        },
+        {
+          "id": "US-018",
+          "title": "Temporary link create/verify/revoke",
+          "description": "Generate JWT-based temporary CCTV links (24h), verify tokens, and support forced revocation via in-memory blacklist.",
+          "acceptance": "POST creates link. GET verifies. DELETE revokes. Expired/revoked links rejected.",
+          "passes": false
+        },
+        {
+          "id": "US-019",
+          "title": "Crisis WebSocket push",
+          "description": "On crisis event from hw-gateway, broadcast alert to all connected WebSocket clients.",
+          "acceptance": "Crisis event triggers real-time push to all connected clients.",
+          "passes": false
+        },
+        {
+          "id": "US-020",
+          "title": "Restart command API (forward to hw-gateway)",
+          "description": "REST endpoint that receives restart command and forwards to hw-gateway via HTTP.",
+          "acceptance": "POST /api/equipment/restart forwards to hw-gateway and returns result.",
+          "passes": false
+        },
+        {
+          "id": "US-021",
+          "title": "Camera list and HLS URL API",
+          "description": "Provide camera list from DB and fetch HLS URLs from streaming service.",
+          "acceptance": "GET /api/cameras returns camera info with HLS stream URLs.",
+          "passes": false
+        },
+        {
+          "id": "US-022",
+          "title": "Incident history API",
+          "description": "Query incident history with pagination.",
+          "acceptance": "GET /api/incidents returns paginated incident list with filters.",
+          "passes": false
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "Web Frontend",
+      "stories": [
+        {
+          "id": "US-023",
+          "title": "Bottom tab bar layout (mobile)",
+          "description": "Mobile-first bottom tab navigation with CCTV, Incidents, Management, Settings tabs.",
+          "acceptance": "Tab bar renders on mobile. Tabs switch content. Active tab highlighted.",
+          "passes": false
+        },
+        {
+          "id": "US-024",
+          "title": "CCTV multi-view + camera switching",
+          "description": "Grid view of multiple camera HLS streams. Tap to enlarge. Camera switching.",
+          "acceptance": "Multiple cameras display in grid. Tap enlarges to full. HLS playback works.",
+          "passes": false
+        },
+        {
+          "id": "US-025",
+          "title": "Crisis alert banner (WebSocket)",
+          "description": "Real-time crisis alert banner via WebSocket connection to web-backend.",
+          "acceptance": "Crisis event shows persistent banner with details. Dismissible.",
+          "passes": false
+        },
+        {
+          "id": "US-026",
+          "title": "Contact management UI",
+          "description": "CRUD interface for notification target contacts.",
+          "acceptance": "List, add, edit, delete contacts. Phone number validation.",
+          "passes": false
+        },
+        {
+          "id": "US-027",
+          "title": "Site info management UI",
+          "description": "View and edit site information (address, manager).",
+          "acceptance": "Display and edit site info. Save persists to backend.",
+          "passes": false
+        },
+        {
+          "id": "US-028",
+          "title": "Temporary link create/manage UI",
+          "description": "Create temporary CCTV links and manage (view, revoke) existing ones.",
+          "acceptance": "Create link shows copyable URL. List shows active links. Revoke works.",
+          "passes": false
+        },
+        {
+          "id": "US-029",
+          "title": "Account management UI (admin only)",
+          "description": "Admin interface to view pending registrations and approve/reject users.",
+          "acceptance": "Admin sees pending users. Approve/reject buttons work. Non-admins cannot access.",
+          "passes": false
+        },
+        {
+          "id": "US-030",
+          "title": "Equipment restart button (2-step confirmation)",
+          "description": "Restart button with 2-step confirmation dialog to prevent accidental restarts.",
+          "acceptance": "First click shows confirmation. Second click sends restart. Cancel aborts.",
+          "passes": false
+        },
+        {
+          "id": "US-031",
+          "title": "119 emergency call button with location",
+          "description": "Emergency call button that uses browser Geolocation API and initiates 119 call.",
+          "acceptance": "Button requests location permission. Shows confirmation with address. Initiates tel:119 call.",
+          "passes": false
+        },
+        {
+          "id": "US-032",
+          "title": "Viewer-only page /view/{token}",
+          "description": "Minimal CCTV viewer page accessible via temporary JWT link. No login required.",
+          "acceptance": "Valid token shows CCTV player. Expired/invalid token shows error. No navigation or management UI.",
+          "passes": false
+        },
+        {
+          "id": "US-033",
+          "title": "Incident history page",
+          "description": "List of past crisis incidents with timestamps and confirmation details.",
+          "acceptance": "Paginated incident list displays. Shows occurred_at, confirmed_at, confirmed_by.",
+          "passes": false
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "name": "Integration Verification",
+      "stories": [
+        {
+          "id": "US-034",
+          "title": "Crisis E2E: Mock H/W -> SMS receipt",
+          "description": "End-to-end test: mock H/W publishes MQTT alert -> hw-gateway -> notifier -> SMS delivery confirmed.",
+          "acceptance": "Mock MQTT message triggers full chain. SMS (or mock) received with correct content and temp link.",
+          "passes": false
+        },
+        {
+          "id": "US-035",
+          "title": "Restart E2E: Web button -> MQTT -> H/W mock receipt",
+          "description": "End-to-end test: web restart button -> web-backend -> hw-gateway -> MQTT publish -> mock H/W receives.",
+          "acceptance": "Web button click triggers MQTT publish. Mock H/W subscriber receives restart command.",
+          "passes": false
+        }
+      ]
+    }
+  ]
+}
