@@ -1,5 +1,6 @@
 import { useState, useCallback } from "react";
 import useWebSocket from "../hooks/useWebSocket";
+import EmergencyCallButton from "./EmergencyCallButton";
 
 interface CrisisAlert {
   id: string;
@@ -48,13 +49,16 @@ export default function CrisisAlertBanner() {
               <span className="crisis-banner-desc">{alert.description}</span>
             </div>
           </div>
-          <button
-            className="crisis-banner-close"
-            onClick={() => dismiss(alert.id)}
-            aria-label="닫기"
-          >
-            ✕
-          </button>
+          <div className="crisis-banner-actions">
+            <EmergencyCallButton compact />
+            <button
+              className="crisis-banner-close"
+              onClick={() => dismiss(alert.id)}
+              aria-label="닫기"
+            >
+              ✕
+            </button>
+          </div>
         </div>
       ))}
     </div>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import HLSPlayer from "../components/HLSPlayer";
 import RestartDialog from "../components/RestartDialog";
+import EmergencyCallButton from "../components/EmergencyCallButton";
 
 interface Camera {
   id: number;
@@ -92,7 +93,10 @@ export default function CCTVPage() {
 
   return (
     <div className="page">
-      <h2>CCTV</h2>
+      <div className="cctv-header">
+        <h2>CCTV</h2>
+        <EmergencyCallButton />
+      </div>
       <div className={`camera-grid${expandedId !== null ? " has-expanded" : ""}`}>
         {cameras.map((cam) => (
           <HLSPlayer
