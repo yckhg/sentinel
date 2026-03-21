@@ -327,8 +327,8 @@
         "Typecheck passes"
       ],
       "priority": 21,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "WebSocket hub with gorilla/websocket v1.5.3. JWT auth via ?token= query param (supports both user JWT and temp link JWT). POST /api/incidents on main mux (internal, no auth). Broadcasts crisis_alert to all connected clients. Ping/pong keepalive (30s interval). Per-client send buffer with graceful disconnect."
     },
     {
       "id": "US-022",
