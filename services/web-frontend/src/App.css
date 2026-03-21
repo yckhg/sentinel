@@ -72,6 +72,97 @@ body {
   font-weight: 500;
 }
 
+/* CCTV Page */
+.cctv-loading,
+.cctv-error,
+.cctv-empty {
+  text-align: center;
+  padding: 2rem 1rem;
+  color: #666;
+}
+
+.cctv-error {
+  color: #d32f2f;
+}
+
+.camera-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.camera-cell {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 4px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.camera-cell.expanded {
+  grid-column: 1 / -1;
+  aspect-ratio: 16 / 9;
+}
+
+.camera-grid.has-expanded .camera-cell:not(.expanded) {
+  display: none;
+}
+
+.camera-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.camera-overlay {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 4px 6px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.7));
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;
+}
+
+.camera-name {
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.camera-zone {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.6rem;
+  line-height: 1.2;
+}
+
+.camera-disconnected {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #ff9800;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.disconnected-icon {
+  font-size: 1.5rem;
+}
+
+.camera-disconnected span:last-child {
+  font-size: 0.75rem;
+}
+
 /* Desktop: wider layout */
 @media (min-width: 768px) {
   .content {
