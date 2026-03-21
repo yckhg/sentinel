@@ -53,6 +53,8 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - WebSocket broadcast filtering: nil filter = all clients, function filter for role-based (e.g., admin-only for system_alarm)
 - POST /api/incidents registered on main mux (not apiMux) — internal service call from hw-gateway, no JWT auth required
 - web-backend forwards equipment restart to hw-gateway via HW_GATEWAY_URL env var (default http://hw-gateway:8080)
+- web-backend aggregates data from streaming + cctv-adapter + DB to serve public /api/cameras; uses 10s TTL cache for internal service responses
+- Service URL env vars: HW_GATEWAY_URL, STREAMING_URL, CCTV_ADAPTER_URL — all default to http://{service}:8080
 
 ---
 
@@ -417,4 +419,20 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - web-backend needs HW_GATEWAY_URL env var to forward requests to hw-gateway (default http://hw-gateway:8080)
   - Equipment restart is accessible to any authenticated user (not admin-only) per AC
   - Forward pattern: proxy HTTP response status code and body from upstream service back to client
+---
+
+## 2026-03-21 - US-023
+- Implemented GET /api/cameras in web-backend (cameras.go)
+- Queries cameras from DB, enriches with HLS URLs from streaming service and connection status from cctv-adapter
+- 10s TTL cache (streamCache with sync.RWMutex) for streaming /api/streams and cctv-adapter /api/cameras/status responses
+- Camera matching: DB camera name used as cameraId key for merging with streaming/adapter data
+- Defaults to "disconnected" status when camera not found in adapter response
+- HLS URL constructed as full URL: streamingURL + relative hlsUrl from streaming API
+- Added STREAMING_URL and CCTV_ADAPTER_URL env vars to docker-compose.yml
+- Files changed: services/web-backend/cameras.go (new), services/web-backend/main.go, docker-compose.yml
+- **Learnings for future iterations:**
+  - web-backend aggregates data from streaming + cctv-adapter + DB to serve public /api/cameras
+  - Internal HTTP timeouts: 5s for service-to-service calls in camera handler
+  - Cache pattern: sync.RWMutex with TTL check on read, refresh on miss — simple and effective
+  - Camera name in DB is the join key to cameraId in streaming/adapter configs
 ---

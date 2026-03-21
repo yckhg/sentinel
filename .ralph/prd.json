@@ -357,8 +357,8 @@
         "Typecheck passes"
       ],
       "priority": 23,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "GET /api/cameras on apiMux (any authenticated user). Fetches cameras from DB, enriches with HLS URLs from streaming GET /api/streams and status from cctv-adapter GET /api/cameras/status. 10s TTL cache for internal service responses. STREAMING_URL and CCTV_ADAPTER_URL env vars added to docker-compose."
     },
     {
       "id": "US-024",
