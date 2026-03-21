@@ -55,6 +55,7 @@ services:
     restart: unless-stopped
     environment:
       - WEB_BACKEND_URL=http://web-backend:8080
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3080}
       - KAKAO_API_URL=${KAKAO_API_URL:-}
       - KAKAO_API_KEY=${KAKAO_API_KEY:-}
       - KAKAO_SENDER_KEY=${KAKAO_SENDER_KEY:-}

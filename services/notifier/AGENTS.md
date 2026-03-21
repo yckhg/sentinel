@@ -52,7 +52,8 @@ Crisis propagation service. Sends KakaoTalk/SMS notifications on crisis events w
 - If KAKAO_API_URL or KAKAO_API_KEY env vars are empty, KakaoTalk sending is skipped (logged as not configured)
 - Temp link failure triggers degraded mode: notification sent without CCTV link
 - Contact fetch failure aborts the entire notification for that event (no contacts = nothing to send)
-- Config env vars: WEB_BACKEND_URL, KAKAO_API_URL, KAKAO_API_KEY, KAKAO_SENDER_KEY, KAKAO_TEMPLATE_CODE, NHN_SMS_APP_KEY, NHN_SMS_SECRET_KEY, NHN_SMS_SENDER_NO
+- Config env vars: WEB_BACKEND_URL, FRONTEND_URL, KAKAO_API_URL, KAKAO_API_KEY, KAKAO_SENDER_KEY, KAKAO_TEMPLATE_CODE, NHN_SMS_APP_KEY, NHN_SMS_SECRET_KEY, NHN_SMS_SENDER_NO
+- FRONTEND_URL is used to construct temporary CCTV link URLs: `{FRONTEND_URL}/view/{token}` — notifier builds the full URL from the token, not from web-backend's response URL field
 - SMS fallback uses NHN Cloud SMS API v3.0: `https://api-sms.cloud.toast.com/sms/v3.0/appKeys/{appKey}/sender/sms`
 - NHN Cloud SMS uses X-Secret-Key header for authentication
 - Fallback chain is per-contact and independent: KakaoTalk → SMS → web-backend system alarm (POST /api/alarms)

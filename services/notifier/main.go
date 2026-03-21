@@ -77,6 +77,7 @@ type AlarmPayload struct {
 
 type Config struct {
 	WebBackendURL     string
+	FrontendURL       string
 	KakaoAPIURL       string
 	KakaoAPIKey       string
 	KakaoSenderKey    string
@@ -89,6 +90,7 @@ type Config struct {
 func loadConfig() Config {
 	return Config{
 		WebBackendURL:     getEnv("WEB_BACKEND_URL", "http://web-backend:8080"),
+		FrontendURL:       getEnv("FRONTEND_URL", "http://localhost:3080"),
 		KakaoAPIURL:       getEnv("KAKAO_API_URL", ""),
 		KakaoAPIKey:       getEnv("KAKAO_API_KEY", ""),
 		KakaoSenderKey:    getEnv("KAKAO_SENDER_KEY", ""),
@@ -321,8 +323,9 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 	if err != nil {
 		log.Printf("[notify] Failed to get temp link (degraded mode): %v", err)
 	} else {
-		cctvLink = tempLink.URL
-		log.Printf("[notify] Temp CCTV link created: %s (expires %s)", tempLink.URL, tempLink.ExpiresAt)
+		// Construct full URL pointing to /view/{token} on web-frontend
+		cctvLink = fmt.Sprintf("%s/view/%s", cfg.FrontendURL, tempLink.Token)
+		log.Printf("[notify] Temp CCTV link created: %s (expires %s)", cctvLink, tempLink.ExpiresAt)
 	}
 
 	// 3. Send to all contacts in parallel with fallback chain: KakaoTalk → SMS → Web alarm
@@ -452,8 +455,8 @@ func main() {
 
 	mux.HandleFunc("POST /api/notify", handleNotify(cfg))
 
-	log.Printf("notifier listening on :8080 (kakao configured: %v, sms configured: %v)",
-		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "")
+	log.Printf("notifier listening on :8080 (kakao configured: %v, sms configured: %v, frontend: %s)",
+		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "", cfg.FrontendURL)
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatal(err)
 	}
