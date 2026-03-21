@@ -1,0 +1,270 @@
+# Ralph Progress Log
+Started: Sat Mar 21 17:34:12 KST 2026
+---
+
+## Codebase Patterns
+- Go services use `net/http` stdlib with `http.NewServeMux()` and Go 1.22 enhanced routing (e.g., `GET /path`)
+- All Go services listen on `:8080` internally, exposed via Docker networking only
+- Frontend: Vite + React + TypeScript, built to static files served by nginx
+- web-frontend exposed on port 3080 (host port 80 taken by gateway)
+- Each service has `/healthz` endpoint for health checks
+- Multi-stage Docker builds: Go uses `golang:1.22-alpine` builder + `alpine:3.19` runtime; Frontend uses `node:20-alpine` builder + `nginx:alpine` runtime
+- `.gitignore` note: removed `*.ts` wildcard (was blocking TypeScript files) — HLS segments only exist inside containers at runtime
+- REST API: auth endpoints at `/auth/*` (public), protected endpoints at `/api/*` (JWT required)
+- Internal service-to-service calls use Docker network isolation, not JWT auth
+- JSON payloads use camelCase; DB columns use snake_case
+- Pagination pattern: `page` + `limit` query params, response includes `{data: [], pagination: {page, limit, total}}`
+- MQTT QoS: alerts=2 (exactly once), heartbeats=0 (at most once), commands=1 (at least once)
+- hw-gateway is the sole MQTT client; subscribes `safety/+/alert` and `safety/+/heartbeat`, publishes to specific `safety/{siteId}/cmd/restart`
+- Heartbeats processed locally in hw-gateway memory only — not forwarded to other services
+- In-memory concurrent state uses `sync.RWMutex` + map; return copies (not pointers) from HTTP handlers to avoid races
+- Configurable timeouts via env vars with sensible defaults (e.g., `HEARTBEAT_TIMEOUT_SEC` default 30)
+- cctv-adapter uses FFmpeg subprocesses for RTSP→RTMP stream forwarding (`-c copy -f flv`)
+- Camera config is a JSON file mounted into container at `/config/cameras.json`
+- RTMP push to streaming server at `rtmp://streaming:1935/live/{cameraId}`
+- Docker images needing external tools (FFmpeg) use `apk add --no-cache` in runtime stage
+- web-backend aggregates data from streaming + cctv-adapter + DB to serve public /api/cameras
+- Internal HTTP timeouts: 3s connect, 5s read, 10s total
+- hw-gateway forwards alerts to notifier and web-backend in parallel; failures are independent
+- notifier POST /api/notify returns 200 immediately (async dispatch); KakaoTalk credentials via KAKAO_API_URL/KEY/SENDER_KEY env vars; NHN SMS via NHN_SMS_APP_KEY/SECRET_KEY/SENDER_NO
+- Notification fallback chain per-contact: KakaoTalk → NHN Cloud SMS → web-backend system alarm (POST /api/alarms). Empty env vars = channel not configured (skip gracefully)
+- streaming service is a hybrid container: nginx-rtmp (RTMP→HLS) + Go API (healthz/streams). nginx proxies API to Go on :8081
+- HLS files at `/tmp/hls/{cameraId}/index.m3u8` via `hls_nested on`; served at `/live/{cameraId}/index.m3u8`
+- Notifier constructs temp link URLs itself using FRONTEND_URL env var + `/view/{token}` — web-backend returns the token, notifier builds the public URL
+- SQLite via `modernc.org/sqlite` v1.34.5 (pure Go, no CGO) — latest versions require Go 1.25+, pin to v1.34.x for Go 1.22
+- SQLite pragmas: WAL mode, busy_timeout=5000, foreign_keys=ON
+- Migration mechanism: `_migrations` table tracks applied versions; each migration is a numbered struct with SQL; runs in transaction
+- DB path configurable via `DB_PATH` env var (default `/data/sentinel.db`)
+
+---
+
+## 2026-03-21 - US-001
+- Docker Compose base setup with all 6 services
+- Created Dockerfiles and minimal source code for: hw-gateway, cctv-adapter, streaming, notifier, web-backend (Go), web-frontend (React+TS+Vite)
+- All services compile, build as Docker images, and start successfully
+- Fixed `.gitignore` *.ts pattern that would block TypeScript files
+- Changed web-frontend port from 80 to 3080 (port 80 already used by gateway)
+- Files changed: .gitignore, docker-compose.yml, services/*/Dockerfile, services/*/main.go, services/*/go.mod, services/web-frontend/*
+- **Learnings for future iterations:**
+  - Port 80 is taken on this host by the gateway project — use 3080 for sentinel web-frontend
+  - Go 1.22 enhanced routing patterns work well for this project
+  - TypeScript and HLS .ts segments share the same extension — be careful with gitignore
+---
+
+## 2026-03-21 - US-002
+- Created REST API spec document at docs/api-rest.md
+- Covers all 8 endpoint groups: auth, contacts, sites, cameras, incidents, links, equipment, alarms
+- Each endpoint documents: method, path, request body schema, response schema, status codes, auth requirements
+- Established conventions: camelCase JSON fields, snake_case DB columns, ISO 8601 timestamps, page+limit pagination
+- Files changed: docs/api-rest.md
+- **Learnings for future iterations:**
+  - Auth endpoints live under `/auth/*` (no JWT), protected endpoints under `/api/*` (JWT required)
+  - Internal service-to-service calls (hw-gateway→web-backend, notifier→web-backend) rely on Docker network isolation, not JWT
+  - POST /api/incidents and POST /api/alarms have WebSocket broadcast side effects
+  - Temporary link IDs use UUID, all other IDs are auto-increment integers
+---
+
+## 2026-03-21 - US-003
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Created WebSocket event spec document at docs/api-websocket.md
+- Defines 3 event types: crisis_alert, equipment_status, system_alarm with full payload schemas and examples
+- Defines connection lifecycle: connect (JWT via query param), heartbeat (ping/pong), reconnect (exponential backoff), disconnect (close codes)
+- Event delivery matrix by role (admin/user/temp viewer)
+- Includes JavaScript client implementation example
+- Files changed: docs/api-websocket.md
+- **Learnings for future iterations:**
+  - WebSocket auth uses JWT as query parameter (`?token=<JWT>`), not header (WebSocket API doesn't support custom headers)
+  - Temp viewers receive only crisis_alert events; system_alarm is admin-only
+  - equipment_status events fire on status *change* only, not every heartbeat
+  - Close code 1008 (Policy violation) used for token expiration mid-session
+---
+
+## 2026-03-21 - US-004
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Created MQTT topic spec document at docs/api-mqtt.md
+- Covers all 3 topics: safety/{siteId}/alert (QoS 2), safety/{siteId}/heartbeat (QoS 0), safety/{siteId}/cmd/restart (QoS 1)
+- Each topic has: direction, QoS level, payload schema with examples, publish frequency, hw-gateway actions
+- Includes QoS rationale, topic naming convention, error handling matrix
+- Files changed: docs/api-mqtt.md
+- **Learnings for future iterations:**
+  - Alert uses QoS 2 (exactly once) — safety-critical, cannot lose or duplicate
+  - Heartbeat uses QoS 0 — high frequency, loss acceptable (timeout-based detection)
+  - Restart uses QoS 1 — must deliver, duplicate is safe (idempotent)
+  - hw-gateway subscribes with `+` wildcard for siteId, publishes with specific siteId
+  - Heartbeat is processed locally in hw-gateway memory only, not forwarded to other services
+---
+
+## 2026-03-21 - US-005
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Created inter-service HTTP API spec document at docs/api-internal.md
+- Covers 8 internal endpoints across all service-to-service communication paths
+- Includes: hw-gateway→notifier, hw-gateway→web-backend, notifier→web-backend (3 endpoints), web-backend→hw-gateway, web-backend→streaming, web-backend→cctv-adapter
+- Also documents hw-gateway equipment status endpoint (GET /api/equipment/status)
+- Includes error handling conventions, retry policies per caller, and timeout configuration
+- Files changed: docs/api-internal.md
+- **Learnings for future iterations:**
+  - web-backend acts as an aggregator — merges data from streaming (/api/streams) and cctv-adapter (/api/cameras/status) with DB records for the public /api/cameras endpoint
+  - notifier→web-backend has 3 call paths: GET contacts, POST temp link, POST alarms — each with different failure handling
+  - Internal calls use 3s connect / 5s read / 10s total timeouts
+  - hw-gateway forwards to notifier and web-backend in parallel on alert; notifier failure does not block incident creation
+  - MQTT library: github.com/eclipse/paho.mqtt.golang v1.5.0 — handles auto-reconnect natively via SetAutoReconnect + SetOnConnectHandler for re-subscribing
+  - mosquitto broker added to docker-compose (eclipse-mosquitto:2) with no-auth config
+  - Dockerfile uses `go mod tidy` in builder stage to resolve dependencies (no go.sum committed)
+---
+
+## 2026-03-21 - US-006
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Implemented MQTT client in hw-gateway with paho.mqtt.golang
+- Subscribes to safety/+/alert (QoS 2) and safety/+/heartbeat (QoS 0)
+- On alert: parses JSON, forwards to notifier POST /api/notify and web-backend POST /api/incidents in parallel
+- On heartbeat: parses and logs (in-memory tracking deferred to US-008)
+- Auto-reconnect with exponential backoff (1s→60s max), re-subscribes on reconnect
+- Web-backend forwarding retries once after 1s on failure
+- Added mosquitto (eclipse-mosquitto:2) to docker-compose.yml with env vars for hw-gateway
+- Updated Dockerfile to run `go mod tidy` for dependency resolution
+- Files changed: services/hw-gateway/main.go, services/hw-gateway/go.mod, services/hw-gateway/Dockerfile, docker-compose.yml
+- **Learnings for future iterations:**
+  - paho.mqtt.golang SetOnConnectHandler fires on every (re)connect — use it to re-subscribe topics
+  - mosquitto:2 image needs `mosquitto -c /mosquitto-no-auth.conf` command for anonymous access
+  - go.sum not committed; `go mod tidy` in Dockerfile builder stage generates it at build time
+  - Alert forwarding payload differs: notifier gets full alert fields, web-backend gets {siteId, description, occurredAt}
+---
+
+## 2026-03-21 - US-007
+- Implemented POST /api/restart endpoint in hw-gateway
+- Receives {siteId, deviceId, requestedBy, reason} from web-backend
+- Validates required fields (siteId, deviceId), checks MQTT broker connection
+- Publishes restart command to safety/{siteId}/cmd/restart with QoS 1
+- Returns {status: "sent", topic: "..."} on success, appropriate error codes on failure (400/503/500)
+- Files changed: services/hw-gateway/main.go
+- **Learnings for future iterations:**
+  - mqttClient.IsConnected() can be used to check broker status before publishing
+  - MQTT Publish with QoS 1 requires token.Wait() to confirm delivery
+  - The mqttClient variable needs to be passed to HTTP handlers via closure (created in main())
+---
+
+## 2026-03-21 - US-008
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Implemented in-memory equipment status tracking in hw-gateway
+- `equipmentStore` uses `sync.RWMutex` + `map[string]*DeviceStatus` keyed by `siteId:deviceId`
+- `handleHeartbeat` now updates device status on every heartbeat message
+- Background `heartbeatChecker` goroutine runs every 5s, marks devices as dead if no heartbeat within timeout
+- `GET /api/equipment/status` returns all device statuses as JSON array
+- Heartbeat timeout configurable via `HEARTBEAT_TIMEOUT_SEC` env var (default 30s)
+- Files changed: services/hw-gateway/main.go
+- **Learnings for future iterations:**
+  - Use `sync.RWMutex` for concurrent map access in Go — RLock for reads, Lock for writes
+  - DeviceStatus struct has exported JSON fields + unexported `lastSeen` (time.Time) for internal timeout calculation
+  - Equipment status endpoint returns a copy of data (not pointers) to avoid race conditions
+  - Heartbeat also extracts siteId from MQTT topic (same pattern as alert handler) for consistency
+---
+
+## 2026-03-21 - US-009
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Implemented CCTV adapter with FFmpeg-based RTSP→RTMP stream forwarding
+- Camera config loaded from JSON file (configurable via CAMERAS_CONFIG_PATH env var)
+- Each camera managed by independent FFmpeg subprocess: `ffmpeg -rtsp_transport tcp -i {rtspUrl} -c copy -f flv rtmp://streaming:1935/live/{cameraId}`
+- Per-camera health status tracking (connected/disconnected/reconnecting) with thread-safe state
+- Auto-reconnect with exponential backoff (1s→30s max) on FFmpeg process exit
+- GET /api/cameras/status returns JSON array matching internal API spec
+- Dockerfile updated: alpine + ffmpeg for runtime, config dir created
+- docker-compose.yml: added env vars, volume mount for cameras.json, depends_on streaming
+- Created config/cameras.json with example camera entries and cameras.example.json reference
+- Updated AGENTS.md with implementation details
+- Files changed: services/cctv-adapter/main.go, services/cctv-adapter/Dockerfile, services/cctv-adapter/cameras.example.json, services/cctv-adapter/AGENTS.md, config/cameras.json, docker-compose.yml
+- **Learnings for future iterations:**
+  - FFmpeg `-c copy -f flv` is the simplest way to forward RTSP to RTMP without transcoding
+  - FFmpeg process start != RTSP connection success — process starts immediately, RTSP handshake happens asynchronously
+  - Camera config is bind-mounted from host `./config/cameras.json` — changes require container restart
+  - cctv-adapter depends on streaming service (needs RTMP endpoint) — use depends_on in compose
+  - `go mod download` in Dockerfile builder works even with no dependencies (just logs "no module dependencies")
+---
+
+## 2026-03-21 - US-010
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Implemented streaming server with nginx-rtmp for RTMP→HLS conversion + Go API for /healthz and /api/streams
+- Hybrid container: nginx-rtmp handles RTMP input (:1935) and serves HLS files (:8080); Go binary serves API (:8081) proxied through nginx
+- nginx-rtmp config: 2s fragment, 10s playlist, hls_nested on (per-camera subdirs), hls_cleanup on
+- Go /api/streams scans /tmp/hls for directories with index.m3u8, considers stream "active" if modified within 15s
+- entrypoint.sh starts Go binary in background, nginx in foreground
+- Docker image: multi-stage (Go builder + alpine:3.19 with nginx + nginx-mod-rtmp)
+- Files changed: services/streaming/main.go, services/streaming/Dockerfile, services/streaming/nginx.conf, services/streaming/entrypoint.sh, services/streaming/AGENTS.md
+- **Learnings for future iterations:**
+  - alpine:3.19 has `nginx-mod-rtmp` package available via apk — no need to build nginx from source
+  - `hls_nested on` creates subdirectories per stream key, matching the `/live/{cameraId}/index.m3u8` URL pattern
+  - nginx-rtmp `hls_cleanup on` automatically removes old .ts segments — no custom cleanup needed
+  - Two-process container (nginx + Go) works well with simple entrypoint.sh: Go in background, nginx in foreground
+  - `/run/nginx` directory must be created in Dockerfile for nginx PID file
+  - `load_module modules/ngx_rtmp_module.so;` must be at the top of nginx.conf
+---
+
+## 2026-03-21 - US-011
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Implemented KakaoTalk 알림톡 API integration in notifier service
+- POST /api/notify endpoint receives crisis alert from hw-gateway, returns 200 immediately (async dispatch)
+- Fetches contacts from web-backend GET /api/contacts
+- Requests temporary CCTV link from web-backend POST /api/links/temp (degraded mode if fails)
+- Sends KakaoTalk 알림톡 to all contacts in parallel using goroutines
+- Logs success/failure per contact with channel info
+- KakaoTalk API credentials configurable via env vars (KAKAO_API_URL, KAKAO_API_KEY, KAKAO_SENDER_KEY, KAKAO_TEMPLATE_CODE)
+- If KakaoTalk API is not configured, sends are skipped with log message (graceful degradation)
+- Updated docker-compose.yml with notifier env vars and depends_on web-backend
+- Updated notifier AGENTS.md with architecture decisions
+- Files changed: services/notifier/main.go, services/notifier/AGENTS.md, docker-compose.yml
+- **Learnings for future iterations:**
+  - Notifier POST /api/notify is async — returns 200 immediately, dispatch happens in goroutine
+  - KakaoTalk 알림톡 API uses X-Api-Key and X-Sender-Key headers
+  - Empty KAKAO_API_URL means KakaoTalk is not configured — skip gracefully, don't error
+  - Temp link failure → degraded mode (send without link), contact fetch failure → abort notification
+  - SMS fallback is separate story (US-012) — not implemented here
+---
+
+## 2026-03-21 - US-012
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Implemented SMS fallback via NHN Cloud and system alarm fallback in notifier
+- Fallback chain per-contact (independent, parallel): KakaoTalk → NHN Cloud SMS → web-backend system alarm
+- Added `sendSMS()` function using NHN Cloud SMS API v3.0 (`/sms/v3.0/appKeys/{appKey}/sender/sms`)
+- Added `sendSystemAlarm()` function posting to web-backend POST /api/alarms with full context (kakao+sms errors)
+- Modified `dispatchNotifications()` to execute 3-step fallback per contact with early return on success
+- Updated dispatch logging to show per-channel breakdown (kakao/sms/failed counts)
+- Added NHN_SMS_APP_KEY, NHN_SMS_SECRET_KEY, NHN_SMS_SENDER_NO env vars to config and docker-compose
+- Files changed: services/notifier/main.go, services/notifier/AGENTS.md, docker-compose.yml
+- **Learnings for future iterations:**
+  - NHN Cloud SMS API v3.0 uses X-Secret-Key header (not X-Api-Key like KakaoTalk)
+  - NHN Cloud SMS endpoint: `https://api-sms.cloud.toast.com/sms/v3.0/appKeys/{appKey}/sender/sms`
+  - System alarm POST /api/alarms payload: {type, message, details} — details includes both error messages for debugging
+  - Fallback early-return pattern: try channel → success → return; fail → log → next channel
+  - Same "empty env var = not configured" pattern works for SMS (consistent with KakaoTalk)
+---
+
+## 2026-03-21 - US-013
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Added FRONTEND_URL config to notifier (env var, default http://localhost:3080)
+- Notifier now constructs full `/view/{token}` URL from FRONTEND_URL + token (not web-backend's URL field)
+- Updated docker-compose.yml with FRONTEND_URL env var for notifier
+- Updated startup log to show frontend URL config
+- Files changed: services/notifier/main.go, services/notifier/AGENTS.md, docker-compose.yml
+- **Learnings for future iterations:**
+  - Notifier constructs temp link URLs itself (FRONTEND_URL + /view/{token}) — this avoids web-backend needing to know the public frontend URL
+  - FRONTEND_URL default is http://localhost:3080 (matching web-frontend's host port)
+  - The TempLinkResponse.Token field is what's used for URL construction, not the URL field
+---
+
+## 2026-03-21 - US-014
+- Implemented SQLite schema initialization and migration mechanism in web-backend
+- Created migrations.go with version-based migration system: _migrations tracking table, numbered migration structs, transactional application
+- Initial schema (migration 1): users, contacts, cameras, sites, incidents tables matching AGENTS.md data model
+- Users table includes: username (unique), password_hash, name, role (default 'user'), status (default 'pending'), created_at
+- Incidents table includes: site_id, description fields beyond AGENTS.md base model (needed for API spec)
+- Updated main.go to initialize DB connection with WAL mode, busy_timeout, foreign_keys pragmas
+- Used modernc.org/sqlite v1.34.5 (pure Go, no CGO needed)
+- Updated Dockerfile to create /data directory and run go mod tidy for dependency resolution
+- Verified: DB creates on first run, migration applies, idempotent on restart, healthz still works
+- Files changed: services/web-backend/main.go, services/web-backend/migrations.go, services/web-backend/go.mod, services/web-backend/Dockerfile
+- **Learnings for future iterations:**
+  - modernc.org/sqlite latest (v1.47+) requires Go 1.25+ — must pin to v1.34.x for Go 1.22 compatibility
+  - Pure Go SQLite means no CGO, no gcc in builder stage — simpler Dockerfile
+  - SQLite WAL mode is important for concurrent reads during HTTP handling
+  - `database/sql` driver name for modernc.org/sqlite is just "sqlite" (not "sqlite3")
+  - DB path is /data/sentinel.db, matching the db-data volume mount in docker-compose.yml
+---
