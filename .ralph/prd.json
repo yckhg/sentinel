@@ -439,8 +439,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 28,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Contact CRUD in ManagementPage.tsx. List with edit/delete, add form with phone format validation (01X-XXXX-XXXX). Inline edit mode per card. Delete with modal confirmation. Auto-format phone input. CSS: mgmt-* classes in App.css. Uses localStorage JWT for auth headers."
     },
     {
       "id": "US-029",

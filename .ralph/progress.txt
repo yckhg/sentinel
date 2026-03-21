@@ -65,6 +65,10 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - Typecheck in Docker: `docker run --rm -v ./services/web-frontend:/app -w /app node:20-alpine sh -c "npm install && npm run typecheck"` (production image has no node)
 - WebSocket: `useWebSocket(onMessage)` hook in `src/hooks/useWebSocket.ts` — auto-connect, exponential backoff reconnect, returns `{ connected }`. Use `useRef` for callback to avoid re-renders
 - Crisis alerts: `CrisisAlertBanner` component at App root, listens for `crisis_alert` WS events, accumulates dismissible banners
+- Management UI: `mgmt-*` CSS class prefix for management pages (forms, cards, modals). Reuse for sites/links/accounts pages
+- Auth headers: `getAuthHeaders()` pattern — read `localStorage.getItem("token")`, return `{ Authorization: Bearer, Content-Type: application/json }`
+- Phone input: auto-format with `formatPhoneInput()` — strips non-digits, inserts dashes. Validate with `01[016789]-\d{3,4}-\d{4}` regex
+- Inline edit pattern: `editId` state to switch card rendering between view/edit mode. Cancel restores previous values
 
 ---
 
@@ -504,4 +508,18 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - Use `useRef` for callback handlers in hooks to avoid stale closures without re-triggering `useEffect`
   - `onclose` fires for both clean disconnects and errors — set `wsRef.current = null` to avoid double-close
   - Fixed-position banners need high z-index (200) to stay above tab bar (z-index 100)
+---
+
+## 2026-03-21 - US-028
+- Contact management UI in ManagementPage.tsx
+- Full CRUD: list contacts, add via form, inline edit, delete with confirmation modal
+- Phone auto-formatting on input (inserts dashes as user types)
+- Phone validation: Korean mobile format 01X-XXXX-XXXX
+- CSS: mgmt-* classes added to App.css (cards, forms, buttons, modal overlay)
+- Files changed: src/pages/ManagementPage.tsx, src/App.css
+- **Learnings for future iterations:**
+  - Management page uses card-based layout with inline editing — same pattern should be used for sites/links/accounts
+  - Delete confirmation uses fixed overlay modal (z-index 300, above crisis banner)
+  - `formatPhoneInput` strips non-digits and re-inserts dashes — prevents invalid chars while allowing natural typing
+  - Form validation happens client-side before API call; server errors also displayed
 ---
