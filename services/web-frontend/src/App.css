@@ -400,6 +400,32 @@ body {
   margin: 20px 0;
 }
 
+/* Temp link URL display */
+.mgmt-link-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 8px;
+}
+
+.mgmt-link-url-box {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.mgmt-link-url-input {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  background: #f9f9f9;
+  color: #333;
+  outline: none;
+  min-width: 0;
+}
+
 /* Delete confirmation modal */
 .mgmt-modal-overlay {
   position: fixed;
