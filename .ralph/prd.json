@@ -249,8 +249,8 @@
         "Typecheck passes"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "POST /auth/login with bcrypt verification. JWT (HS256, 24h expiry) with userId+role claims via github.com/golang-jwt/jwt/v5. Auth middleware on all /api/* routes. Built-in admin seeded on first run (ADMIN_USERNAME/ADMIN_PASSWORD env vars, defaults admin/sentinel1234). JWT_SECRET env var (random if unset)."
     },
     {
       "id": "US-017",

@@ -38,6 +38,11 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - `writeJSON(w, status, data)` helper in auth.go for consistent JSON responses — reuse across all handlers
 - `golang.org/x/crypto` v0.31.0 for bcrypt — compatible with Go 1.22
 - SQLite UNIQUE constraint errors contain "UNIQUE constraint failed" in error string
+- JWT via `github.com/golang-jwt/jwt/v5` v5.2.1 — HS256 signing, 24h expiry, custom Claims struct with userId+role
+- Auth middleware pattern: separate `apiMux` for /api/* routes, wrapped with `authMiddleware(apiMux)` and mounted on main mux via `mux.Handle("/api/", ...)`
+- AuthUser stored in request context via `context.WithValue` — retrieve with `getAuthUser(r)` in handlers
+- Admin seeding: check if username exists first, skip if already created (idempotent on restart)
+- JWT_SECRET env var for token signing; random secret generated if unset (tokens won't survive restarts)
 
 ---
 
@@ -286,4 +291,22 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - writeJSON helper in auth.go can be reused by all handlers (sets Content-Type, status, encodes JSON)
   - SQLite UNIQUE constraint error message contains "UNIQUE constraint failed" — use strings.Contains to detect duplicates
   - web-backend port 8080 is internal only (Docker network), not exposed to host — test via docker exec
+---
+
+## 2026-03-21 - US-016
+- Implemented POST /auth/login with JWT authentication in web-backend
+- Added github.com/golang-jwt/jwt/v5 v5.2.1 for JWT token generation and validation
+- JWT contains userId, role, exp (24h), iat claims; signed with HS256
+- Auth middleware validates Bearer token on all /api/* routes; stores AuthUser in request context
+- Built-in admin account seeded on first run: ADMIN_USERNAME (default: admin), ADMIN_PASSWORD (default: sentinel1234)
+- JWT_SECRET env var for signing key (random generated if unset, with warning log)
+- Protected /api/* routes use separate ServeMux wrapped in authMiddleware
+- Verified: admin login (200+token), invalid password (401), pending user (403), valid token (200), missing token (401), invalid token (401)
+- Files changed: services/web-backend/auth.go, services/web-backend/main.go, services/web-backend/go.mod
+- **Learnings for future iterations:**
+  - github.com/golang-jwt/jwt/v5 v5.2.1 works with Go 1.22 — use jwt.RegisteredClaims for standard fields
+  - Auth middleware pattern: create apiMux, register /api/* handlers on it, mount as `mux.Handle("/api/", authMiddleware(apiMux))`
+  - getAuthUser(r) retrieves authenticated user from context — use in all /api/* handlers
+  - Admin seeding is idempotent — checks for existing username before insert
+  - ADMIN_USERNAME/ADMIN_PASSWORD env vars configure built-in admin credentials
 ---
