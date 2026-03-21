@@ -520,8 +520,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 33,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "EmergencyCallButton component with geolocation + site address fallback. Confirmation dialog before tel:119. Compact variant on crisis alert banner, full button on CCTV page header."
     },
     {
       "id": "US-034",

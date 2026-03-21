@@ -585,3 +585,17 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - e.stopPropagation() needed on restart button to avoid triggering camera expand toggle
   - Camera interface extended with optional siteId/deviceId fields for restart API
 ---
+
+## 2026-03-21 - US-033
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Created EmergencyCallButton component with geolocation + site address fallback
+- Button on CCTV page header (full "119 신고") and crisis alert banner (compact "119")
+- Confirmation dialog shows GPS coordinates (if available) or site address from GET /api/sites
+- Initiates tel:119 on confirm
+- Files changed: EmergencyCallButton.tsx (new), CrisisAlertBanner.tsx, CCTVPage.tsx, App.css
+- **Learnings for future iterations:**
+  - Browser Geolocation API: `navigator.geolocation.getCurrentPosition()` with timeout option
+  - `tel:` URI scheme for initiating phone calls from mobile browsers
+  - TypeScript strict null check: array access `arr[0]` can be undefined, use temp variable + guard
+  - Reuse mgmt-modal-overlay/mgmt-modal CSS for any dialog (consistent with RestartDialog pattern)
+---
