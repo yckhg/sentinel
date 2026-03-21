@@ -53,6 +53,14 @@ services:
     build: ./services/notifier
     container_name: sentinel-notifier
     restart: unless-stopped
+    environment:
+      - WEB_BACKEND_URL=http://web-backend:8080
+      - KAKAO_API_URL=${KAKAO_API_URL:-}
+      - KAKAO_API_KEY=${KAKAO_API_KEY:-}
+      - KAKAO_SENDER_KEY=${KAKAO_SENDER_KEY:-}
+      - KAKAO_TEMPLATE_CODE=${KAKAO_TEMPLATE_CODE:-CRISIS_ALERT}
+    depends_on:
+      - web-backend
     networks:
       - sentinel-net
     # ports: internal only

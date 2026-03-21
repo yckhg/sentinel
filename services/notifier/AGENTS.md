@@ -44,3 +44,12 @@ Crisis propagation service. Sends KakaoTalk/SMS notifications on crisis events w
 - Message template should include: crisis description, site info, temporary CCTV link
 - Notification to multiple contacts should be parallel
 - Timeout for external APIs should be reasonable (5-10s)
+
+## Architecture Decisions
+
+- POST /api/notify returns 200 immediately (async dispatch via goroutine) — hw-gateway does not wait for delivery
+- KakaoTalk 알림톡 API uses X-Api-Key and X-Sender-Key headers for authentication
+- If KAKAO_API_URL or KAKAO_API_KEY env vars are empty, KakaoTalk sending is skipped (logged as not configured)
+- Temp link failure triggers degraded mode: notification sent without CCTV link
+- Contact fetch failure aborts the entire notification for that event (no contacts = nothing to send)
+- Config env vars: WEB_BACKEND_URL, KAKAO_API_URL, KAKAO_API_KEY, KAKAO_SENDER_KEY, KAKAO_TEMPLATE_CODE
