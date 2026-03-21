@@ -569,8 +569,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 36,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "LoginPage with login/register tabs. Login calls POST /auth/login, stores JWT in localStorage. Register calls POST /auth/register, shows pending approval message. App.tsx gates behind auth (checks localStorage token). SettingsPage has logout button. Reuses mgmt-form-field and mgmt-btn CSS classes. login-* CSS prefix for login-specific styles."
     },
     {
       "id": "US-037",

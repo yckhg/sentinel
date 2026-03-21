@@ -71,6 +71,7 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - Inline edit pattern: `editId` state to switch card rendering between view/edit mode. Cancel restores previous values
 - Auth middleware accepts both user JWT and temp link JWT (fallback chain); temp link viewers get role="viewer"
 - URL routing: `window.location.pathname` match for special routes (/view/{token}), bypassing tab navigation
+- Auth gating: App checks `localStorage.getItem("token")` — null renders LoginPage, otherwise renders main app. Login stores token, logout removes it
 
 ---
 
@@ -632,4 +633,22 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - Date filter: use `max` attribute on date inputs to prevent future dates, `min` to prevent invalid ranges
   - Append mode for "load more": keep previous incidents in state, concat new page results
   - `filterApplied` separate from input state allows user to change inputs without triggering fetch until they click "조회"
+---
+
+## 2026-03-21 - US-036
+- Login and registration UI implemented
+- Created LoginPage.tsx with login/register tab switching
+- Login form: POST /auth/login, stores JWT in localStorage, redirects to CCTV tab
+- Register form: POST /auth/register, shows pending approval success message, validates 8-char password
+- Error handling: 409 duplicate username, 403 pending approval, 401 invalid credentials, network errors
+- App.tsx gates behind auth — checks localStorage("token"), shows LoginPage if absent
+- SettingsPage updated with logout button (clears token, returns to login)
+- Reused mgmt-form-field and mgmt-btn CSS classes for form consistency
+- Added login-* CSS classes for login-specific styles (card, tabs, error/success messages)
+- Files changed: services/web-frontend/src/pages/LoginPage.tsx (new), services/web-frontend/src/pages/SettingsPage.tsx, services/web-frontend/src/App.tsx, services/web-frontend/src/App.css
+- **Learnings for future iterations:**
+  - Auth gating pattern: useState initialized from localStorage, update both state and localStorage together
+  - LoginPage uses onLoginSuccess callback to decouple from App state management
+  - Reuse mgmt-form-field for form inputs across all pages — consistent styling
+  - autoComplete attributes ("username", "current-password", "new-password") help password managers
 ---
