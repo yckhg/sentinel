@@ -49,7 +49,6 @@ func main() {
 
 	// Protected API routes (JWT required)
 	apiMux := http.NewServeMux()
-	// Placeholder for future /api/* handlers
 	apiMux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		user := getAuthUser(r)
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -58,6 +57,12 @@ func main() {
 			"role":   user.Role,
 		})
 	})
+
+	// Contacts CRUD
+	apiMux.HandleFunc("GET /api/contacts", handleListContacts(db))
+	apiMux.HandleFunc("POST /api/contacts", handleCreateContact(db))
+	apiMux.HandleFunc("PUT /api/contacts/{id}", handleUpdateContact(db))
+	apiMux.HandleFunc("DELETE /api/contacts/{id}", handleDeleteContact(db))
 
 	// Mount protected routes behind auth middleware
 	mux.Handle("/api/", authMiddleware(apiMux))
