@@ -72,6 +72,9 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - Auth middleware accepts both user JWT and temp link JWT (fallback chain); temp link viewers get role="viewer"
 - URL routing: `window.location.pathname` match for special routes (/view/{token}), bypassing tab navigation
 - Auth gating: App checks `localStorage.getItem("token")` — null renders LoginPage, otherwise renders main app. Login stores token, logout removes it
+- E2E tests: Go programs in `tests/{test-name}/` with own Dockerfile, added to docker-compose with `profiles: [test]`. Run: `docker compose --profile test run --rm {test-name}`
+- Internal service endpoints (notifier→web-backend): register on main mux (not apiMux) for no-auth access. Pattern: GET /api/contacts, POST /api/links/temp, POST /api/incidents all on main mux
+- verify.sh Go vet doesn't work on runtime containers (no Go in alpine runtime) — use `docker run --rm -v ./services/{svc}:/app -w /app golang:1.22-alpine go vet ./...` instead
 
 ---
 
@@ -651,4 +654,19 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - LoginPage uses onLoginSuccess callback to decouple from App state management
   - Reuse mgmt-form-field for form inputs across all pages — consistent styling
   - autoComplete attributes ("username", "current-password", "new-password") help password managers
+---
+
+## 2026-03-21 - US-037
+- Crisis E2E test — full chain from mock MQTT to WebSocket notification
+- Created Go E2E test program in tests/e2e-crisis/ with Docker profile
+- Test flow: admin login → WebSocket connect → MQTT alert publish → WS crisis_alert receipt → incident DB verification → timing check
+- Fixed GET /api/contacts: moved to main mux for internal service access (notifier was getting 401)
+- Full chain completes in ~500ms (well under 5s requirement)
+- Files changed: tests/e2e-crisis/main.go (new), tests/e2e-crisis/go.mod (new), tests/e2e-crisis/go.sum (new), tests/e2e-crisis/Dockerfile (new), docker-compose.yml, services/web-backend/main.go
+- **Learnings for future iterations:**
+  - Internal service endpoints must be on main mux (not apiMux) — GET /api/contacts was behind auth, blocking notifier
+  - E2E tests as Go programs in tests/ with Docker profile — clean separation from main services
+  - verify.sh Go vet fails on runtime containers (alpine, no Go) — use standalone Docker run for vet
+  - MQTT alert chain: ~6ms from publish to WebSocket receipt — extremely fast internal forwarding
+  - Notifier gracefully skips unconfigured channels (KakaoTalk/SMS) — no errors, just log and move to fallback
 ---

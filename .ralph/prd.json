@@ -587,8 +587,8 @@
         "Typecheck passes"
       ],
       "priority": 37,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Go E2E test in tests/e2e-crisis/ runs as Docker service with profile 'test'. Tests: admin login → WebSocket connect → MQTT alert publish → WS crisis_alert receipt → incident DB verification → timing check. Full chain completes in ~500ms. Fixed GET /api/contacts on main mux for internal service access (notifier). Run: docker compose --profile test run --rm e2e-crisis"
     },
     {
       "id": "US-038",
