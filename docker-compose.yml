@@ -30,6 +30,13 @@ services:
     build: ./services/cctv-adapter
     container_name: sentinel-cctv-adapter
     restart: unless-stopped
+    environment:
+      - CAMERAS_CONFIG_PATH=/config/cameras.json
+      - STREAMING_RTMP_URL=rtmp://streaming:1935/live
+    volumes:
+      - ./config/cameras.json:/config/cameras.json:ro
+    depends_on:
+      - streaming
     networks:
       - sentinel-net
     # ports: internal only

@@ -1,0 +1,12 @@
+[
+  {
+    "cameraId": "cam1",
+    "name": "Factory 1 - Press Area",
+    "rtspUrl": "rtsp://192.168.1.101:554/stream"
+  },
+  {
+    "cameraId": "cam2",
+    "name": "Factory 1 - Assembly Line",
+    "rtspUrl": "rtsp://192.168.1.102:554/stream"
+  }
+]
