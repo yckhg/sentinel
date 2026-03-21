@@ -616,3 +616,20 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - URL-based routing without React Router: `window.location.pathname.match()` in a top-level function called before state-based tab rendering
   - TypeScript: `match?.[1] ?? null` pattern for regex capture group access (avoids undefined-to-null type error)
 ---
+
+## 2026-03-21 - US-035
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Implemented incident history page (IncidentsPage.tsx)
+- Paginated list with "load more" button (fetches GET /api/incidents with page, limit, from, to params)
+- Date range filter with native date inputs and clear/apply buttons
+- Each incident card shows: date/time, description, confirmed/unconfirmed badge
+- Confirmed incidents show confirmer name and confirmation time
+- Total count displayed above list
+- incidents-* CSS class prefix in App.css
+- Files changed: services/web-frontend/src/pages/IncidentsPage.tsx, services/web-frontend/src/App.css
+- **Learnings for future iterations:**
+  - Reuse `mgmt-btn` CSS classes for buttons across all pages for consistency
+  - Date filter: use `max` attribute on date inputs to prevent future dates, `min` to prevent invalid ranges
+  - Append mode for "load more": keep previous incidents in state, concat new page results
+  - `filterApplied` separate from input state allows user to change inputs without triggering fetch until they click "조회"
+---
