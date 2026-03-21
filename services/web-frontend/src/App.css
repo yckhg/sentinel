@@ -400,6 +400,26 @@ body {
   margin: 20px 0;
 }
 
+/* Account management */
+.mgmt-sub-header {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #555;
+  margin: 12px 0 8px;
+}
+
+.mgmt-badge-admin {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  background: #2563eb;
+  color: #fff;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
 /* Temp link URL display */
 .mgmt-link-label {
   font-size: 0.8rem;

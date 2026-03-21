@@ -48,6 +48,7 @@ func main() {
 	mux.HandleFunc("GET /auth/pending", handlePendingUsers(db))
 	mux.HandleFunc("POST /auth/approve/{userId}", handleApproveUser(db))
 	mux.HandleFunc("POST /auth/reject/{userId}", handleRejectUser(db))
+	mux.HandleFunc("GET /auth/users", handleActiveUsers(db))
 
 	// WebSocket endpoint (JWT via query param)
 	mux.HandleFunc("/ws", handleWebSocket())

@@ -466,6 +466,44 @@ func handleRejectUser(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+func handleActiveUsers(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAdmin(w, r) == nil {
+			return
+		}
+
+		rows, err := db.Query(
+			"SELECT id, username, name, role, status, created_at FROM users WHERE status = 'active' ORDER BY created_at ASC",
+		)
+		if err != nil {
+			log.Printf("query active users error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+		defer rows.Close()
+
+		type activeUser struct {
+			ID        int64  `json:"id"`
+			Username  string `json:"username"`
+			Name      string `json:"name"`
+			Role      string `json:"role"`
+			CreatedAt string `json:"createdAt"`
+		}
+		var users []activeUser
+		for rows.Next() {
+			var u activeUser
+			var status string
+			if err := rows.Scan(&u.ID, &u.Username, &u.Name, &u.Role, &status, &u.CreatedAt); err != nil {
+				log.Printf("scan active user error: %v", err)
+				continue
+			}
+			users = append(users, u)
+		}
+
+		writeJSON(w, http.StatusOK, users)
+	}
+}
+
 // --- Helpers ---
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

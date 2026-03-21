@@ -21,6 +21,37 @@ interface TempLink {
   url?: string;
 }
 
+interface PendingUser {
+  id: number;
+  username: string;
+  name: string;
+  status: string;
+  createdAt: string;
+}
+
+interface ActiveUser {
+  id: number;
+  username: string;
+  name: string;
+  role: string;
+  createdAt: string;
+}
+
+function isAdmin(): boolean {
+  const token = localStorage.getItem("token");
+  if (!token) return false;
+  try {
+    const parts = token.split(".");
+    if (parts.length < 2) return false;
+    const encoded = parts[1];
+    if (!encoded) return false;
+    const payload = JSON.parse(atob(encoded));
+    return payload.role === "admin";
+  } catch {
+    return false;
+  }
+}
+
 const PHONE_REGEX = /^01[016789]-\d{3,4}-\d{4}$/;
 
 function formatPhoneInput(value: string): string {
@@ -81,6 +112,15 @@ export default function ManagementPage() {
   const [revokeTarget, setRevokeTarget] = useState<TempLink | null>(null);
   const [revokeLoading, setRevokeLoading] = useState(false);
 
+  // Account management state
+  const [showAccounts] = useState(isAdmin());
+  const [pendingUsers, setPendingUsers] = useState<PendingUser[]>([]);
+  const [activeUsers, setActiveUsers] = useState<ActiveUser[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(true);
+  const [accountsError, setAccountsError] = useState<string | null>(null);
+  const [approveLoading, setApproveLoading] = useState<number | null>(null);
+  const [rejectLoading, setRejectLoading] = useState<number | null>(null);
+
   const fetchContacts = async () => {
     try {
       const res = await fetch("/api/contacts", { headers: getAuthHeaders() });
@@ -126,6 +166,77 @@ export default function ManagementPage() {
       );
     } finally {
       setLinksLoading(false);
+    }
+  };
+
+  const fetchPendingUsers = async () => {
+    try {
+      const res = await fetch("/auth/pending", { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: PendingUser[] = await res.json();
+      setPendingUsers(data || []);
+    } catch (err) {
+      setAccountsError(
+        err instanceof Error ? err.message : "계정 정보를 불러올 수 없습니다"
+      );
+    }
+  };
+
+  const fetchActiveUsers = async () => {
+    try {
+      const res = await fetch("/auth/users", { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: ActiveUser[] = await res.json();
+      setActiveUsers(data || []);
+    } catch (err) {
+      setAccountsError(
+        err instanceof Error ? err.message : "계정 정보를 불러올 수 없습니다"
+      );
+    }
+  };
+
+  const fetchAccounts = async () => {
+    setAccountsLoading(true);
+    setAccountsError(null);
+    await Promise.all([fetchPendingUsers(), fetchActiveUsers()]);
+    setAccountsLoading(false);
+  };
+
+  const handleApprove = async (userId: number) => {
+    setApproveLoading(userId);
+    try {
+      const res = await fetch(`/auth/approve/${userId}`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      await fetchAccounts();
+    } catch (err) {
+      setAccountsError(err instanceof Error ? err.message : "승인 실패");
+    } finally {
+      setApproveLoading(null);
+    }
+  };
+
+  const handleReject = async (userId: number) => {
+    setRejectLoading(userId);
+    try {
+      const res = await fetch(`/auth/reject/${userId}`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      await fetchAccounts();
+    } catch (err) {
+      setAccountsError(err instanceof Error ? err.message : "거절 실패");
+    } finally {
+      setRejectLoading(null);
     }
   };
 
@@ -193,6 +304,9 @@ export default function ManagementPage() {
     fetchContacts();
     fetchSites();
     fetchTempLinks();
+    if (showAccounts) {
+      fetchAccounts();
+    }
   }, []);
 
   const startSiteEdit = (site: Site) => {
@@ -650,6 +764,82 @@ export default function ManagementPage() {
             )
           )}
         </div>
+      )}
+
+      {/* Account management section (admin only) */}
+      {showAccounts && (
+        <>
+          <div className="mgmt-section-divider" />
+          <div className="mgmt-header">
+            <h2>계정 관리</h2>
+          </div>
+
+          {accountsLoading ? (
+            <p className="mgmt-loading">로딩 중...</p>
+          ) : accountsError ? (
+            <p className="mgmt-error">{accountsError}</p>
+          ) : (
+            <>
+              {/* Pending users */}
+              <h3 className="mgmt-sub-header">승인 대기</h3>
+              {pendingUsers.length === 0 ? (
+                <p className="mgmt-empty">대기 중인 가입 요청이 없습니다</p>
+              ) : (
+                <div className="mgmt-list">
+                  {pendingUsers.map((user) => (
+                    <div key={user.id} className="mgmt-card">
+                      <div className="mgmt-card-info">
+                        <span className="mgmt-card-name">{user.name}</span>
+                        <span className="mgmt-card-phone">@{user.username}</span>
+                        <span className="mgmt-card-phone">
+                          {new Date(user.createdAt).toLocaleDateString("ko-KR")} 가입 요청
+                        </span>
+                      </div>
+                      <div className="mgmt-card-actions">
+                        <button
+                          className="mgmt-btn mgmt-btn-small mgmt-btn-primary"
+                          onClick={() => handleApprove(user.id)}
+                          disabled={approveLoading === user.id}
+                        >
+                          {approveLoading === user.id ? "승인 중..." : "승인"}
+                        </button>
+                        <button
+                          className="mgmt-btn mgmt-btn-small mgmt-btn-danger"
+                          onClick={() => handleReject(user.id)}
+                          disabled={rejectLoading === user.id}
+                        >
+                          {rejectLoading === user.id ? "거절 중..." : "거절"}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Active users */}
+              <h3 className="mgmt-sub-header">활성 사용자</h3>
+              {activeUsers.length === 0 ? (
+                <p className="mgmt-empty">활성 사용자가 없습니다</p>
+              ) : (
+                <div className="mgmt-list">
+                  {activeUsers.map((user) => (
+                    <div key={user.id} className="mgmt-card">
+                      <div className="mgmt-card-info">
+                        <span className="mgmt-card-name">
+                          {user.name}
+                          {user.role === "admin" && (
+                            <span className="mgmt-badge-admin">관리자</span>
+                          )}
+                        </span>
+                        <span className="mgmt-card-phone">@{user.username}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </>
       )}
 
       {/* Revoke confirmation dialog */}
