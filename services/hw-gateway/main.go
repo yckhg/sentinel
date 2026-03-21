@@ -39,6 +39,23 @@ type HeartbeatPayload struct {
 	Timestamp string `json:"timestamp"`
 }
 
+// RestartRequest received from web-backend POST /api/restart.
+type RestartRequest struct {
+	SiteID      string `json:"siteId"`
+	DeviceID    string `json:"deviceId"`
+	RequestedBy string `json:"requestedBy"`
+	Reason      string `json:"reason"`
+}
+
+// RestartMQTTPayload published to MQTT safety/{siteId}/cmd/restart.
+type RestartMQTTPayload struct {
+	DeviceID    string `json:"deviceId"`
+	SiteID      string `json:"siteId"`
+	RequestedBy string `json:"requestedBy"`
+	Reason      string `json:"reason"`
+	Timestamp   string `json:"timestamp"`
+}
+
 var httpClient = &http.Client{
 	Timeout: 10 * time.Second,
 	Transport: &http.Transport{
@@ -85,6 +102,10 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok","service":"hw-gateway"}`))
+	})
+
+	mux.HandleFunc("POST /api/restart", func(w http.ResponseWriter, r *http.Request) {
+		handleRestart(w, r, mqttClient)
 	})
 
 	log.Println("hw-gateway listening on :8080")
@@ -231,4 +252,66 @@ func handleHeartbeat(msg mqtt.Message) {
 
 	log.Printf("[HEARTBEAT] deviceId=%s siteId=%s status=%s", hb.DeviceID, hb.SiteID, hb.Status)
 	// In-memory device status tracking will be implemented in US-008
+}
+
+func handleRestart(w http.ResponseWriter, r *http.Request, mqttClient mqtt.Client) {
+	var req RestartRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON payload"})
+		return
+	}
+
+	if req.SiteID == "" || req.DeviceID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "siteId and deviceId are required"})
+		return
+	}
+
+	if !mqttClient.IsConnected() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "MQTT broker not connected"})
+		return
+	}
+
+	// Build MQTT payload
+	payload := RestartMQTTPayload{
+		DeviceID:    req.DeviceID,
+		SiteID:      req.SiteID,
+		RequestedBy: req.RequestedBy,
+		Reason:      req.Reason,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "failed to marshal payload"})
+		return
+	}
+
+	topic := fmt.Sprintf("safety/%s/cmd/restart", req.SiteID)
+	token := mqttClient.Publish(topic, 1, false, body) // QoS 1
+	token.Wait()
+
+	if token.Error() != nil {
+		log.Printf("[RESTART] Failed to publish to %s: %v", topic, token.Error())
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "failed to publish MQTT command"})
+		return
+	}
+
+	log.Printf("[RESTART] Published restart command to %s: deviceId=%s requestedBy=%s", topic, req.DeviceID, req.RequestedBy)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "sent",
+		"topic":  topic,
+	})
 }
