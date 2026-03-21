@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -309,6 +310,160 @@ func seedAdminUser(db *sql.DB) error {
 
 	log.Printf("admin user created: username=%s", adminUser)
 	return nil
+}
+
+// --- Admin approval handlers ---
+
+type pendingUserResponse struct {
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"createdAt"`
+}
+
+type approvalResponse struct {
+	ID     int64  `json:"id"`
+	Status string `json:"status"`
+}
+
+// requireAdmin extracts JWT from Authorization header and verifies admin role.
+// Returns the AuthUser if valid admin, or writes error response and returns nil.
+func requireAdmin(w http.ResponseWriter, r *http.Request) *AuthUser {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authorization header required"})
+		return nil
+	}
+
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || parts[0] != "Bearer" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid authorization header format"})
+		return nil
+	}
+
+	claims, err := parseJWT(parts[1])
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired token"})
+		return nil
+	}
+
+	if claims.Role != "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
+		return nil
+	}
+
+	return &AuthUser{UserID: claims.UserID, Role: claims.Role}
+}
+
+func handlePendingUsers(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAdmin(w, r) == nil {
+			return
+		}
+
+		rows, err := db.Query(
+			"SELECT id, username, name, status, created_at FROM users WHERE status = 'pending' ORDER BY created_at ASC",
+		)
+		if err != nil {
+			log.Printf("query pending users error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+		defer rows.Close()
+
+		users := []pendingUserResponse{}
+		for rows.Next() {
+			var u pendingUserResponse
+			if err := rows.Scan(&u.ID, &u.Username, &u.Name, &u.Status, &u.CreatedAt); err != nil {
+				log.Printf("scan pending user error: %v", err)
+				continue
+			}
+			users = append(users, u)
+		}
+
+		writeJSON(w, http.StatusOK, users)
+	}
+}
+
+func handleApproveUser(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		admin := requireAdmin(w, r)
+		if admin == nil {
+			return
+		}
+
+		userId := r.PathValue("userId")
+		if userId == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userId is required"})
+			return
+		}
+
+		var parsedID int64
+		if _, err := fmt.Sscanf(userId, "%d", &parsedID); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid userId"})
+			return
+		}
+
+		result, err := db.Exec(
+			"UPDATE users SET status = 'active' WHERE id = ? AND status = 'pending'",
+			parsedID,
+		)
+		if err != nil {
+			log.Printf("approve user error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+			return
+		}
+
+		log.Printf("user approved: id=%d by admin=%d", parsedID, admin.UserID)
+		writeJSON(w, http.StatusOK, approvalResponse{ID: parsedID, Status: "active"})
+	}
+}
+
+func handleRejectUser(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		admin := requireAdmin(w, r)
+		if admin == nil {
+			return
+		}
+
+		userId := r.PathValue("userId")
+		if userId == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userId is required"})
+			return
+		}
+
+		var parsedID int64
+		if _, err := fmt.Sscanf(userId, "%d", &parsedID); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid userId"})
+			return
+		}
+
+		result, err := db.Exec(
+			"UPDATE users SET status = 'rejected' WHERE id = ? AND status = 'pending'",
+			parsedID,
+		)
+		if err != nil {
+			log.Printf("reject user error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+			return
+		}
+
+		log.Printf("user rejected: id=%d by admin=%d", parsedID, admin.UserID)
+		writeJSON(w, http.StatusOK, approvalResponse{ID: parsedID, Status: "rejected"})
+	}
 }
 
 // --- Helpers ---

@@ -42,6 +42,11 @@ func main() {
 	mux.HandleFunc("POST /auth/register", handleRegister(db))
 	mux.HandleFunc("POST /auth/login", handleLogin(db))
 
+	// Auth routes (admin only — JWT validated inline)
+	mux.HandleFunc("GET /auth/pending", handlePendingUsers(db))
+	mux.HandleFunc("POST /auth/approve/{userId}", handleApproveUser(db))
+	mux.HandleFunc("POST /auth/reject/{userId}", handleRejectUser(db))
+
 	// Protected API routes (JWT required)
 	apiMux := http.NewServeMux()
 	// Placeholder for future /api/* handlers
