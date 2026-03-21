@@ -44,6 +44,10 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - For admin-only /auth/* routes (outside /api/* middleware), use `requireAdmin(w, r)` inline helper — returns nil and writes error if not admin
 - Admin seeding: check if username exists first, skip if already created (idempotent on restart)
 - JWT_SECRET env var for token signing; random secret generated if unset (tokens won't survive restarts)
+- Temporary links are in-memory only (not in DB) — `tempLinkStore` with `sync.RWMutex`, UUID keys, blacklist set
+- TempLinkClaims (linkId) is separate from auth Claims (userId+role) — both use jwtSecret + HS256
+- Endpoints that need both external auth AND internal service access: register on main mux (not apiMux) with optional JWT check
+- FRONTEND_URL env var in web-backend for constructing temp link URLs (default http://localhost:3080)
 
 ---
 
@@ -357,4 +361,23 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - Sites table already exists from migration 1 — no schema changes needed
   - Same partial-update pattern as contacts: load existing → apply non-empty fields → save
   - validatePhone() from contacts.go is package-level, reusable across handlers
+---
+
+## 2026-03-21 - US-020
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Implemented temporary link create/verify/revoke system in web-backend
+- Created links.go with in-memory store (sync.RWMutex + map), UUID v4 IDs, blacklist for revocation
+- Separate TempLinkClaims JWT type with linkId field (distinct from user auth Claims)
+- POST /api/links/temp: registered on main mux (not apiMux) to accept both admin JWT and internal service calls without auth
+- GET /api/links/verify/{token}: public endpoint on main mux, validates JWT + checks blacklist
+- GET /api/links: admin-only on apiMux, lists active (non-expired, non-revoked) links
+- DELETE /api/links/{id}: admin-only on apiMux, adds linkID to blacklist, returns 204
+- FRONTEND_URL env var for constructing full /view/{token} URLs (default http://localhost:3080)
+- Files changed: services/web-backend/links.go (new), services/web-backend/main.go
+- **Learnings for future iterations:**
+  - Go 1.22 routing: specific method+path patterns (e.g., `POST /api/links/temp`) take precedence over generic prefix handler (`/api/`)
+  - Registering on main mux bypasses authMiddleware — useful for endpoints that need to accept both authenticated and internal calls
+  - BusyBox wget in alpine containers doesn't support --method flag — use curl from host for DELETE/PUT testing
+  - In-memory blacklist keyed by linkID (UUID), not the JWT token string — more efficient and consistent
+  - TempLinkClaims uses separate struct from auth Claims to avoid confusion; both use same jwtSecret and HS256
 ---

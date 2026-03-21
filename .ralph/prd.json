@@ -311,8 +311,8 @@
         "Typecheck passes"
       ],
       "priority": 20,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "In-memory store with sync.RWMutex. UUID v4 link IDs. Separate TempLinkClaims JWT type (linkId field). POST /api/links/temp on main mux (accepts admin JWT or no auth for internal calls). GET /api/links/verify/{token} public. GET /api/links and DELETE /api/links/{id} on apiMux (admin only). Blacklist by linkID. FRONTEND_URL env var for URL construction."
     },
     {
       "id": "US-021",
