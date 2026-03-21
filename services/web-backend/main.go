@@ -47,9 +47,15 @@ func main() {
 	mux.HandleFunc("POST /auth/approve/{userId}", handleApproveUser(db))
 	mux.HandleFunc("POST /auth/reject/{userId}", handleRejectUser(db))
 
+	// WebSocket endpoint (JWT via query param)
+	mux.HandleFunc("/ws", handleWebSocket())
+
 	// Temporary link routes (public or internal service calls)
 	mux.HandleFunc("POST /api/links/temp", handleCreateTempLink())
 	mux.HandleFunc("GET /api/links/verify/{token}", handleVerifyTempLink())
+
+	// Incident creation (internal — from hw-gateway)
+	mux.HandleFunc("POST /api/incidents", handleCreateIncident(db))
 
 	// Protected API routes (JWT required)
 	apiMux := http.NewServeMux()
