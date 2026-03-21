@@ -49,8 +49,7 @@ services:
     container_name: sentinel-web-frontend
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "3080:80"
     networks:
       - sentinel-net
     depends_on:

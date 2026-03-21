@@ -38,6 +38,5 @@ data/
 *.log
 logs/
 
-# HLS segments (generated at runtime)
-*.ts
-*.m3u8
+# HLS segments (generated at runtime, inside containers only)
+# Note: Do NOT use *.ts here — it blocks TypeScript files
