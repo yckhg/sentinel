@@ -264,8 +264,8 @@
         "Typecheck passes"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "requireAdmin() helper validates JWT inline for /auth/* admin routes. GET /auth/pending returns pending users sorted by created_at. Approve/reject update status with 404 for non-existent/non-pending users. Uses Go 1.22 PathValue for {userId} extraction."
     },
     {
       "id": "US-018",

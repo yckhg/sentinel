@@ -41,6 +41,7 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - JWT via `github.com/golang-jwt/jwt/v5` v5.2.1 — HS256 signing, 24h expiry, custom Claims struct with userId+role
 - Auth middleware pattern: separate `apiMux` for /api/* routes, wrapped with `authMiddleware(apiMux)` and mounted on main mux via `mux.Handle("/api/", ...)`
 - AuthUser stored in request context via `context.WithValue` — retrieve with `getAuthUser(r)` in handlers
+- For admin-only /auth/* routes (outside /api/* middleware), use `requireAdmin(w, r)` inline helper — returns nil and writes error if not admin
 - Admin seeding: check if username exists first, skip if already created (idempotent on restart)
 - JWT_SECRET env var for token signing; random secret generated if unset (tokens won't survive restarts)
 
@@ -309,4 +310,19 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - getAuthUser(r) retrieves authenticated user from context — use in all /api/* handlers
   - Admin seeding is idempotent — checks for existing username before insert
   - ADMIN_USERNAME/ADMIN_PASSWORD env vars configure built-in admin credentials
+---
+
+## 2026-03-21 - US-017
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Implemented admin approval flow: GET /auth/pending, POST /auth/approve/{userId}, POST /auth/reject/{userId}
+- Created `requireAdmin()` helper for inline JWT validation on /auth/* admin routes (these are outside /api/* middleware)
+- Approve sets status to 'active', reject sets status to 'rejected'; both only affect pending users
+- 404 returned when user doesn't exist or is not in pending status
+- Added `approvalResponse` and `pendingUserResponse` types for consistent JSON output
+- Files changed: services/web-backend/auth.go, services/web-backend/main.go
+- **Learnings for future iterations:**
+  - /auth/* routes bypass the apiMux auth middleware — use `requireAdmin()` inline helper for admin-only auth routes
+  - Go 1.22 `r.PathValue("userId")` works with `POST /auth/approve/{userId}` pattern on the main mux
+  - UPDATE with `WHERE status = 'pending'` naturally returns 0 rows affected for already-approved/rejected users — use RowsAffected() for 404 detection
+  - `fmt.Sscanf` is a simple way to parse path value to int64 with validation
 ---
