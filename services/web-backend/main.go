@@ -47,6 +47,10 @@ func main() {
 	mux.HandleFunc("POST /auth/approve/{userId}", handleApproveUser(db))
 	mux.HandleFunc("POST /auth/reject/{userId}", handleRejectUser(db))
 
+	// Temporary link routes (public or internal service calls)
+	mux.HandleFunc("POST /api/links/temp", handleCreateTempLink())
+	mux.HandleFunc("GET /api/links/verify/{token}", handleVerifyTempLink())
+
 	// Protected API routes (JWT required)
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +71,10 @@ func main() {
 	// Sites management
 	apiMux.HandleFunc("GET /api/sites", handleListSites(db))
 	apiMux.HandleFunc("PUT /api/sites/{id}", handleUpdateSite(db))
+
+	// Temporary links management (admin only)
+	apiMux.HandleFunc("GET /api/links", handleListTempLinks())
+	apiMux.HandleFunc("DELETE /api/links/{id}", handleRevokeTempLink())
 
 	// Mount protected routes behind auth middleware
 	mux.Handle("/api/", authMiddleware(apiMux))
