@@ -63,6 +63,8 @@ Started: Sat Mar 21 17:34:12 KST 2026
 - Camera list from GET /api/cameras, polled every 30s; response: `{id, name, location, zone, hlsUrl, status}`
 - CSS: use `env(safe-area-inset-bottom)` for mobile notch/home-bar spacing, `100dvh` for full viewport height
 - Typecheck in Docker: `docker run --rm -v ./services/web-frontend:/app -w /app node:20-alpine sh -c "npm install && npm run typecheck"` (production image has no node)
+- WebSocket: `useWebSocket(onMessage)` hook in `src/hooks/useWebSocket.ts` — auto-connect, exponential backoff reconnect, returns `{ connected }`. Use `useRef` for callback to avoid re-renders
+- Crisis alerts: `CrisisAlertBanner` component at App root, listens for `crisis_alert` WS events, accumulates dismissible banners
 
 ---
 
@@ -489,4 +491,17 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - For HLS low-latency: `liveSyncDurationCount: 2` and `liveMaxLatencyDurationCount: 4` keep latency minimal
   - Camera API returns hlsUrl as internal Docker URL — nginx proxy rewrites /live/ to streaming service transparently
   - Use `localStorage.getItem('token')` for JWT auth header pattern (to be set by login page later)
+---
+
+## 2026-03-21 - US-027
+- Implemented crisis alert banner with WebSocket connection
+- Created `useWebSocket` hook: connects to `/ws?token=JWT`, auto-reconnects with exponential backoff (1s→8s max)
+- Created `CrisisAlertBanner` component: listens for `crisis_alert` events, displays persistent red banners with timestamp + description, dismissible per-alert
+- Integrated banner at top of App layout (fixed position, z-index 200, above tab bar)
+- Files changed: src/hooks/useWebSocket.ts (new), src/components/CrisisAlertBanner.tsx (new), src/App.tsx, src/App.css
+- **Learnings for future iterations:**
+  - WebSocket URL must use `ws:` or `wss:` based on `window.location.protocol` — connect to same host via nginx proxy
+  - Use `useRef` for callback handlers in hooks to avoid stale closures without re-triggering `useEffect`
+  - `onclose` fires for both clean disconnects and errors — set `wsRef.current = null` to avoid double-close
+  - Fixed-position banners need high z-index (200) to stay above tab bar (z-index 100)
 ---

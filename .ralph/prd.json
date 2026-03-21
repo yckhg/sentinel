@@ -422,8 +422,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 27,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "useWebSocket hook with auto-reconnect (exponential backoff 1s→8s). CrisisAlertBanner component listens for crisis_alert events, shows persistent red banners with timestamp and description. Dismissible per-alert. Slide-in animation. Integrated at top of App layout with z-index 200."
     },
     {
       "id": "US-028",
