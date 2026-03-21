@@ -503,8 +503,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 32,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Restart button (↻) on expanded camera view (top-right). RestartDialog component with 2-step flow: step 1 asks confirmation, step 2 collects optional reason + final confirm. Sends POST /api/equipment/restart. Shows success/failure result. Reuses mgmt-modal-overlay/mgmt-modal CSS."
     },
     {
       "id": "US-033",

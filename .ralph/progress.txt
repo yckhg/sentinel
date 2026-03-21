@@ -568,3 +568,20 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - mgmt-sub-header class for section sub-headings (e.g., "승인 대기", "활성 사용자")
   - mgmt-badge-admin class for inline admin role badge
 ---
+
+## 2026-03-21 - US-032
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Added restart button (↻) on expanded camera view in CCTV page
+- Created RestartDialog component with 2-step confirmation flow
+  - Step 1: "장비를 재시작하시겠습니까?" with cancel/restart buttons
+  - Step 2: Optional reason text input + final confirm button
+  - Result: Shows success/failure message after API call
+- Sends POST /api/equipment/restart with {siteId, deviceId, reason}
+- Added camera-restart-btn CSS class (absolute positioned top-right on expanded camera)
+- Files changed: CCTVPage.tsx, HLSPlayer.tsx, RestartDialog.tsx (new), App.css
+- **Learnings for future iterations:**
+  - RestartDialog reuses mgmt-modal-overlay/mgmt-modal CSS classes for consistency
+  - HLSPlayer accepts optional onRestart prop — only shown when expanded
+  - e.stopPropagation() needed on restart button to avoid triggering camera expand toggle
+  - Camera interface extended with optional siteId/deviceId fields for restart API
+---
