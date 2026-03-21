@@ -243,6 +243,189 @@ body {
   opacity: 1;
 }
 
+/* Management Page */
+.mgmt-loading,
+.mgmt-error,
+.mgmt-empty {
+  text-align: center;
+  padding: 2rem 1rem;
+  color: #666;
+}
+
+.mgmt-error {
+  color: #d32f2f;
+}
+
+.mgmt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.mgmt-header h2 {
+  margin-bottom: 0;
+}
+
+.mgmt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mgmt-card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.mgmt-card-editing {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.mgmt-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mgmt-card-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.mgmt-card-phone {
+  font-size: 0.8rem;
+  color: #666;
+}
+
+.mgmt-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.mgmt-form {
+  background: #fff;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.mgmt-form-field {
+  margin-bottom: 10px;
+}
+
+.mgmt-form-field label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #666;
+  margin-bottom: 4px;
+}
+
+.mgmt-form-field input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.mgmt-form-field input:focus {
+  border-color: #1976d2;
+}
+
+.mgmt-form-error {
+  color: #d32f2f;
+  font-size: 0.75rem;
+  margin-bottom: 8px;
+}
+
+.mgmt-form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.mgmt-btn {
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 8px 16px;
+  transition: opacity 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mgmt-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mgmt-btn-primary {
+  background: #1976d2;
+  color: #fff;
+}
+
+.mgmt-btn-secondary {
+  background: #e0e0e0;
+  color: #333;
+}
+
+.mgmt-btn-danger {
+  background: #d32f2f;
+  color: #fff;
+}
+
+.mgmt-btn-small {
+  padding: 5px 10px;
+  font-size: 0.7rem;
+  background: #f0f0f0;
+  color: #333;
+}
+
+/* Delete confirmation modal */
+.mgmt-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+  padding: 1rem;
+}
+
+.mgmt-modal {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px;
+  max-width: 320px;
+  width: 100%;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.mgmt-modal-text {
+  font-size: 0.9rem;
+  margin-bottom: 16px;
+  text-align: center;
+  line-height: 1.5;
+}
+
+.mgmt-modal .mgmt-form-actions {
+  justify-content: center;
+}
+
 /* Desktop: wider layout */
 @media (min-width: 768px) {
   .content {
