@@ -552,3 +552,19 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - Clipboard API may fail in non-HTTPS contexts — always provide execCommand fallback
   - Temp link label is optional; display "임시 링크" as default when empty
 ---
+
+## 2026-03-21 - US-031
+- Account management UI added to ManagementPage (admin only section)
+- Added GET /auth/users endpoint in web-backend (returns active users with role info)
+- Frontend decodes JWT payload from localStorage to detect admin role via isAdmin()
+- Pending users list with approve/reject buttons per user
+- Active users list with admin badge
+- Section only renders when logged-in user is admin
+- Files changed: services/web-backend/auth.go, services/web-backend/main.go, services/web-frontend/src/pages/ManagementPage.tsx, services/web-frontend/src/App.css
+- **Learnings for future iterations:**
+  - JWT payload can be decoded client-side with atob(token.split('.')[1]) for role checks — no API call needed
+  - GET /auth/pending returns pending users, GET /auth/users returns active users (both admin-only via requireAdmin())
+  - Account section placed at bottom of ManagementPage after contacts section
+  - mgmt-sub-header class for section sub-headings (e.g., "승인 대기", "활성 사용자")
+  - mgmt-badge-admin class for inline admin role badge
+---

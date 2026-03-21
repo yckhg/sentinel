@@ -486,8 +486,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 31,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Account management section in ManagementPage.tsx (admin only via JWT role check). GET /auth/pending for pending users, GET /auth/users for active users (new endpoint). Approve/reject buttons per pending user. Active user list with admin badge. isAdmin() decodes JWT payload from localStorage. mgmt-sub-header and mgmt-badge-admin CSS classes."
     },
     {
       "id": "US-032",
