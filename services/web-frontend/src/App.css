@@ -163,6 +163,86 @@ body {
   font-size: 0.75rem;
 }
 
+/* Crisis Alert Banner */
+.crisis-banner-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.crisis-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #d32f2f;
+  color: #fff;
+  padding: 10px 12px;
+  animation: banner-slide-in 0.3s ease-out;
+}
+
+@keyframes banner-slide-in {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.crisis-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.crisis-banner-icon {
+  font-size: 1.25rem;
+  flex-shrink: 0;
+}
+
+.crisis-banner-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.crisis-banner-time {
+  font-size: 0.65rem;
+  opacity: 0.85;
+}
+
+.crisis-banner-desc {
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.crisis-banner-close {
+  background: none;
+  border: none;
+  color: #fff;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 4px 8px;
+  opacity: 0.8;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.crisis-banner-close:hover {
+  opacity: 1;
+}
+
 /* Desktop: wider layout */
 @media (min-width: 768px) {
   .content {

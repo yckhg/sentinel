@@ -3,6 +3,7 @@ import CCTVPage from "./pages/CCTVPage";
 import IncidentsPage from "./pages/IncidentsPage";
 import ManagementPage from "./pages/ManagementPage";
 import SettingsPage from "./pages/SettingsPage";
+import CrisisAlertBanner from "./components/CrisisAlertBanner";
 import "./App.css";
 
 type Tab = "cctv" | "incidents" | "management" | "settings";
@@ -32,6 +33,7 @@ function App() {
 
   return (
     <div className="app">
+      <CrisisAlertBanner />
       <main className="content">{renderPage()}</main>
       <nav className="tab-bar">
         {tabs.map((tab) => (
