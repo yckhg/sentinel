@@ -7,6 +7,7 @@ Started: Sun Mar 22 13:02:53 KST 2026
 - linkStore uses sync.RWMutex for concurrent access protection
 - Typecheck via `docker run --rm -v "$(pwd):/app" -w /app golang:1.22-alpine sh -c "go mod tidy && go vet ./..."` from service dir
 - Master branch is `master` not `main`
+- /data/ is volume-mounted in web-backend container — use it for persistent state files
 ---
 
 ## 2026-03-22 - US-001
@@ -19,4 +20,15 @@ Started: Sun Mar 22 13:02:53 KST 2026
   - The runtime container is alpine-only (no Go toolchain), use separate docker run for go vet
   - linkStore.blacklist entries are keyed by link ID, same as linkStore.links
   - Safe to delete map keys during range iteration in Go
+---
+
+## 2026-03-22 - US-002
+- Modified initJWTSecret() in auth.go to persist auto-generated secrets to /data/.jwt-secret
+- Priority: JWT_SECRET env var → persisted file → generate new + persist
+- File written with 0600 permissions for security
+- Warning logged when using auto-generated secret (recommends setting JWT_SECRET)
+- Files changed: services/web-backend/auth.go
+- **Learnings for future iterations:**
+  - os.ReadFile + os.WriteFile are simple for small persistence needs
+  - /data/ mount point is shared across restarts — good for any state that needs to survive
 ---
