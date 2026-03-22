@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -144,7 +145,10 @@ func handleCreateTempLink() http.HandlerFunc {
 			Label string `json:"label"`
 		}
 		if r.Body != nil {
-			json.NewDecoder(r.Body).Decode(&req)
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+				return
+			}
 		}
 
 		linkID := generateUUID()
