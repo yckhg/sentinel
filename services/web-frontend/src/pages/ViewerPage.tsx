@@ -18,6 +18,7 @@ export default function ViewerPage({ token }: { token: string }) {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [camerasLoading, setCamerasLoading] = useState(true);
+  const [cameraError, setCameraError] = useState<string | null>(null);
 
   useEffect(() => {
     const verify = async () => {
@@ -55,9 +56,14 @@ export default function ViewerPage({ token }: { token: string }) {
         const data: Camera[] = await res.json();
         if (!cancelled) {
           setCameras(data);
+          setCameraError(null);
         }
-      } catch {
-        // Silently retry on next interval
+      } catch (err) {
+        if (!cancelled) {
+          setCameraError(
+            err instanceof Error ? err.message : "카메라 목록을 불러올 수 없습니다"
+          );
+        }
       } finally {
         if (!cancelled) setCamerasLoading(false);
       }
@@ -99,6 +105,17 @@ export default function ViewerPage({ token }: { token: string }) {
           <h2>CCTV 실시간 모니터링</h2>
         </div>
         <p className="viewer-status">카메라 목록 로딩 중...</p>
+      </div>
+    );
+  }
+
+  if (cameraError && cameras.length === 0) {
+    return (
+      <div className="viewer-page">
+        <div className="viewer-header">
+          <h2>CCTV 실시간 모니터링</h2>
+        </div>
+        <p className="cctv-error">{cameraError}</p>
       </div>
     );
   }
