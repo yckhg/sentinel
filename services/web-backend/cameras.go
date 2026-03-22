@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -207,6 +210,73 @@ func validateSourceType(st string) bool {
 	return st == "rtsp" || st == "youtube"
 }
 
+var youtubeURLPattern = regexp.MustCompile(`^https://(www\.)?youtube\.com/watch\?v=[\w-]+|^https://youtu\.be/[\w-]+`)
+
+// validateSourceURL checks that the camera source URL is safe (no SSRF).
+// Returns an error message if invalid, or empty string if valid.
+func validateSourceURL(sourceType, sourceURL string) string {
+	if sourceURL == "" {
+		return ""
+	}
+
+	switch sourceType {
+	case "rtsp":
+		if !strings.HasPrefix(sourceURL, "rtsp://") && !strings.HasPrefix(sourceURL, "rtsps://") {
+			return "RTSP source URL must start with rtsp:// or rtsps://"
+		}
+	case "youtube":
+		if !youtubeURLPattern.MatchString(sourceURL) {
+			return "YouTube source URL must match https://(www.)youtube.com/watch?v=... or https://youtu.be/..."
+		}
+	}
+
+	// Extract hostname for SSRF check
+	hostname := extractHostname(sourceURL)
+	if hostname == "" {
+		return "unable to parse hostname from source URL"
+	}
+
+	if isPrivateHost(hostname) {
+		return "source URL must not point to internal/private network addresses"
+	}
+
+	return ""
+}
+
+// extractHostname parses the hostname from a URL, handling both standard and rtsp:// schemes.
+func extractHostname(rawURL string) string {
+	// For rtsp(s):// URLs, temporarily replace scheme so net/url can parse
+	normalized := rawURL
+	if strings.HasPrefix(rawURL, "rtsp://") {
+		normalized = "http://" + rawURL[len("rtsp://"):]
+	} else if strings.HasPrefix(rawURL, "rtsps://") {
+		normalized = "https://" + rawURL[len("rtsps://"):]
+	}
+
+	u, err := url.Parse(normalized)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// isPrivateHost checks if a hostname resolves to or represents a private/loopback address.
+func isPrivateHost(hostname string) bool {
+	// Direct string checks for common private patterns
+	lower := strings.ToLower(hostname)
+	if lower == "localhost" || lower == "[::1]" {
+		return true
+	}
+
+	ip := net.ParseIP(hostname)
+	if ip == nil {
+		// Not a raw IP — could be a domain. For safety, only block known patterns.
+		return false
+	}
+
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+}
+
 func handleCreateCamera(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := getAuthUser(r)
@@ -241,6 +311,10 @@ func handleCreateCamera(db *sql.DB) http.HandlerFunc {
 		}
 		if !validateSourceType(req.SourceType) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sourceType must be 'rtsp' or 'youtube'"})
+			return
+		}
+		if errMsg := validateSourceURL(req.SourceType, req.SourceURL); errMsg != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
 			return
 		}
 
@@ -350,6 +424,11 @@ func handleUpdateCamera(db *sql.DB) http.HandlerFunc {
 		}
 		if req.SourceURL != "" {
 			existing.SourceURL = req.SourceURL
+		}
+		// Validate source URL after all partial updates are applied
+		if errMsg := validateSourceURL(existing.SourceType, existing.SourceURL); errMsg != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+			return
 		}
 		if req.Enabled != nil {
 			existing.Enabled = *req.Enabled
