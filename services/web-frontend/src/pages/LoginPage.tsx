@@ -1,20 +1,48 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 
 type Mode = "login" | "register";
+
+function getInviteToken(): string | null {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("invite");
+}
 
 interface LoginPageProps {
   onLoginSuccess: (token: string) => void;
 }
 
 export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
-  const [mode, setMode] = useState<Mode>("login");
+  const [inviteToken] = useState<string | null>(getInviteToken);
+  const [inviteEmail, setInviteEmail] = useState<string | null>(null);
+  const [inviteValid, setInviteValid] = useState<boolean | null>(null);
+  const [mode, setMode] = useState<Mode>(inviteToken ? "register" : "login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!inviteToken) return;
+    fetchWithTimeout(`/api/invitations/verify/${inviteToken}`)
+      .then(async (res) => {
+        if (res.ok) {
+          const data = await res.json();
+          setInviteEmail(data.email);
+          setInviteValid(true);
+        } else {
+          setInviteValid(false);
+          const data = await res.json().catch(() => null);
+          setError(data?.error === "invitation has expired" ? "초대 링크가 만료되었습니다" : "유효하지 않은 초대 링크입니다");
+        }
+      })
+      .catch(() => {
+        setInviteValid(false);
+        setError("초대 링크를 확인할 수 없습니다");
+      });
+  }, [inviteToken]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -50,10 +78,12 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
     }
     setLoading(true);
     try {
+      const registerBody: Record<string, string> = { username, password, name };
+      if (inviteToken) registerBody.inviteToken = inviteToken;
       const res = await fetchWithTimeout("/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password, name }),
+        body: JSON.stringify(registerBody),
         timeoutMs: 30_000,
       });
       const data = await res.json();
@@ -65,7 +95,14 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
         }
         return;
       }
-      setSuccess("등록이 완료되었습니다. 관리자 승인 후 로그인할 수 있습니다.");
+      setSuccess(inviteToken
+        ? "등록이 완료되었습니다. 바로 로그인할 수 있습니다."
+        : "등록이 완료되었습니다. 관리자 승인 후 로그인할 수 있습니다."
+      );
+      // Clean up invite params from URL
+      if (inviteToken) {
+        window.history.replaceState({}, "", "/");
+      }
       setUsername("");
       setPassword("");
       setName("");
@@ -87,6 +124,12 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
       <div className="login-card">
         <h1 className="login-title">Sentinel</h1>
         <p className="login-subtitle">산업안전 실시간 모니터링</p>
+
+        {inviteToken && inviteValid && inviteEmail && (
+          <div className="login-success">
+            <strong>{inviteEmail}</strong>님, 초대를 통해 접속하셨습니다. 계정을 등록해 주세요.
+          </div>
+        )}
 
         <div className="login-tabs">
           <button

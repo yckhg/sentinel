@@ -35,6 +35,15 @@ interface Camera {
   status: string;
 }
 
+interface Invitation {
+  id: number;
+  email: string;
+  token: string;
+  status: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
 interface PendingUser {
   id: number;
   username: string;
@@ -161,6 +170,17 @@ export default function ManagementPage() {
   const [camDeleteTarget, setCamDeleteTarget] = useState<Camera | null>(null);
   const [camDeleteLoading, setCamDeleteLoading] = useState(false);
 
+  // Invitation management state
+  const [invitations, setInvitations] = useState<Invitation[]>([]);
+  const [invitationsLoading, setInvitationsLoading] = useState(true);
+  const [invitationsError, setInvitationsError] = useState<string | null>(null);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteLoading, setInviteLoading] = useState(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [inviteSuccess, setInviteSuccess] = useState<string | null>(null);
+  const [cancelInviteTarget, setCancelInviteTarget] = useState<Invitation | null>(null);
+  const [cancelInviteLoading, setCancelInviteLoading] = useState(false);
+
   const fetchContacts = async () => {
     try {
       const res = await fetchWithTimeout("/api/contacts", { headers: getAuthHeaders() });
@@ -267,6 +287,71 @@ export default function ManagementPage() {
       );
     } finally {
       setCamerasLoading(false);
+    }
+  };
+
+  const fetchInvitations = async () => {
+    try {
+      const res = await fetchWithTimeout("/api/invitations", { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: Invitation[] = await res.json();
+      setInvitations(data || []);
+      setInvitationsError(null);
+    } catch (err) {
+      setInvitationsError(
+        isTimeoutError(err)
+          ? timeoutMessage()
+          : err instanceof Error ? err.message : "초대 목록을 불러올 수 없습니다"
+      );
+    } finally {
+      setInvitationsLoading(false);
+    }
+  };
+
+  const handleSendInvite = async () => {
+    setInviteError(null);
+    setInviteSuccess(null);
+    const email = inviteEmail.trim();
+    if (!email || !email.includes("@")) {
+      setInviteError("유효한 이메일을 입력하세요");
+      return;
+    }
+    setInviteLoading(true);
+    try {
+      const res = await fetchWithTimeout("/api/invitations", {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ email }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      setInviteEmail("");
+      setInviteSuccess(`${email}에 초대 이메일을 발송했습니다`);
+      await fetchInvitations();
+    } catch (err) {
+      setInviteError(isTimeoutError(err) ? timeoutMessage() : err instanceof Error ? err.message : "초대 실패");
+    } finally {
+      setInviteLoading(false);
+    }
+  };
+
+  const handleCancelInvite = async () => {
+    if (!cancelInviteTarget) return;
+    setCancelInviteLoading(true);
+    try {
+      const res = await fetchWithTimeout(`/api/invitations/${cancelInviteTarget.id}`, {
+        method: "DELETE",
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`);
+      setCancelInviteTarget(null);
+      await fetchInvitations();
+    } catch {
+      setCancelInviteTarget(null);
+    } finally {
+      setCancelInviteLoading(false);
     }
   };
 
@@ -476,6 +561,7 @@ export default function ManagementPage() {
     if (showAccounts) {
       fetchAccounts();
       fetchCameras();
+      fetchInvitations();
     }
   }, []);
 
@@ -1150,6 +1236,104 @@ export default function ManagementPage() {
             </>
           )}
         </>
+      )}
+
+      {/* Invitation management section (admin only) */}
+      {showAccounts && (
+        <>
+          <div className="mgmt-section-divider" />
+          <div className="mgmt-header">
+            <h2>초대 관리</h2>
+          </div>
+
+          {/* Invite form */}
+          <div className="mgmt-form">
+            <div className="mgmt-form-field">
+              <label>이메일</label>
+              <input
+                type="email"
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                placeholder="초대할 이메일 주소"
+                onKeyDown={(e) => { if (e.key === "Enter") handleSendInvite(); }}
+              />
+            </div>
+            {inviteError && <p className="mgmt-form-error">{inviteError}</p>}
+            {inviteSuccess && <p className="mgmt-form-success">{inviteSuccess}</p>}
+            <div className="mgmt-form-actions">
+              <button
+                className="mgmt-btn mgmt-btn-primary"
+                onClick={handleSendInvite}
+                disabled={inviteLoading}
+              >
+                {inviteLoading ? "발송 중..." : "초대 발송"}
+              </button>
+            </div>
+          </div>
+
+          {/* Invitation list */}
+          {invitationsLoading ? (
+            <p className="mgmt-loading">로딩 중...</p>
+          ) : invitationsError ? (
+            <p className="mgmt-error">{invitationsError}</p>
+          ) : invitations.length === 0 ? (
+            <p className="mgmt-empty">발송된 초대가 없습니다</p>
+          ) : (
+            <div className="mgmt-list">
+              {invitations.map((inv) => (
+                <div key={inv.id} className="mgmt-card">
+                  <div className="mgmt-card-info">
+                    <span className="mgmt-card-name">
+                      {inv.email}
+                      <span className={`mgmt-badge-invite mgmt-badge-invite-${inv.status}`}>
+                        {inv.status === "pending" ? "대기" : inv.status === "accepted" ? "수락" : inv.status === "expired" ? "만료" : "취소"}
+                      </span>
+                    </span>
+                    <span className="mgmt-card-phone">
+                      {new Date(inv.createdAt + "Z").toLocaleDateString("ko-KR")} 발송
+                    </span>
+                  </div>
+                  <div className="mgmt-card-actions">
+                    {inv.status === "pending" && (
+                      <button
+                        className="mgmt-btn mgmt-btn-small mgmt-btn-danger"
+                        onClick={() => setCancelInviteTarget(inv)}
+                      >
+                        취소
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Cancel invitation confirmation dialog */}
+      {cancelInviteTarget && (
+        <div className="mgmt-modal-overlay" onClick={() => setCancelInviteTarget(null)}>
+          <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+            <p className="mgmt-modal-text">
+              <strong>{cancelInviteTarget.email}</strong> 초대를 취소하시겠습니까?
+            </p>
+            <div className="mgmt-form-actions">
+              <button
+                className="mgmt-btn mgmt-btn-danger"
+                onClick={handleCancelInvite}
+                disabled={cancelInviteLoading}
+              >
+                {cancelInviteLoading ? "취소 중..." : "초대 취소"}
+              </button>
+              <button
+                className="mgmt-btn mgmt-btn-secondary"
+                onClick={() => setCancelInviteTarget(null)}
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Revoke confirmation dialog */}

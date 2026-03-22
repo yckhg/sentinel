@@ -23,6 +23,10 @@ function getViewerToken(): string | null {
   return match?.[1] ?? null;
 }
 
+function isRegisterPage(): boolean {
+  return window.location.pathname === "/register";
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>("cctv");
   const [token, setToken] = useState<string | null>(() => {
@@ -45,12 +49,15 @@ function App() {
     );
   }
 
-  if (!token) {
+  if (!token || isRegisterPage()) {
     return (
       <LoginPage
         onLoginSuccess={(t) => {
           localStorage.setItem("token", t);
           setToken(t);
+          if (isRegisterPage()) {
+            window.history.replaceState({}, "", "/");
+          }
         }}
       />
     );
