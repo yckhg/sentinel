@@ -1,206 +1,36 @@
 # Ralph Progress Log
-Started: Sun Mar 22 15:44:26 KST 2026
-
-## Codebase Patterns
-- All services use Go stdlib only (no external deps) with `go.mod` at service root
-- Health endpoint pattern: `GET /healthz` → `{"status":"ok","service":"<name>"}`
-- FFmpeg streams use `-c copy` (no transcoding) and `-f flv` to RTMP destination
-- Docker images: `golang:1.22-alpine` builder + `alpine:3.19` runtime
-- Config files mounted read-only from `config/` directory
-- All services on `sentinel-net` internal Docker network
-- Graceful shutdown: SIGTERM → wait → SIGKILL pattern for FFmpeg processes
-- Exponential backoff with max 30s for reconnection loops
-- Web-backend cameras API matches DB `cameras.name` with streaming `cameraId` — names must be identical
-- YouTube stream cameras need DB entries in `cameras` table to appear in CCTV multi-view
-- Camera status from cctv-adapter only tracks RTSP cameras; YouTube cameras show "disconnected" status but still stream
-- verify.sh must use `docker run` with build images (golang:1.22-alpine, node:20-alpine) since runtime containers don't have dev tools
-- Camera CRUD follows same pattern as contacts CRUD: admin-only, partial updates via non-empty fields, `Enabled` uses *bool for explicit false
-- cameras table has: id, name, location, zone, stream_key, source_type (rtsp/youtube), source_url, enabled (INTEGER 0/1)
-- cameraResponse includes all DB fields plus HLSUrl and Status enriched from streaming/cctv-adapter services
-- Internal service-to-service endpoints use `/internal/` prefix (no auth), e.g., `GET /internal/cameras`
-- Password/auth handlers for authenticated users use getAuthUser(r) from authMiddleware context; viewer tokens have UserID=0
-- cctv-adapter reload: fetches from web-backend, filters to enabled RTSP cameras, diffs with running set
-- triggerCCTVReload() is async (goroutine) — fire-and-forget after CRUD operations
-- ManagementPage CRUD pattern: state vars → fetch → handlers → JSX (add form + list with inline edit + delete modal)
-- Admin-only sections gated by `showAccounts` (isAdmin()) in ManagementPage
-- CSS: `mgmt-select` for dropdowns, `mgmt-checkbox-label` for checkbox+label, `mgmt-badge-*` for inline badges
-- Notifier email endpoint: POST /api/send-email {to, subject, body} — internal, no auth; returns 503 if SMTP not configured
-- Invitations table: id, email, token (UUID, UNIQUE), status (pending/accepted/expired/cancelled), created_at, expires_at
-- Invitation CRUD: admin-only POST/GET/DELETE on /api/invitations, public GET /api/invitations/verify/{token}
-- Registration with valid invite token auto-approves user (status='active', skips admin approval)
-- google/uuid used for invitation tokens — already an indirect dep, now direct
-
+Started: Sun Mar 22 16:53:43 KST 2026
 ---
 
-## 2026-03-22 - US-001
-- Implemented youtube-adapter service: Go HTTP server + yt-dlp + FFmpeg
-- Resolves YouTube URLs via `yt-dlp --get-url`, streams via FFmpeg to RTMP
-- Auto-loops on video completion, exponential backoff on errors
-- Health endpoint at `/healthz`, status endpoint at `/api/streams/status`
-- Files changed: services/youtube-adapter/{Dockerfile,go.mod,main.go}, config/youtube-sources.json, docker-compose.yml, .ralph/verify.sh
-- **Learnings for future iterations:**
-  - youtube-adapter follows same pattern as cctv-adapter but uses yt-dlp for URL resolution instead of direct RTSP
-  - `-re` flag needed in FFmpeg for YouTube (reads at native frame rate, unlike RTSP which is real-time)
-  - Config uses {id, youtubeUrl, streamKey} format at /config/youtube-sources.json
-  - Added youtube-adapter to verify.sh service list for go vet checks
+## Codebase Patterns
+- Notifier service (services/notifier/main.go) has no external Go dependencies — all sanitization/validation must use stdlib only
+- Docker services communicate via `sentinel-net` bridge network — internal IPs are in private ranges (172.x)
+- Email sending goes: web-backend → notifier `/api/send-email` → SMTP
+- Go modules use `go 1.22` with multi-stage Docker builds (golang:1.22-alpine → alpine:3.19)
+- `links.go` already uses `crypto/rand` for UUID generation — no external uuid dep needed for random tokens
+- Runtime containers don't have Go toolchain — typecheck by running `docker compose build <service>`
+
 ---
 
 ## 2026-03-22 - US-002
-- Configured 2 real YouTube streams from @YC-corporation channel
-- Video 1 (yt-cam-1): wvBnTOR36A4 — 스마트제조 (947s)
-- Video 2 (yt-cam-2): aqsvNWQTiQ0 — CNC 가공 (470s)
-- Added migration v2 to seed yt-cam-1, yt-cam-2 in cameras DB table
-- Fixed verify.sh to use `docker run` with build images instead of `docker exec` on runtime containers
-- Files changed: config/youtube-sources.json, services/web-backend/migrations.go, .ralph/verify.sh
+- Implemented internal IP check for POST /api/send-email (private ranges: 10/8, 172.16/12, 192.168/16, loopback, IPv6)
+- Added HTML sanitization: strip script/iframe tags+content, on* event handlers, javascript: URIs
+- Allowlisted safe tags: p, a, h1-h6, br, strong, em, html, head, body
+- Added http.MaxBytesReader (1MB limit) on request body
+- Files changed: services/notifier/main.go
 - **Learnings for future iterations:**
-  - YouTube channel videos can be listed via `yt-dlp --flat-playlist --print "%(id)s %(title)s %(duration)s"` inside youtube-adapter container
-  - Runtime containers (alpine:3.19) don't have Go/Node — use build images for vet/typecheck
-  - Cameras need entries in BOTH config (youtube-sources.json) AND DB (cameras table) to appear in UI
-  - `INSERT ... WHERE NOT EXISTS` pattern needed for idempotent seeding since cameras.name has no UNIQUE constraint
-  - RTMP streams may show transient "Connection reset by peer" errors on startup; the reconnection loop handles this
+  - No external deps in notifier — regex-based HTML sanitization with stdlib
+  - `r.RemoteAddr` in Go includes port (e.g., "172.18.0.5:12345"), use net.SplitHostPort
+  - Docker bridge network assigns IPs in 172.x range, so private IP check covers all internal containers
 ---
 
 ## 2026-03-22 - US-003
-- Added migration v3: stream_key, source_type, source_url, enabled columns to cameras table
-- Backfilled yt-cam-* entries with source_type='youtube' and stream_key=name
-- Added POST/PUT/DELETE /api/cameras endpoints (admin only), following contacts CRUD pattern
-- Enhanced GET /api/cameras to return new fields (streamKey, sourceType, sourceUrl, enabled)
-- Files changed: services/web-backend/cameras.go, services/web-backend/migrations.go, services/web-backend/main.go
+- Replaced `uuid.New().String()` with `crypto/rand` (32 bytes) + `encoding/hex` = 64-char hex token
+- Removed `github.com/google/uuid` import from invitations.go (still indirect dep via sqlite)
+- Added error handling for crypto/rand failure (returns 500)
+- Files changed: services/web-backend/invitations.go
 - **Learnings for future iterations:**
-  - SQLite ALTER TABLE only supports ADD COLUMN, one per statement — multiple ALTERs need separate statements
-  - Partial update pattern: use pointer (*bool) for boolean fields to distinguish "not provided" from "false"
-  - scanCamera helper uses interface{Scan} to work with both sql.Row and sql.Rows
-  - All new camera routes go under apiMux (JWT-protected), not bare mux
----
-
-## 2026-03-22 - US-004
-- Added CameraManager.Reload() with diff-based reconciliation (stop removed, start new, keep unchanged)
-- Added POST /api/cameras/reload on cctv-adapter — fetches cameras from web-backend, filters enabled RTSP, reconciles
-- Added GET /internal/cameras on web-backend (no auth, internal service use)
-- Added triggerCCTVReload() calls in handleCreateCamera, handleUpdateCamera, handleDeleteCamera
-- Added WEB_BACKEND_URL env var to cctv-adapter in docker-compose.yml
-- Files changed: services/cctv-adapter/main.go, services/web-backend/cameras.go, services/web-backend/main.go, docker-compose.yml
-- **Learnings for future iterations:**
-  - Internal service-to-service endpoints should use `/internal/` prefix to distinguish from public `/api/` routes
-  - Reload is async (fire-and-forget goroutine) to avoid blocking the CRUD response
-  - CameraManager.Reload() diffs by cameraID+rtspUrl — unchanged cameras keep streaming uninterrupted
-  - StopCamera closes stopCh first, then sends SIGTERM, to cleanly exit the manageCameraStream loop
----
-
-## 2026-03-22 - US-005
-- Added Camera management section to ManagementPage.tsx (admin only)
-- Camera list shows name, location, zone, source type badge, enabled status
-- Add camera form: name, location, zone, source_type (RTSP/YouTube select), source_url, stream_key
-- Edit camera inline with all fields + enabled checkbox
-- Delete camera with confirmation dialog
-- Backend already triggers adapter reload after CRUD — no extra frontend work needed
-- Files changed: services/web-frontend/src/pages/ManagementPage.tsx, services/web-frontend/src/App.css
-- **Learnings for future iterations:**
-  - ManagementPage follows a repeating pattern: state vars → fetch function → CRUD handlers → JSX section with add form + list + edit inline + delete modal
-  - Camera section gated on `showAccounts` (isAdmin) — same guard as account management
-  - Use `mgmt-badge-*` classes for inline status/type badges in card names
-  - `mgmt-select` class added for styled select dropdowns (matches input styling)
-  - `mgmt-checkbox-label` class for inline checkbox+label pairs
-- DualCalendar component: standalone reusable dual-month date range picker in src/components/
-- Calendar dropdown pattern: trigger button opens absolute-positioned dropdown, auto-closes on selection
-- Mobile responsive: `@media (max-width: 480px)` stacks calendars vertically
----
-
-## 2026-03-22 - US-006
-- Replaced native `<input type="date">` fields with custom DualCalendar component
-- Two side-by-side month calendars with navigation arrows
-- Click-to-select range: first click sets start, second click sets end (auto-swaps if reversed)
-- Range highlighted visually between start and end dates
-- Reset button to clear date filter
-- Mobile: calendars stack vertically at 480px breakpoint
-- Auto-applies filter on date selection (no separate "조회" button needed)
-- Files changed: services/web-frontend/src/components/DualCalendar.tsx (new), services/web-frontend/src/pages/IncidentsPage.tsx, services/web-frontend/src/App.css
-- **Learnings for future iterations:**
-  - Created first reusable component in src/components/ — future UI components should go here
-  - Calendar grid uses CSS grid (7 columns) for weekday alignment
-  - Removed old `.incidents-date-input`, `.incidents-filter-row`, `.incidents-filter-sep` CSS — replaced by `.dc-*` classes
-  - `formatDateInput()` was removed from IncidentsPage (no longer needed)
-  - TypeScript: array index access needs `!` non-null assertion even after length guard
----
-
-## 2026-03-22 - US-007
-- Added POST /api/auth/change-password endpoint (any authenticated user)
-- Verifies current password via bcrypt before updating
-- New password minimum 8 characters, hashed with bcrypt before storage
-- Returns 400 for wrong current password or short new password
-- Route registered on apiMux (behind authMiddleware)
-- Files changed: services/web-backend/auth.go, services/web-backend/main.go
-- **Learnings for future iterations:**
-  - Password change handler uses getAuthUser(r) from authMiddleware context — no need for separate JWT parsing
-  - apiMux routes are already JWT-protected, so any `/api/` route gets auth for free
-  - viewer tokens (UserID=0) are rejected by checking user.UserID == 0
----
-
-## 2026-03-22 - US-008
-- Added password change form to SettingsPage.tsx
-- Three fields: current password, new password, confirm new password
-- Client-side validation: all fields required, min 8 chars, confirm must match
-- Calls POST /api/auth/change-password with currentPassword + newPassword
-- Success message shown, fields cleared after successful change
-- Error message on failure (wrong password, server error, timeout)
-- Added `.mgmt-form-success` CSS class for success messages (green, matching error style)
-- Files changed: services/web-frontend/src/pages/SettingsPage.tsx, services/web-frontend/src/App.css
-- **Learnings for future iterations:**
-  - SettingsPage was minimal (just logout button) — now has section dividers and form structure
-  - Reused `getAuthHeaders()` pattern locally (same as ManagementPage)
-  - `.mgmt-form-success` added as counterpart to `.mgmt-form-error` — use #2e7d32 green
----
-
-## 2026-03-22 - US-009
-- Added POST /api/send-email endpoint to notifier service
-- Accepts {to, subject, body} — supports HTML body via Content-Type text/html
-- SMTP config via env vars: SMTP_HOST, SMTP_PORT (default 587), SMTP_USER, SMTP_PASS, SMTP_FROM
-- Returns 503 if SMTP not configured (SMTP_HOST or SMTP_FROM empty)
-- Returns 400 for missing fields, 500 for send failure
-- Uses Go stdlib `net/smtp` with PlainAuth — no external dependencies added
-- Added SMTP env vars to notifier in docker-compose.yml
-- Files changed: services/notifier/main.go, docker-compose.yml
-- **Learnings for future iterations:**
-  - Go stdlib `net/smtp` handles SMTP well — PlainAuth + SendMail for basic email sending
-  - SMTP config check: only need SMTP_HOST and SMTP_FROM to be non-empty to consider email "configured"
-  - Email endpoint is service-internal (no auth) — called by web-backend, not by frontend directly
-  - Pattern: 503 for "not configured" services, 500 for runtime failures
----
-
-## 2026-03-22 - US-010
-- Added invitations table (migration v4): id, email, token (UUID), status, created_at, expires_at
-- POST /api/invitations creates invitation + sends email via notifier (admin only, async email)
-- GET /api/invitations lists all invitations with auto-expire check (admin only)
-- DELETE /api/invitations/{id} cancels pending invitation (admin only)
-- GET /api/invitations/verify/{token} validates token (public, for registration page)
-- Modified handleRegister to accept inviteToken — valid invite auto-approves user (status='active')
-- acceptInvitation marks token as 'accepted' after successful registration
-- Added NOTIFIER_URL and FRONTEND_URL env vars to web-backend in docker-compose.yml
-- Files changed: services/web-backend/invitations.go (new), services/web-backend/migrations.go, services/web-backend/auth.go, services/web-backend/main.go, docker-compose.yml
-- **Learnings for future iterations:**
-  - google/uuid was already an indirect dep — promoted to direct use for invitation tokens
-  - Public routes (no auth) registered on bare mux, not apiMux; verify endpoint is public for registration page
-  - Invitation email sent async (goroutine) — fire-and-forget, same pattern as triggerCCTVReload
-  - DELETE /api/invitations/{id} does soft-cancel (status='cancelled') not hard delete, for audit trail
-  - Auto-expire logic is checked at read time (list + verify), not via background job
-  - registerRequest extended with InviteToken field — backwards compatible (zero value = no invite)
----
-
-## 2026-03-22 - US-011
-- Added invitation management section to ManagementPage (admin only)
-- Email input with invite button, invitation list with status badges (pending/accepted/expired/cancelled)
-- Cancel button per pending invitation with confirmation dialog
-- Modified LoginPage to handle /register?invite={token} URL
-- Verifies invite token via GET /api/invitations/verify/{token} on page load
-- Shows invited context banner with email when valid invite detected
-- Registration with invite token sends inviteToken in request body (auto-approves)
-- Success message changes based on invite context
-- Added /register route handling in App.tsx (shows LoginPage for register path)
-- Added mgmt-badge-invite-* CSS classes for invitation status badges
-- Files changed: services/web-frontend/src/pages/ManagementPage.tsx, services/web-frontend/src/pages/LoginPage.tsx, services/web-frontend/src/App.tsx, services/web-frontend/src/App.css
-- **Learnings for future iterations:**
-  - URL params: use `new URLSearchParams(window.location.search)` for query params, `window.location.pathname` for route matching
-  - SPA routing without react-router: use `window.history.replaceState({}, "", "/")` to clean up URL after processing params
-  - Invite verification is public endpoint (no auth) — registered on bare mux at /api/invitations/verify/{token}
-  - createdAt from backend is UTC without timezone suffix — append "Z" for correct Date parsing: `new Date(inv.createdAt + "Z")`
+  - `google/uuid` remains in go.mod as indirect dep (used by modernc.org/sqlite) — don't remove from go.mod
+  - Token verification uses string comparison (`WHERE token = ?`), so any token format works
+  - Build check: `docker compose build web-backend` (runtime container has no Go toolchain)
 ---
