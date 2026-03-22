@@ -141,3 +141,15 @@ Started: Sun Mar 22 13:02:53 KST 2026
   - proxy_read_timeout 86400s (24h) keeps long-lived WebSocket connections alive
   - Config-only changes don't need Go typecheck — just validate with docker compose config
 ---
+
+## 2026-03-22 - US-012
+- Fixed HLS.js instance leak when camera status changes to "disconnected"
+- The useEffect now explicitly destroys hlsRef.current at the top of every execution, before the disconnected early return
+- Also nullifies hlsRef.current after fatal error destroy (was previously left dangling)
+- The cleanup function on unmount still works as before for normal connected→unmount path
+- Files changed: services/web-frontend/src/components/HLSPlayer.tsx
+- **Learnings for future iterations:**
+  - React useEffect cleanup only runs on re-render or unmount — if an early return skips registering a cleanup, stale refs can leak
+  - Pattern: destroy-at-top-of-effect is safer than relying solely on the returned cleanup function when there's conditional early returns
+  - Frontend typecheck: `docker run --rm -v "$(pwd):/app" -w /app node:20-alpine sh -c "npm install --silent 2>/dev/null && npx tsc --noEmit"`
+---
