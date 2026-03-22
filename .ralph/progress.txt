@@ -56,3 +56,13 @@ Started: Sat Mar 22 13:44:00 KST 2026
   - Context cancel must be called explicitly in loop iterations (not deferred) to avoid resource leak
   - The `httpClient` has its own 10s timeout, plus each request gets a 10s context timeout — effectively double-bounded
 ---
+
+## 2026-03-22 - US-005
+- **What was implemented**: Added IP-based rate limiting on POST /auth/login (10 req/min) and POST /auth/register (5 req/min). New ratelimit.go file with sync.Map + atomic counters for lock-free concurrent access. Middleware wrapper pattern. Stale entries cleaned every 5 minutes via background goroutine.
+- **Files changed**: services/web-backend/ratelimit.go (new), services/web-backend/main.go
+- **Learnings for future iterations:**
+  - Rate limiter uses atomic.Int64 for count and windowEnd — no mutex needed for the hot path
+  - `clientIP()` checks X-Forwarded-For first (nginx proxy), falls back to RemoteAddr
+  - `rateLimitMiddleware` wraps `http.HandlerFunc` — applied inline at route registration in main.go
+  - Cleanup goroutine uses `sync.Map.Range` + `Delete` which is safe for concurrent access
+---
