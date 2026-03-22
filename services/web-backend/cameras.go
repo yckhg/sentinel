@@ -130,7 +130,10 @@ func handleListCameras(db *sql.DB) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 1. Query cameras from DB
-		rows, err := db.Query("SELECT id, name, location, zone FROM cameras ORDER BY id ASC")
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		rows, err := db.QueryContext(ctx, "SELECT id, name, location, zone FROM cameras ORDER BY id ASC")
 		if err != nil {
 			log.Printf("query cameras error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})

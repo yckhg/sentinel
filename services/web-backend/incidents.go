@@ -30,16 +30,19 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
 		// Use provided occurredAt or default to now (handled by DB default)
 		var result sql.Result
 		var err error
 		if req.OccurredAt != "" {
-			result, err = db.Exec(
+			result, err = db.ExecContext(ctx,
 				"INSERT INTO incidents (site_id, description, occurred_at) VALUES (?, ?, ?)",
 				req.SiteID, req.Description, req.OccurredAt,
 			)
 		} else {
-			result, err = db.Exec(
+			result, err = db.ExecContext(ctx,
 				"INSERT INTO incidents (site_id, description) VALUES (?, ?)",
 				req.SiteID, req.Description,
 			)
@@ -54,7 +57,7 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 
 		// Fetch site info for the broadcast payload
 		var address, managerName, managerPhone string
-		row := db.QueryRow("SELECT address, manager_name, manager_phone FROM sites LIMIT 1")
+		row := db.QueryRowContext(ctx, "SELECT address, manager_name, manager_phone FROM sites LIMIT 1")
 		if err := row.Scan(&address, &managerName, &managerPhone); err != nil {
 			// Site info may not exist yet — use empty values
 			log.Printf("site info not found for broadcast: %v", err)
@@ -63,7 +66,7 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 		occurredAt := req.OccurredAt
 		if occurredAt == "" {
 			// Fetch the DB-generated timestamp
-			db.QueryRow("SELECT datetime(occurred_at) FROM incidents WHERE id = ?", incidentID).Scan(&occurredAt)
+			db.QueryRowContext(ctx, "SELECT datetime(occurred_at) FROM incidents WHERE id = ?", incidentID).Scan(&occurredAt)
 		}
 
 		log.Printf("incident created: id=%d siteId=%s description=%s", incidentID, req.SiteID, req.Description)
@@ -125,10 +128,13 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 
 		whereClause := "WHERE " + strings.Join(conditions, " AND ")
 
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
 		// Count total
 		var total int
 		countQuery := "SELECT COUNT(*) FROM incidents " + whereClause
-		if err := db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		if err := db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
 			log.Printf("count incidents error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 			return
@@ -138,7 +144,7 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 		dataQuery := "SELECT id, site_id, description, datetime(occurred_at), confirmed_at, confirmed_by FROM incidents " +
 			whereClause + " ORDER BY datetime(occurred_at) DESC LIMIT ? OFFSET ?"
 		dataArgs := append(args, limit, offset)
-		rows, err := db.Query(dataQuery, dataArgs...)
+		rows, err := db.QueryContext(ctx, dataQuery, dataArgs...)
 		if err != nil {
 			log.Printf("list incidents error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/http"
@@ -112,6 +113,9 @@ func initDB(path string) (*sql.DB, error) {
 		return nil, err
 	}
 
+	ctx, cancel := dbCtx(context.Background())
+	defer cancel()
+
 	// SQLite pragmas for performance and safety
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
@@ -119,13 +123,13 @@ func initDB(path string) (*sql.DB, error) {
 		"PRAGMA foreign_keys=ON",
 	}
 	for _, p := range pragmas {
-		if _, err := db.Exec(p); err != nil {
+		if _, err := db.ExecContext(ctx, p); err != nil {
 			db.Close()
 			return nil, err
 		}
 	}
 
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}

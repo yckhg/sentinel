@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -61,8 +62,11 @@ var migrations = []migration{
 }
 
 func runMigrations(db *sql.DB) error {
+	ctx, cancel := dbCtx(context.Background())
+	defer cancel()
+
 	// Create migrations tracking table
-	_, err := db.Exec(`
+	_, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS _migrations (
 			version INTEGER PRIMARY KEY,
 			name TEXT NOT NULL,
@@ -75,7 +79,7 @@ func runMigrations(db *sql.DB) error {
 
 	for _, m := range migrations {
 		var exists int
-		err := db.QueryRow("SELECT COUNT(*) FROM _migrations WHERE version = ?", m.version).Scan(&exists)
+		err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM _migrations WHERE version = ?", m.version).Scan(&exists)
 		if err != nil {
 			return fmt.Errorf("check migration %d: %w", m.version, err)
 		}
@@ -85,17 +89,17 @@ func runMigrations(db *sql.DB) error {
 
 		log.Printf("applying migration %d: %s", m.version, m.name)
 
-		tx, err := db.Begin()
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("begin migration %d: %w", m.version, err)
 		}
 
-		if _, err := tx.Exec(m.sql); err != nil {
+		if _, err := tx.ExecContext(ctx, m.sql); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("execute migration %d: %w", m.version, err)
 		}
 
-		if _, err := tx.Exec("INSERT INTO _migrations (version, name) VALUES (?, ?)", m.version, m.name); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO _migrations (version, name) VALUES (?, ?)", m.version, m.name); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("record migration %d: %w", m.version, err)
 		}

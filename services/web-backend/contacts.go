@@ -29,7 +29,10 @@ func validatePhone(phone string) bool {
 
 func handleListContacts(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		rows, err := db.Query("SELECT id, name, phone FROM contacts ORDER BY id ASC")
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		rows, err := db.QueryContext(ctx, "SELECT id, name, phone FROM contacts ORDER BY id ASC")
 		if err != nil {
 			log.Printf("query contacts error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
@@ -81,7 +84,10 @@ func handleCreateContact(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		result, err := db.Exec(
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		result, err := db.ExecContext(ctx,
 			"INSERT INTO contacts (name, phone) VALUES (?, ?)",
 			req.Name, req.Phone,
 		)
@@ -126,9 +132,12 @@ func handleUpdateContact(db *sql.DB) http.HandlerFunc {
 		req.Name = strings.TrimSpace(req.Name)
 		req.Phone = strings.TrimSpace(req.Phone)
 
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
 		// Load existing contact
 		var existing contactResponse
-		err := db.QueryRow("SELECT id, name, phone FROM contacts WHERE id = ?", id).Scan(
+		err := db.QueryRowContext(ctx, "SELECT id, name, phone FROM contacts WHERE id = ?", id).Scan(
 			&existing.ID, &existing.Name, &existing.Phone,
 		)
 		if err == sql.ErrNoRows {
@@ -153,7 +162,7 @@ func handleUpdateContact(db *sql.DB) http.HandlerFunc {
 			existing.Phone = req.Phone
 		}
 
-		_, err = db.Exec(
+		_, err = db.ExecContext(ctx,
 			"UPDATE contacts SET name = ?, phone = ? WHERE id = ?",
 			existing.Name, existing.Phone, id,
 		)
@@ -183,7 +192,10 @@ func handleDeleteContact(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		result, err := db.Exec("DELETE FROM contacts WHERE id = ?", id)
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		result, err := db.ExecContext(ctx, "DELETE FROM contacts WHERE id = ?", id)
 		if err != nil {
 			log.Printf("delete contact error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})

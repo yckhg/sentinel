@@ -30,7 +30,10 @@ func handleListSites(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query("SELECT id, address, manager_name, manager_phone FROM sites ORDER BY id ASC")
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		rows, err := db.QueryContext(ctx, "SELECT id, address, manager_name, manager_phone FROM sites ORDER BY id ASC")
 		if err != nil {
 			log.Printf("query sites error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
@@ -77,9 +80,12 @@ func handleUpdateSite(db *sql.DB) http.HandlerFunc {
 		req.ManagerName = strings.TrimSpace(req.ManagerName)
 		req.ManagerPhone = strings.TrimSpace(req.ManagerPhone)
 
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
 		// Load existing site
 		var existing siteResponse
-		err := db.QueryRow("SELECT id, address, manager_name, manager_phone FROM sites WHERE id = ?", id).Scan(
+		err := db.QueryRowContext(ctx, "SELECT id, address, manager_name, manager_phone FROM sites WHERE id = ?", id).Scan(
 			&existing.ID, &existing.Address, &existing.ManagerName, &existing.ManagerPhone,
 		)
 		if err == sql.ErrNoRows {
@@ -107,7 +113,7 @@ func handleUpdateSite(db *sql.DB) http.HandlerFunc {
 			existing.ManagerPhone = req.ManagerPhone
 		}
 
-		_, err = db.Exec(
+		_, err = db.ExecContext(ctx,
 			"UPDATE sites SET address = ?, manager_name = ?, manager_phone = ? WHERE id = ?",
 			existing.Address, existing.ManagerName, existing.ManagerPhone, id,
 		)

@@ -17,6 +17,12 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const dbTimeout = 5 * time.Second
+
+func dbCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, dbTimeout)
+}
+
 // JWT configuration
 var jwtSecret []byte
 
@@ -139,7 +145,10 @@ func handleRegister(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		result, err := db.Exec(
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		result, err := db.ExecContext(ctx,
 			"INSERT INTO users (username, password_hash, name) VALUES (?, ?, ?)",
 			req.Username, string(hash), req.Name,
 		)
@@ -181,9 +190,12 @@ func handleLogin(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
 		var id int64
 		var passwordHash, role, status string
-		err := db.QueryRow(
+		err := db.QueryRowContext(ctx,
 			"SELECT id, password_hash, role, status FROM users WHERE username = ?",
 			req.Username,
 		).Scan(&id, &passwordHash, &role, &status)
@@ -332,8 +344,11 @@ func seedAdminUser(db *sql.DB) error {
 		log.Printf("WARNING: Admin password is shorter than 8 characters. Use a stronger password for production.")
 	}
 
+	ctx, cancel := dbCtx(context.Background())
+	defer cancel()
+
 	var exists int
-	err := db.QueryRow("SELECT COUNT(*) FROM users WHERE username = ?", adminUser).Scan(&exists)
+	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM users WHERE username = ?", adminUser).Scan(&exists)
 	if err != nil {
 		return err
 	}
@@ -346,7 +361,7 @@ func seedAdminUser(db *sql.DB) error {
 		return err
 	}
 
-	_, err = db.Exec(
+	_, err = db.ExecContext(ctx,
 		"INSERT INTO users (username, password_hash, name, role, status) VALUES (?, ?, ?, 'admin', 'active')",
 		adminUser, string(hash), "Administrator",
 	)
@@ -408,7 +423,10 @@ func handlePendingUsers(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		rows, err := db.QueryContext(ctx,
 			"SELECT id, username, name, status, created_at FROM users WHERE status = 'pending' ORDER BY created_at ASC",
 		)
 		if err != nil {
@@ -451,7 +469,10 @@ func handleApproveUser(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		result, err := db.Exec(
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		result, err := db.ExecContext(ctx,
 			"UPDATE users SET status = 'active' WHERE id = ? AND status = 'pending'",
 			parsedID,
 		)
@@ -491,7 +512,10 @@ func handleRejectUser(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		result, err := db.Exec(
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		result, err := db.ExecContext(ctx,
 			"UPDATE users SET status = 'rejected' WHERE id = ? AND status = 'pending'",
 			parsedID,
 		)
@@ -518,7 +542,10 @@ func handleActiveUsers(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		rows, err := db.QueryContext(ctx,
 			"SELECT id, username, name, role, status, created_at FROM users WHERE status = 'active' ORDER BY created_at ASC",
 		)
 		if err != nil {
