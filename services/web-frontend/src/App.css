@@ -445,6 +445,66 @@ body {
   vertical-align: middle;
 }
 
+.mgmt-badge-source {
+  display: inline-block;
+  font-size: 0.6rem;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+  color: #fff;
+}
+
+.mgmt-badge-rtsp {
+  background: #7b1fa2;
+}
+
+.mgmt-badge-youtube {
+  background: #c62828;
+}
+
+.mgmt-badge-disabled {
+  display: inline-block;
+  font-size: 0.6rem;
+  font-weight: 600;
+  background: #9e9e9e;
+  color: #fff;
+  padding: 1px 5px;
+  border-radius: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.mgmt-select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  outline: none;
+  background: #fff;
+  transition: border-color 0.15s;
+}
+
+.mgmt-select:focus {
+  border-color: #1976d2;
+}
+
+.mgmt-checkbox-label {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem !important;
+  color: #1a1a1a !important;
+  cursor: pointer;
+}
+
+.mgmt-checkbox-label input[type="checkbox"] {
+  width: auto !important;
+  margin: 0;
+}
+
 /* Temp link URL display */
 .mgmt-link-label {
   font-size: 0.8rem;
