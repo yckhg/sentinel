@@ -25,3 +25,12 @@ Started: Sat Mar 22 13:44:00 KST 2026
   - Verified fix by running `docker run` + `wget --spider -q http://127.0.0.1:8080/healthz` inside container.
   - Other service healthchecks (hw-gateway, cctv-adapter, notifier, web-backend, web-frontend) have the same IPv6 issue — they should all use `127.0.0.1`.
 ---
+
+## 2026-03-22 - US-002
+- **What was implemented**: Fixed web-frontend healthcheck by changing `localhost` to `127.0.0.1` in docker-compose.yml. Added `start_period: 10s` and reduced interval to 15s.
+- **Files changed**: docker-compose.yml (web-frontend healthcheck section)
+- **Learnings for future iterations:**
+  - Web-frontend nginx.conf already has a `/healthz` endpoint (line 40) that returns JSON — no need to use root `/`.
+  - Verified container reports `healthy` within 15s after restart.
+  - verify.sh fails on all go vet/typecheck steps because runtime containers don't have dev tools. For docker-compose-only changes, rely on `docker compose config` validation and runtime health verification.
+---

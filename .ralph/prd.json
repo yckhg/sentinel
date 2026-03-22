@@ -26,8 +26,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Fixed: Same IPv6 issue as US-001. Changed localhost to 127.0.0.1 in healthcheck URL. Kept /healthz endpoint (exists in nginx.conf). Added start_period: 10s."
     },
     {
       "id": "US-003",
