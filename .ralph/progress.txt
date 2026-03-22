@@ -95,4 +95,24 @@ Started: Sun Mar 22 15:44:26 KST 2026
   - Use `mgmt-badge-*` classes for inline status/type badges in card names
   - `mgmt-select` class added for styled select dropdowns (matches input styling)
   - `mgmt-checkbox-label` class for inline checkbox+label pairs
+- DualCalendar component: standalone reusable dual-month date range picker in src/components/
+- Calendar dropdown pattern: trigger button opens absolute-positioned dropdown, auto-closes on selection
+- Mobile responsive: `@media (max-width: 480px)` stacks calendars vertically
+---
+
+## 2026-03-22 - US-006
+- Replaced native `<input type="date">` fields with custom DualCalendar component
+- Two side-by-side month calendars with navigation arrows
+- Click-to-select range: first click sets start, second click sets end (auto-swaps if reversed)
+- Range highlighted visually between start and end dates
+- Reset button to clear date filter
+- Mobile: calendars stack vertically at 480px breakpoint
+- Auto-applies filter on date selection (no separate "조회" button needed)
+- Files changed: services/web-frontend/src/components/DualCalendar.tsx (new), services/web-frontend/src/pages/IncidentsPage.tsx, services/web-frontend/src/App.css
+- **Learnings for future iterations:**
+  - Created first reusable component in src/components/ — future UI components should go here
+  - Calendar grid uses CSS grid (7 columns) for weekday alignment
+  - Removed old `.incidents-date-input`, `.incidents-filter-row`, `.incidents-filter-sep` CSS — replaced by `.dc-*` classes
+  - `formatDateInput()` was removed from IncidentsPage (no longer needed)
+  - TypeScript: array index access needs `!` non-null assertion even after length guard
 ---
