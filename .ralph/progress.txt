@@ -12,6 +12,8 @@ Started: Sun Mar 22 13:02:53 KST 2026
 - equipmentStore uses sync.RWMutex embedded in anonymous struct
 - All services expose GET /healthz endpoints — use for Docker healthchecks and monitoring
 - Alpine images have wget (not curl) — use `wget --spider -q` for healthchecks
+- Frontend typecheck: `docker run --rm -v "$(pwd):/app" -w /app node:20-alpine sh -c "npm install --silent 2>/dev/null && npx tsc --noEmit"` from web-frontend dir
+- cctv-adapter: watchdogWriter wraps io.Writer with atomic.Int64 for lock-free output timestamp tracking
 ---
 
 ## 2026-03-22 - US-001
@@ -152,4 +154,18 @@ Started: Sun Mar 22 13:02:53 KST 2026
   - React useEffect cleanup only runs on re-render or unmount — if an early return skips registering a cleanup, stale refs can leak
   - Pattern: destroy-at-top-of-effect is safer than relying solely on the returned cleanup function when there's conditional early returns
   - Frontend typecheck: `docker run --rm -v "$(pwd):/app" -w /app node:20-alpine sh -c "npm install --silent 2>/dev/null && npx tsc --noEmit"`
+---
+
+## 2026-03-22 - US-013
+- Added FFmpeg output watchdog to cctv-adapter that kills hung processes
+- Created watchdogWriter type that wraps io.Writer with atomic.Int64 timestamp tracking
+- Watchdog goroutine checks every timeout/2 interval; kills FFmpeg if no stdout/stderr output for FFMPEG_TIMEOUT seconds
+- FFMPEG_TIMEOUT env var configurable (default 30s), parsed as integer seconds
+- Watchdog exits cleanly on: process done (processDone channel), stop signal (stopCh), or after killing process
+- Files changed: services/cctv-adapter/main.go, services/cctv-adapter/AGENTS.md
+- **Learnings for future iterations:**
+  - sync/atomic.Int64 is ideal for cross-goroutine timestamp tracking — no mutex needed on the hot write path
+  - watchdog ticker interval should be < timeout (timeout/2 gives reasonable detection latency)
+  - Need a processDone channel to cleanly exit watchdog when FFmpeg exits normally (otherwise goroutine leaks)
+  - FFmpeg writes diagnostics to stderr, video data to stdout pipe — monitoring both catches all cases
 ---
