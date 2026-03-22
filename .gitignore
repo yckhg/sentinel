@@ -40,3 +40,10 @@ logs/
 
 # HLS segments (generated at runtime, inside containers only)
 # Note: Do NOT use *.ts here — it blocks TypeScript files
+
+# Claude / Ralph (AI agent files)
+AGENTS.md
+CLAUDE.md
+.claude/
+.ralph/
+tasks/
