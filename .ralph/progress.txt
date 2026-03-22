@@ -20,6 +20,9 @@ Started: Sun Mar 22 15:44:26 KST 2026
 - Internal service-to-service endpoints use `/internal/` prefix (no auth), e.g., `GET /internal/cameras`
 - cctv-adapter reload: fetches from web-backend, filters to enabled RTSP cameras, diffs with running set
 - triggerCCTVReload() is async (goroutine) — fire-and-forget after CRUD operations
+- ManagementPage CRUD pattern: state vars → fetch → handlers → JSX (add form + list with inline edit + delete modal)
+- Admin-only sections gated by `showAccounts` (isAdmin()) in ManagementPage
+- CSS: `mgmt-select` for dropdowns, `mgmt-checkbox-label` for checkbox+label, `mgmt-badge-*` for inline badges
 
 ---
 
@@ -76,4 +79,20 @@ Started: Sun Mar 22 15:44:26 KST 2026
   - Reload is async (fire-and-forget goroutine) to avoid blocking the CRUD response
   - CameraManager.Reload() diffs by cameraID+rtspUrl — unchanged cameras keep streaming uninterrupted
   - StopCamera closes stopCh first, then sends SIGTERM, to cleanly exit the manageCameraStream loop
+---
+
+## 2026-03-22 - US-005
+- Added Camera management section to ManagementPage.tsx (admin only)
+- Camera list shows name, location, zone, source type badge, enabled status
+- Add camera form: name, location, zone, source_type (RTSP/YouTube select), source_url, stream_key
+- Edit camera inline with all fields + enabled checkbox
+- Delete camera with confirmation dialog
+- Backend already triggers adapter reload after CRUD — no extra frontend work needed
+- Files changed: services/web-frontend/src/pages/ManagementPage.tsx, services/web-frontend/src/App.css
+- **Learnings for future iterations:**
+  - ManagementPage follows a repeating pattern: state vars → fetch function → CRUD handlers → JSX section with add form + list + edit inline + delete modal
+  - Camera section gated on `showAccounts` (isAdmin) — same guard as account management
+  - Use `mgmt-badge-*` classes for inline status/type badges in card names
+  - `mgmt-select` class added for styled select dropdowns (matches input styling)
+  - `mgmt-checkbox-label` class for inline checkbox+label pairs
 ---
