@@ -131,3 +131,13 @@ Started: Sun Mar 22 13:02:53 KST 2026
   - mosquitto_sub with -C 1 -W 3 reads 1 message from $SYS/# with 3s timeout — reliable broker check
   - Use $$SYS in docker-compose.yml to escape the $ (prevents docker compose variable interpolation)
 ---
+
+## 2026-03-22 - US-011
+- Added proxy_connect_timeout 60s and proxy_send_timeout 60s to WebSocket location block in nginx.conf
+- Added explicit 's' suffix to existing proxy_read_timeout 86400 → 86400s for consistency
+- Files changed: services/web-frontend/nginx.conf
+- **Learnings for future iterations:**
+  - nginx.conf WebSocket proxy needs all three timeout directives: connect, send, read
+  - proxy_read_timeout 86400s (24h) keeps long-lived WebSocket connections alive
+  - Config-only changes don't need Go typecheck — just validate with docker compose config
+---
