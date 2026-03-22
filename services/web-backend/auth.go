@@ -577,6 +577,78 @@ func handleActiveUsers(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// --- Password change ---
+
+type changePasswordRequest struct {
+	CurrentPassword string `json:"currentPassword"`
+	NewPassword     string `json:"newPassword"`
+}
+
+func handleChangePassword(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := getAuthUser(r)
+		if user.UserID == 0 {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+			return
+		}
+
+		var req changePasswordRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+
+		if req.CurrentPassword == "" || req.NewPassword == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "currentPassword and newPassword are required"})
+			return
+		}
+
+		if len(req.NewPassword) < 8 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "new password must be at least 8 characters"})
+			return
+		}
+
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		var passwordHash string
+		err := db.QueryRowContext(ctx,
+			"SELECT password_hash FROM users WHERE id = ?",
+			user.UserID,
+		).Scan(&passwordHash)
+		if err != nil {
+			log.Printf("change password query error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.CurrentPassword)); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "current password is incorrect"})
+			return
+		}
+
+		newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+		if err != nil {
+			log.Printf("bcrypt error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		_, err = db.ExecContext(ctx,
+			"UPDATE users SET password_hash = ? WHERE id = ?",
+			string(newHash), user.UserID,
+		)
+		if err != nil {
+			log.Printf("update password error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		log.Printf("password changed: userId=%d", user.UserID)
+		writeJSON(w, http.StatusOK, map[string]string{"message": "password changed successfully"})
+	}
+}
+
 // --- Helpers ---
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
