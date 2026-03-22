@@ -8,6 +8,8 @@ Started: Sun Mar 22 13:02:53 KST 2026
 - Typecheck via `docker run --rm -v "$(pwd):/app" -w /app golang:1.22-alpine sh -c "go mod tidy && go vet ./..."` from service dir
 - Master branch is `master` not `main`
 - /data/ is volume-mounted in web-backend container — use it for persistent state files
+- hw-gateway has a single main.go with all logic — MQTT handlers, HTTP handlers, heartbeat checker
+- equipmentStore uses sync.RWMutex embedded in anonymous struct
 ---
 
 ## 2026-03-22 - US-001
@@ -31,4 +33,15 @@ Started: Sun Mar 22 13:02:53 KST 2026
 - **Learnings for future iterations:**
   - os.ReadFile + os.WriteFile are simple for small persistence needs
   - /data/ mount point is shared across restarts — good for any state that needs to survive
+---
+
+## 2026-03-22 - US-003
+- Split heartbeatChecker into two phases: RLock for reading lastSeen, then Lock for marking dead
+- Re-checks condition under write lock to avoid TOCTOU race (heartbeat could arrive between phases)
+- All field writes in handleHeartbeat already correctly held write lock
+- Files changed: services/hw-gateway/main.go
+- **Learnings for future iterations:**
+  - When splitting read/write lock phases, always re-check the condition under the write lock
+  - hw-gateway is a single main.go file — all MQTT handling, HTTP handlers, and background goroutines
+  - equipmentStore uses embedded sync.RWMutex in anonymous struct pattern
 ---
