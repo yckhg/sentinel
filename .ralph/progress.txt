@@ -15,6 +15,8 @@ Started: Sat Mar 22 13:44:00 KST 2026
 - Web-frontend: nginx on port 80, proxies /api/ and /auth/ to web-backend:8080, /live/ to streaming:8080.
 - Web-frontend's `nginx:alpine` crashes if upstream hosts (web-backend, streaming) are not DNS-resolvable at startup.
 - cctv-adapter: watchdogWriter wraps io.Writer with atomic.Int64 for lock-free output timestamp tracking
+- web-backend DB calls: all handlers use factory pattern `func handleXxx(db *sql.DB) http.HandlerFunc` with `r *http.Request` available for `r.Context()`
+- web-backend: `dbCtx(parent)` helper in auth.go provides 5s timeout context — reuse across all files in the package
 ---
 
 ## 2026-03-22 13:44 - US-001
@@ -33,4 +35,14 @@ Started: Sat Mar 22 13:44:00 KST 2026
   - Web-frontend nginx.conf already has a `/healthz` endpoint (line 40) that returns JSON — no need to use root `/`.
   - Verified container reports `healthy` within 15s after restart.
   - verify.sh fails on all go vet/typecheck steps because runtime containers don't have dev tools. For docker-compose-only changes, rely on `docker compose config` validation and runtime health verification.
+---
+
+## 2026-03-22 - US-003
+- **What was implemented**: Added context.WithTimeout (5s) to all database operations in web-backend. Changed db.Query/QueryRow/Exec to their Context variants (QueryContext/QueryRowContext/ExecContext). HTTP handlers derive context from r.Context(); startup code (migrations, seedAdminUser, initDB) uses context.Background().
+- **Files changed**: auth.go, cameras.go, contacts.go, incidents.go, main.go, migrations.go, sites.go
+- **Learnings for future iterations:**
+  - Created `dbCtx(parent)` helper in auth.go — available to all files in the `main` package without imports
+  - `db.BeginTx(ctx, nil)` replaces `db.Begin()` for context-aware transactions; `tx.ExecContext(ctx, ...)` for transaction queries
+  - `db.PingContext(ctx)` replaces `db.Ping()` for context-aware connectivity checks
+  - All 7 Go files in web-backend needed changes — no DB calls in equipment.go, links.go, or websocket.go
 ---

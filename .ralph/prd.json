@@ -40,8 +40,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added 5s context.WithTimeout to all db.Query/QueryRow/Exec calls. HTTP handlers use r.Context(), startup code uses context.Background(). Helper dbCtx() defined in auth.go for reuse across package."
     },
     {
       "id": "US-004",
