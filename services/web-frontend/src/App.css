@@ -727,36 +727,198 @@ body {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
-.incidents-filter-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.incidents-date-input {
-  flex: 1;
-  padding: 8px 10px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  outline: none;
-  min-width: 0;
-}
-
-.incidents-date-input:focus {
-  border-color: #1976d2;
-}
-
-.incidents-filter-sep {
-  color: #999;
-  font-size: 0.85rem;
-  flex-shrink: 0;
-}
 
 .incidents-filter-actions {
   display: flex;
   gap: 8px;
+}
+
+/* Dual Calendar */
+.dc-wrapper {
+  position: relative;
+}
+
+.dc-trigger-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.dc-trigger-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 0.85rem;
+  color: #333;
+  cursor: pointer;
+  text-align: left;
+}
+
+.dc-trigger-btn:hover {
+  border-color: #1976d2;
+}
+
+.dc-trigger-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.dc-trigger-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.dc-reset-btn {
+  flex-shrink: 0;
+}
+
+.dc-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  padding: 12px;
+  margin-top: 4px;
+}
+
+.dc-hint {
+  text-align: center;
+  font-size: 0.8rem;
+  color: #1976d2;
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+
+.dc-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.dc-nav-btn {
+  background: none;
+  border: none;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: #666;
+}
+
+.dc-nav-btn:hover {
+  background: #f0f0f0;
+}
+
+.dc-nav-spacer {
+  flex: 1;
+}
+
+.dc-calendars {
+  display: flex;
+  gap: 12px;
+}
+
+.dc-month {
+  flex: 1;
+  min-width: 0;
+}
+
+.dc-month-title {
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 8px;
+}
+
+.dc-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 0;
+  margin-bottom: 4px;
+}
+
+.dc-weekday {
+  text-align: center;
+  font-size: 0.65rem;
+  color: #999;
+  padding: 2px 0;
+}
+
+.dc-days {
+  display: flex;
+  flex-direction: column;
+}
+
+.dc-week {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 0;
+}
+
+.dc-day {
+  text-align: center;
+  font-size: 0.75rem;
+  padding: 6px 2px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.1s;
+  user-select: none;
+}
+
+.dc-day:hover:not(.dc-day-empty):not(.dc-day-disabled) {
+  background: #e3f2fd;
+}
+
+.dc-day-empty {
+  cursor: default;
+}
+
+.dc-day-disabled {
+  color: #ccc;
+  cursor: default;
+}
+
+.dc-day-today {
+  font-weight: 700;
+  color: #1976d2;
+}
+
+.dc-day-selected {
+  background: #1976d2 !important;
+  color: #fff !important;
+  font-weight: 600;
+}
+
+.dc-day-in-range {
+  background: #e3f2fd;
+  border-radius: 0;
+}
+
+.dc-day-range-start {
+  border-radius: 4px 0 0 4px;
+}
+
+.dc-day-range-end {
+  border-radius: 0 4px 4px 0;
+}
+
+/* Mobile: stack calendars vertically */
+@media (max-width: 480px) {
+  .dc-calendars {
+    flex-direction: column;
+    gap: 16px;
+  }
 }
 
 .incidents-count {

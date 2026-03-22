@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
+import DualCalendar from "../components/DualCalendar";
 
 interface Incident {
   id: number;
@@ -38,12 +39,6 @@ function formatDateTime(iso: string): string {
   }
 }
 
-function formatDateInput(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
 
 export default function IncidentsPage() {
   const [incidents, setIncidents] = useState<Incident[]>([]);
@@ -93,11 +88,6 @@ export default function IncidentsPage() {
     fetchIncidents(1, "", "", false);
   }, [fetchIncidents]);
 
-  const handleFilter = () => {
-    setFilterApplied({ from: dateFrom, to: dateTo });
-    fetchIncidents(1, dateFrom, dateTo, false);
-  };
-
   const handleClearFilter = () => {
     setDateFrom("");
     setDateTo("");
@@ -122,34 +112,17 @@ export default function IncidentsPage() {
       <h2>사고 이력</h2>
 
       <div className="incidents-filter">
-        <div className="incidents-filter-row">
-          <input
-            type="date"
-            value={dateFrom}
-            onChange={(e) => setDateFrom(e.target.value)}
-            max={dateTo || formatDateInput(new Date())}
-            className="incidents-date-input"
-          />
-          <span className="incidents-filter-sep">~</span>
-          <input
-            type="date"
-            value={dateTo}
-            onChange={(e) => setDateTo(e.target.value)}
-            min={dateFrom}
-            max={formatDateInput(new Date())}
-            className="incidents-date-input"
-          />
-        </div>
-        <div className="incidents-filter-actions">
-          <button className="mgmt-btn mgmt-btn-primary" onClick={handleFilter}>
-            조회
-          </button>
-          {(filterApplied.from || filterApplied.to) && (
-            <button className="mgmt-btn mgmt-btn-secondary" onClick={handleClearFilter}>
-              초기화
-            </button>
-          )}
-        </div>
+        <DualCalendar
+          startDate={dateFrom}
+          endDate={dateTo}
+          onSelect={(start, end) => {
+            setDateFrom(start);
+            setDateTo(end);
+            setFilterApplied({ from: start, to: end });
+            fetchIncidents(1, start, end, false);
+          }}
+          onReset={handleClearFilter}
+        />
       </div>
 
       {error && <div className="incidents-error">{error}</div>}
