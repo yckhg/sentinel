@@ -18,6 +18,7 @@ Started: Sun Mar 22 15:44:26 KST 2026
 - cameras table has: id, name, location, zone, stream_key, source_type (rtsp/youtube), source_url, enabled (INTEGER 0/1)
 - cameraResponse includes all DB fields plus HLSUrl and Status enriched from streaming/cctv-adapter services
 - Internal service-to-service endpoints use `/internal/` prefix (no auth), e.g., `GET /internal/cameras`
+- Password/auth handlers for authenticated users use getAuthUser(r) from authMiddleware context; viewer tokens have UserID=0
 - cctv-adapter reload: fetches from web-backend, filters to enabled RTSP cameras, diffs with running set
 - triggerCCTVReload() is async (goroutine) — fire-and-forget after CRUD operations
 - ManagementPage CRUD pattern: state vars → fetch → handlers → JSX (add form + list with inline edit + delete modal)
@@ -115,4 +116,17 @@ Started: Sun Mar 22 15:44:26 KST 2026
   - Removed old `.incidents-date-input`, `.incidents-filter-row`, `.incidents-filter-sep` CSS — replaced by `.dc-*` classes
   - `formatDateInput()` was removed from IncidentsPage (no longer needed)
   - TypeScript: array index access needs `!` non-null assertion even after length guard
+---
+
+## 2026-03-22 - US-007
+- Added POST /api/auth/change-password endpoint (any authenticated user)
+- Verifies current password via bcrypt before updating
+- New password minimum 8 characters, hashed with bcrypt before storage
+- Returns 400 for wrong current password or short new password
+- Route registered on apiMux (behind authMiddleware)
+- Files changed: services/web-backend/auth.go, services/web-backend/main.go
+- **Learnings for future iterations:**
+  - Password change handler uses getAuthUser(r) from authMiddleware context — no need for separate JWT parsing
+  - apiMux routes are already JWT-protected, so any `/api/` route gets auth for free
+  - viewer tokens (UserID=0) are rejected by checking user.UserID == 0
 ---
