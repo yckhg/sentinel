@@ -1,609 +1,215 @@
 {
   "project": "Sentinel",
-  "branchName": "ralph/sentinel-safety-monitoring",
-  "description": "Industrial safety real-time monitoring system — 6 Docker services (Go + React), MQTT H/W gateway, HLS CCTV streaming, KakaoTalk/SMS crisis alerts, mobile-first web UI",
+  "branchName": "ralph/sentinel-hotfix",
+  "description": "Hotfix for Critical and High severity issues found during evaluation — memory leaks, race conditions, security gaps, infrastructure hardening",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Docker Compose base setup with all 6 services",
-      "description": "As a developer, I need the docker-compose.yml fully configured with all 6 service containers, networking, and volumes so that the development environment is ready.",
+      "title": "Temp link and blacklist cleanup goroutine",
+      "description": "As the system, I need expired temporary links and blacklist entries to be cleaned up periodically so that memory doesn't grow unbounded.",
       "acceptanceCriteria": [
-        "docker-compose.yml defines hw-gateway, cctv-adapter, streaming, notifier, web-backend, web-frontend services",
-        "All services share sentinel-net bridge network",
-        "web-backend has db-data volume mounted at /data",
-        "web-frontend exposes ports 80/443",
-        "Each service has a Dockerfile with a basic Go or Node build (compiles but no logic yet)",
-        "docker compose up -d starts all containers without errors",
+        "Background goroutine runs every 1 hour in web-backend",
+        "Removes expired links from linkStore.links map (expiry < now)",
+        "Removes blacklist entries for expired links from linkStore.blacklist map",
+        "Cleanup is logged (count of removed items)",
         "Typecheck passes"
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Go services on :8080 with /healthz. Frontend via Vite+React+TS served by nginx. Port 3080 externally (80 taken by gateway)."
+      "notes": ""
     },
     {
       "id": "US-002",
-      "title": "REST API spec document (web-backend)",
-      "description": "As a developer, I need a complete REST API specification so that frontend and backend can be developed in parallel.",
+      "title": "Persist JWT secret across restarts",
+      "description": "As the system, I need the JWT secret to persist across container restarts so that existing user tokens remain valid.",
       "acceptanceCriteria": [
-        "API spec document created at docs/api-rest.md",
-        "Covers all endpoint groups: auth, contacts, sites, cameras, incidents, links, equipment, alarms",
-        "Each endpoint has: method, path, request body schema, response schema, status codes, auth requirements",
-        "Follows RESTful conventions consistently"
+        "If JWT_SECRET env var is set, use it (existing behavior)",
+        "If not set, generate a random secret and write it to /data/.jwt-secret file",
+        "On next startup, read secret from /data/.jwt-secret if it exists",
+        "/data/ is already volume-mounted so secret survives restarts",
+        "Log warning if using auto-generated secret (recommend setting JWT_SECRET for production)",
+        "Typecheck passes"
       ],
       "priority": 2,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-003",
-      "title": "WebSocket event spec document",
-      "description": "As a developer, I need a WebSocket event specification so that real-time client communication is well-defined.",
+      "title": "Fix race condition in hw-gateway device status",
+      "description": "As the system, I need device status updates to be thread-safe so that concurrent heartbeat processing doesn't cause data races.",
       "acceptanceCriteria": [
-        "WebSocket spec document created at docs/api-websocket.md",
-        "Defines event types: crisis_alert, equipment_status, system_alarm",
-        "Each event has payload schema with examples",
-        "Defines connection lifecycle: connect, authenticate, heartbeat, reconnect"
+        "All field writes to device status happen while holding the write lock",
+        "Lock is not released until all field assignments are complete",
+        "heartbeatChecker goroutine holds read lock while reading lastSeen",
+        "Typecheck passes"
       ],
       "priority": 3,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-004",
-      "title": "MQTT topic spec document (hw-gateway)",
-      "description": "As a developer, I need an MQTT topic specification so that H/W and S/W teams have a clear contract.",
+      "title": "Use fully parameterized SQL in incident queries",
+      "description": "As a developer, I need incident queries to use parameterized SQL throughout so that the query building pattern is safe and consistent.",
       "acceptanceCriteria": [
-        "MQTT spec document created at docs/api-mqtt.md",
-        "Covers topics: safety/{siteId}/alert, safety/{siteId}/heartbeat, safety/{siteId}/cmd/restart",
-        "Each topic has: direction, QoS level, payload schema with examples, publish frequency"
+        "Replace string concatenation in incidents.go with parameterized query builder",
+        "All WHERE clauses use ? placeholders with args slice",
+        "Count query and data query both use the same parameterized approach",
+        "Existing pagination and date filters still work correctly",
+        "Typecheck passes"
       ],
       "priority": 4,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-005",
-      "title": "Inter-service HTTP API spec document",
-      "description": "As a developer, I need internal HTTP API specs so that services can communicate with a clear contract.",
+      "title": "Add context timeout to alert forwarding goroutines",
+      "description": "As the system, I need alert forwarding in hw-gateway to have timeouts so that goroutines don't leak when downstream services are unresponsive.",
       "acceptanceCriteria": [
-        "Internal API spec document created at docs/api-internal.md",
-        "Covers: hw-gateway to notifier, hw-gateway to web-backend, notifier to web-backend, streaming to web-backend",
-        "Each endpoint has: method, path, request/response schema, error responses"
+        "Alert forwarding goroutines (to notifier and web-backend) use context.WithTimeout (10s)",
+        "If timeout fires, goroutine logs error and exits cleanly",
+        "HTTP client uses the context for the request",
+        "Typecheck passes"
       ],
       "priority": 5,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-006",
-      "title": "MQTT client with crisis signal and heartbeat subscription",
-      "description": "As the system, I need hw-gateway to connect to the MQTT broker and receive crisis/heartbeat signals so that S/W can react to H/W events.",
+      "title": "Fix WebSocket channel close race condition",
+      "description": "As the system, I need WebSocket client message sending to be safe from channel close panics.",
       "acceptanceCriteria": [
-        "hw-gateway connects to MQTT broker (configurable address via env var)",
-        "Subscribes to safety/+/alert and safety/+/heartbeat topics",
-        "On alert message, sends HTTP POST to notifier /api/notify with parsed payload",
-        "On alert message, sends HTTP POST to web-backend /api/incidents with parsed payload",
-        "Auto-reconnects on MQTT broker disconnect with exponential backoff",
-        "Logs all received messages and forwarding results",
+        "Use non-blocking send with select/default for client.send channel writes",
+        "If send channel is full or closed, log and skip (don't panic)",
+        "Initial connection message uses same non-blocking pattern",
+        "No panic possible from writing to closed channel",
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": true,
-      "notes": "Added mosquitto broker to docker-compose. Uses paho.mqtt.golang v1.5.0. Forwards to notifier and web-backend in parallel."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-007",
-      "title": "Restart command MQTT publish",
-      "description": "As a user, I want to restart equipment remotely so that production can resume after a crisis is resolved.",
+      "title": "Require strong admin password",
+      "description": "As an admin, I need the system to warn about weak default admin passwords so that the deployment is secure.",
       "acceptanceCriteria": [
-        "hw-gateway exposes HTTP POST /api/restart endpoint",
-        "Receives {siteId, deviceId} payload from web-backend",
-        "Publishes restart command to safety/{siteId}/cmd/restart MQTT topic",
-        "Returns success/failure response to caller",
+        "If ADMIN_PASSWORD env var equals sentinel1234 or is unset, log a WARNING at startup",
+        "Warning message: Using default admin password. Set ADMIN_PASSWORD env var for production.",
+        "Password minimum length validation: at least 8 characters",
+        "Admin seeding still works with custom password via env var",
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": true,
-      "notes": "POST /api/restart receives {siteId, deviceId, requestedBy, reason}, publishes to safety/{siteId}/cmd/restart with QoS 1. Validates required fields, checks MQTT connection."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-008",
-      "title": "Heartbeat equipment status in-memory management",
-      "description": "As the system, I need to track equipment alive/dead status based on heartbeat messages so that users can see which devices are responsive.",
+      "title": "Check temp link request body decode errors",
+      "description": "As the system, I need malformed temp link requests to return proper errors instead of silently creating links with empty labels.",
       "acceptanceCriteria": [
-        "Stores last heartbeat timestamp per device in memory",
-        "Marks device as dead if no heartbeat received within configurable timeout (default 30s)",
-        "Exposes HTTP GET /api/equipment/status returning all device statuses",
-        "Status includes: deviceId, siteId, alive (bool), lastHeartbeat (timestamp)",
+        "json.NewDecoder(r.Body).Decode(&req) error is checked",
+        "Invalid JSON returns 400 with error message",
+        "Empty body still works (label is optional)",
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": true,
-      "notes": "In-memory map with sync.RWMutex keyed by siteId:deviceId. Background goroutine checks every 5s. Timeout configurable via HEARTBEAT_TIMEOUT_SEC env var (default 30s)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-009",
-      "title": "CCTV adapter camera connection and stream forwarding",
-      "description": "As the system, I need cctv-adapter to connect to cameras via RTSP and forward raw H.264 streams to the streaming server.",
+      "title": "Check json.Marshal errors in all services",
+      "description": "As a developer, I need all json.Marshal calls to check for errors so that serialization failures are not silent.",
       "acceptanceCriteria": [
-        "Camera list loaded from configuration file (JSON or env)",
-        "Connects to cameras via RTSP URL (supports multiple simultaneous connections)",
-        "Forwards raw H.264 streams to streaming server without any transcoding",
-        "Per-camera health status (connected/disconnected/reconnecting) via HTTP GET /api/cameras/status",
-        "Handles camera disconnect with automatic reconnection",
-        "Adding/removing cameras requires only config change + restart",
+        "All json.Marshal() calls in hw-gateway, notifier, and web-backend check the error return",
+        "On error, log the issue and return 500 (or skip the operation with a log)",
+        "No more _ discarding of marshal errors",
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": true,
-      "notes": "Uses FFmpeg subprocess per camera for RTSP→RTMP forwarding (-c copy, no transcoding). Config from /config/cameras.json. Auto-reconnect with exponential backoff. Pushes to rtmp://streaming:1935/live/{cameraId}."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-010",
-      "title": "Streaming server HLS serving",
-      "description": "As a user, I need to watch live camera feeds in a browser via HLS so that I can monitor the site.",
+      "title": "Add Docker healthchecks to all services",
+      "description": "As an operator, I need Docker healthchecks so that failed containers are detected and can be restarted automatically.",
       "acceptanceCriteria": [
-        "Receives H.264 streams from cctv-adapter",
-        "Remuxes to HLS (m3u8 + ts segments) without transcoding",
-        "Serves streams at /live/{cameraId}/index.m3u8",
-        "HLS segment duration is 2-3 seconds for low latency",
-        "Old segments auto-cleaned to prevent disk fill",
-        "HTTP GET /api/streams returns list of available HLS URLs",
-        "Multiple cameras served simultaneously",
+        "docker-compose.yml has healthcheck block for all services",
+        "Backend Go services: wget or curl to http://localhost:8080/healthz",
+        "mosquitto: mosquitto_sub check or similar",
+        "web-frontend: curl -f http://localhost:80/",
+        "streaming: curl -f http://localhost:8080/healthz",
+        "interval: 30s, timeout: 5s, retries: 3",
         "Typecheck passes"
       ],
       "priority": 10,
-      "passes": true,
-      "notes": "Hybrid container: nginx-rtmp (RTMP→HLS on :1935, HTTP on :8080) + Go API (:8081 for /healthz and /api/streams). hls_nested on creates /tmp/hls/{cameraId}/ dirs. 2s fragments, auto-cleanup. Stream considered active if playlist modified within 15s."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-011",
-      "title": "KakaoTalk 알림톡 API integration",
-      "description": "As the system, I need to send crisis alerts via KakaoTalk 알림톡 so that responsible personnel are immediately notified.",
+      "title": "Fix nginx WebSocket proxy timeouts",
+      "description": "As the system, I need complete nginx proxy timeout configuration for WebSocket connections so that connections don't drop unexpectedly.",
       "acceptanceCriteria": [
-        "Integrates with KakaoTalk 알림톡 API (credentials via env vars)",
-        "Sends templated message with: crisis description, site address, manager info, temporary CCTV link",
-        "Sends to all contacts fetched from web-backend GET /api/contacts",
-        "Parallel sending to multiple contacts",
-        "Logs success/failure per contact",
+        "nginx.conf WebSocket location block includes proxy_connect_timeout 60s",
+        "nginx.conf WebSocket location block includes proxy_send_timeout 60s",
+        "proxy_read_timeout 86400s is already present (verify)",
         "Typecheck passes"
       ],
       "priority": 11,
-      "passes": true,
-      "notes": "POST /api/notify receives alert, dispatches async. Fetches contacts from web-backend, requests temp CCTV link (degraded if fails), sends KakaoTalk to all contacts in parallel. Credentials via KAKAO_API_URL/KEY/SENDER_KEY env vars."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-012",
-      "title": "SMS fallback via NHN Cloud",
-      "description": "As the system, I need SMS fallback when KakaoTalk fails so that alerts always reach personnel.",
+      "title": "Fix HLS.js instance cleanup on disconnect",
+      "description": "As the system, I need HLS.js instances to be properly destroyed when a camera disconnects so that memory doesn't accumulate.",
       "acceptanceCriteria": [
-        "On KakaoTalk failure for a contact, retries via NHN Cloud SMS API",
-        "On SMS failure, sends system alarm to web-backend POST /api/alarms",
-        "Fallback chain: KakaoTalk then SMS then Web alarm (per contact, independently)",
-        "All attempts (success/failure) logged with timestamps",
-        "NHN Cloud credentials via env vars",
-        "Typecheck passes"
+        "When status === disconnected, destroy existing HLS.js instance before returning",
+        "useEffect cleanup function always destroys HLS.js instance on unmount",
+        "No HLS.js instances accumulate when switching cameras or on disconnect/reconnect cycles",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
       ],
       "priority": 12,
-      "passes": true,
-      "notes": "Fallback chain per-contact: KakaoTalk → NHN Cloud SMS → web-backend system alarm (POST /api/alarms). NHN SMS API v3.0 with X-Secret-Key auth. Credentials via NHN_SMS_APP_KEY/SECRET_KEY/SENDER_NO env vars. Both unconfigured channels skip gracefully."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-013",
-      "title": "Temporary link request and message inclusion",
-      "description": "As the system, I need notification messages to include a temporary CCTV link so that recipients can immediately view the site.",
+      "title": "Add FFmpeg command timeout in cctv-adapter",
+      "description": "As the system, I need FFmpeg processes to have timeouts so that hung RTSP connections don't block camera reconnection forever.",
       "acceptanceCriteria": [
-        "On crisis event, requests temporary link from web-backend POST /api/links/temp",
-        "Includes the temporary link URL in KakaoTalk/SMS message body",
-        "Link is a full URL pointing to /view/{token} on web-frontend",
-        "If link request fails, still sends notification without link (degraded)",
+        "FFmpeg command execution uses context.WithTimeout or equivalent watchdog",
+        "If FFmpeg produces no output for 30 seconds, the process is killed and reconnection starts",
+        "Timeout is configurable via env var (default 30s)",
         "Typecheck passes"
       ],
       "priority": 13,
-      "passes": true,
-      "notes": "Notifier constructs full /view/{token} URL using FRONTEND_URL env var (default http://localhost:3080). Token comes from web-backend POST /api/links/temp response. Degraded mode (no link) if request fails."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-014",
-      "title": "SQLite schema initialization and migration",
-      "description": "As a developer, I need the database schema to be created automatically on first run so that the system is self-initializing.",
+      "title": "Silent camera fetch error handling in frontend",
+      "description": "As a user, I need to see an error state when the camera API is unreachable so that I know the system status.",
       "acceptanceCriteria": [
-        "SQLite database created at /data/sentinel.db on first run",
-        "Tables created: contacts, cameras, sites, incidents, users",
-        "Schema matches data model in AGENTS.md (id, name, phone for contacts, etc.)",
-        "Migration mechanism supports adding columns/tables in future versions",
-        "Typecheck passes"
+        "ViewerPage and CCTVPage show error message when /api/cameras fetch fails",
+        "Error message shown to user in Korean",
+        "Retry continues in background (existing 30s polling)",
+        "When API recovers, error clears and cameras load",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
       ],
       "priority": 14,
-      "passes": true,
-      "notes": "Pure Go SQLite via modernc.org/sqlite v1.34.5 (no CGO). Version-based migration mechanism with _migrations tracking table. Tables: users, contacts, cameras, sites, incidents. WAL mode + foreign keys enabled. DB at /data/sentinel.db (configurable via DB_PATH env var)."
-    },
-    {
-      "id": "US-015",
-      "title": "User registration API",
-      "description": "As a new user, I need to register an account so that I can request access to the system.",
-      "acceptanceCriteria": [
-        "POST /auth/register accepts username, password, name",
-        "Creates user with status pending",
-        "Returns 201 with user ID (no token — not yet approved)",
-        "Duplicate username returns 409",
-        "Password is hashed before storage (bcrypt)",
-        "Typecheck passes"
-      ],
-      "priority": 15,
-      "passes": true,
-      "notes": "POST /auth/register with bcrypt password hashing. Validates username, password (min 8 chars), name. Returns 201 with pending status. 409 for duplicate username. golang.org/x/crypto v0.31.0 added for bcrypt."
-    },
-    {
-      "id": "US-016",
-      "title": "Login and JWT authentication",
-      "description": "As an approved user, I need to log in and receive a JWT token so that I can access protected endpoints.",
-      "acceptanceCriteria": [
-        "POST /auth/login accepts username + password",
-        "Returns JWT token for approved users only",
-        "JWT contains: userId, role (admin/user), expiry",
-        "Unapproved (pending) users get 403 with pending approval message",
-        "Invalid credentials return 401",
-        "Built-in admin account created on first run (configurable credentials via env vars)",
-        "Auth middleware validates JWT on all /api/* endpoints",
-        "Typecheck passes"
-      ],
-      "priority": 16,
-      "passes": true,
-      "notes": "POST /auth/login with bcrypt verification. JWT (HS256, 24h expiry) with userId+role claims via github.com/golang-jwt/jwt/v5. Auth middleware on all /api/* routes. Built-in admin seeded on first run (ADMIN_USERNAME/ADMIN_PASSWORD env vars, defaults admin/sentinel1234). JWT_SECRET env var (random if unset)."
-    },
-    {
-      "id": "US-017",
-      "title": "Admin approval flow",
-      "description": "As an admin, I need to approve or reject pending user registrations so that only authorized people can access the system.",
-      "acceptanceCriteria": [
-        "GET /auth/pending (admin only) lists users with status pending",
-        "POST /auth/approve/{userId} (admin only) sets status to active",
-        "POST /auth/reject/{userId} (admin only) sets status to rejected",
-        "Non-admin users get 403 on these endpoints",
-        "Typecheck passes"
-      ],
-      "priority": 17,
-      "passes": true,
-      "notes": "requireAdmin() helper validates JWT inline for /auth/* admin routes. GET /auth/pending returns pending users sorted by created_at. Approve/reject update status with 404 for non-existent/non-pending users. Uses Go 1.22 PathValue for {userId} extraction."
-    },
-    {
-      "id": "US-018",
-      "title": "Contacts CRUD API",
-      "description": "As an admin, I need to manage notification target contacts so that the right people receive crisis alerts.",
-      "acceptanceCriteria": [
-        "GET /api/contacts returns list of all contacts",
-        "POST /api/contacts creates a contact (name, phone required)",
-        "PUT /api/contacts/{id} updates a contact",
-        "DELETE /api/contacts/{id} removes a contact",
-        "Phone number format validation",
-        "Admin or authorized user only",
-        "Typecheck passes"
-      ],
-      "priority": 18,
-      "passes": true,
-      "notes": "GET /api/contacts (any auth user), POST/PUT/DELETE admin-only. Phone validation via regex (01X-XXXX-XXXX). PUT supports partial updates (name or phone). DELETE returns 204. contacts.go file with 4 handlers."
-    },
-    {
-      "id": "US-019",
-      "title": "Site info management API",
-      "description": "As an admin, I need to manage site information so that crisis alerts include correct location details.",
-      "acceptanceCriteria": [
-        "GET /api/sites returns site info (address, manager_name, manager_phone)",
-        "PUT /api/sites/{id} updates site info",
-        "Admin only",
-        "Typecheck passes"
-      ],
-      "priority": 19,
-      "passes": true,
-      "notes": "GET /api/sites and PUT /api/sites/{id}, both admin-only. PUT supports partial updates (address, managerName, managerPhone). Phone validation reuses existing phoneRegex. Follows contacts.go pattern."
-    },
-    {
-      "id": "US-020",
-      "title": "Temporary link create/verify/revoke",
-      "description": "As the system, I need JWT-based temporary links for CCTV access so that external viewers can watch without logging in.",
-      "acceptanceCriteria": [
-        "POST /api/links/temp generates JWT token with 24h expiry, returns full URL",
-        "GET /api/links/verify/{token} validates token and returns camera access info",
-        "DELETE /api/links/{id} adds token to in-memory blacklist (forced revoke)",
-        "GET /api/links lists active temporary links (admin only)",
-        "Expired and blacklisted tokens return 401",
-        "Typecheck passes"
-      ],
-      "priority": 20,
-      "passes": true,
-      "notes": "In-memory store with sync.RWMutex. UUID v4 link IDs. Separate TempLinkClaims JWT type (linkId field). POST /api/links/temp on main mux (accepts admin JWT or no auth for internal calls). GET /api/links/verify/{token} public. GET /api/links and DELETE /api/links/{id} on apiMux (admin only). Blacklist by linkID. FRONTEND_URL env var for URL construction."
-    },
-    {
-      "id": "US-021",
-      "title": "Crisis event WebSocket push",
-      "description": "As a user viewing the web UI, I need real-time crisis alerts so that I'm immediately aware of incidents.",
-      "acceptanceCriteria": [
-        "WebSocket endpoint at /ws",
-        "Clients authenticate via JWT query param on connection",
-        "On POST /api/incidents from hw-gateway, broadcasts crisis_alert event to all connected clients",
-        "Event payload includes: incident details, timestamp, site info",
-        "Handles client disconnect/reconnect gracefully",
-        "Typecheck passes"
-      ],
-      "priority": 21,
-      "passes": true,
-      "notes": "WebSocket hub with gorilla/websocket v1.5.3. JWT auth via ?token= query param (supports both user JWT and temp link JWT). POST /api/incidents on main mux (internal, no auth). Broadcasts crisis_alert to all connected clients. Ping/pong keepalive (30s interval). Per-client send buffer with graceful disconnect."
-    },
-    {
-      "id": "US-022",
-      "title": "Restart command API (forward to hw-gateway)",
-      "description": "As a user, I need a REST endpoint to trigger equipment restart so the web frontend can send restart commands.",
-      "acceptanceCriteria": [
-        "POST /api/equipment/restart accepts {siteId, deviceId}",
-        "Forwards to hw-gateway POST /api/restart",
-        "Returns hw-gateway response to client",
-        "Admin or authorized user only",
-        "Logs restart request with user info",
-        "Typecheck passes"
-      ],
-      "priority": 22,
-      "passes": true,
-      "notes": "POST /api/equipment/restart on apiMux (any authenticated user). Forwards {siteId, deviceId, requestedBy, reason} to hw-gateway POST /api/restart. Logs user info. HW_GATEWAY_URL env var (default http://hw-gateway:8080)."
-    },
-    {
-      "id": "US-023",
-      "title": "Camera list and HLS URL API",
-      "description": "As a user, I need to know which cameras are available and their stream URLs so I can watch live feeds.",
-      "acceptanceCriteria": [
-        "GET /api/cameras returns camera list from DB with HLS URLs fetched from streaming service",
-        "Each camera includes: id, name, location, zone, hlsUrl, status (connected/disconnected)",
-        "Caches streaming URLs with short TTL to avoid excessive internal calls",
-        "Typecheck passes"
-      ],
-      "priority": 23,
-      "passes": true,
-      "notes": "GET /api/cameras on apiMux (any authenticated user). Fetches cameras from DB, enriches with HLS URLs from streaming GET /api/streams and status from cctv-adapter GET /api/cameras/status. 10s TTL cache for internal service responses. STREAMING_URL and CCTV_ADAPTER_URL env vars added to docker-compose."
-    },
-    {
-      "id": "US-024",
-      "title": "Incident history API",
-      "description": "As a user, I need to view past crisis incidents so I can review what happened and when.",
-      "acceptanceCriteria": [
-        "GET /api/incidents returns paginated incident list (default 20 per page)",
-        "Supports query params: page, limit, from (date), to (date)",
-        "Each incident includes: id, occurred_at, confirmed_at, confirmed_by",
-        "Sorted by occurred_at descending (newest first)",
-        "Typecheck passes"
-      ],
-      "priority": 24,
-      "passes": true,
-      "notes": "GET /api/incidents on apiMux (any authenticated user). Supports page, limit (max 100), from, to query params. Sorted by datetime(occurred_at) DESC. Uses datetime() in ORDER BY to handle mixed date formats in SQLite. Returns {data: [], pagination: {page, limit, total}}."
-    },
-    {
-      "id": "US-025",
-      "title": "Bottom tab bar layout (mobile-first)",
-      "description": "As a user, I need a mobile-friendly tab navigation so I can quickly switch between main sections.",
-      "acceptanceCriteria": [
-        "Bottom tab bar with 4 tabs: CCTV, Incidents, Management, Settings",
-        "Active tab visually highlighted",
-        "Tab switches content area without page reload",
-        "Responsive: works on mobile (primary) and desktop (secondary)",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 25,
-      "passes": true,
-      "notes": "React state-based tab switching (no router). 4 tabs: CCTV, Incidents, Management, Settings. CSS bottom tab bar with safe-area-inset-bottom for mobile. Desktop: centered tab bar with max-width. Placeholder page components in src/pages/."
-    },
-    {
-      "id": "US-026",
-      "title": "CCTV multi-view with camera switching",
-      "description": "As a user, I want to see multiple camera feeds simultaneously and tap to enlarge one so I can monitor the site effectively.",
-      "acceptanceCriteria": [
-        "Grid layout showing all camera HLS streams (2x2 or list on mobile)",
-        "HLS playback via HLS.js (or native on Safari)",
-        "Tap/click a camera to enlarge to full-width",
-        "Camera name and zone label overlaid on each feed",
-        "Disconnected overlay when stream is unavailable",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 26,
-      "passes": true,
-      "notes": "HLS.js v1.5.7 for playback (Safari native fallback). HLSPlayer component with auto-play, low-latency config. 2x2 grid on mobile, tap-to-expand (hides others). Camera name/zone overlay with gradient. Disconnected overlay with warning icon. nginx.conf updated to proxy /api/, /auth/, /ws, /live/ to backend services. Cameras fetched from GET /api/cameras with 30s polling."
-    },
-    {
-      "id": "US-027",
-      "title": "Crisis alert banner (WebSocket)",
-      "description": "As a user, I need to see a visible alert when a crisis occurs so I can respond immediately.",
-      "acceptanceCriteria": [
-        "Connects to web-backend WebSocket on app load",
-        "On crisis_alert event, shows persistent red banner at top of screen",
-        "Banner shows: timestamp, brief description",
-        "Banner is dismissible but stays until manually dismissed",
-        "Reconnects WebSocket automatically on disconnect",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 27,
-      "passes": true,
-      "notes": "useWebSocket hook with auto-reconnect (exponential backoff 1s→8s). CrisisAlertBanner component listens for crisis_alert events, shows persistent red banners with timestamp and description. Dismissible per-alert. Slide-in animation. Integrated at top of App layout with z-index 200."
-    },
-    {
-      "id": "US-028",
-      "title": "Contact management UI",
-      "description": "As an admin, I need to add, edit, and remove notification contacts so I control who gets crisis alerts.",
-      "acceptanceCriteria": [
-        "List view showing all contacts (name, phone)",
-        "Add contact form with name and phone fields",
-        "Edit inline or via modal",
-        "Delete with confirmation dialog",
-        "Phone number format validation on input",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 28,
-      "passes": true,
-      "notes": "Contact CRUD in ManagementPage.tsx. List with edit/delete, add form with phone format validation (01X-XXXX-XXXX). Inline edit mode per card. Delete with modal confirmation. Auto-format phone input. CSS: mgmt-* classes in App.css. Uses localStorage JWT for auth headers."
-    },
-    {
-      "id": "US-029",
-      "title": "Site info management UI",
-      "description": "As an admin, I need to view and edit site information so that alerts include correct details.",
-      "acceptanceCriteria": [
-        "Display current site info: address, manager name, manager phone",
-        "Edit mode with save/cancel",
-        "Validation on required fields",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 29,
-      "passes": true,
-      "notes": "Site info section added to ManagementPage.tsx above contacts. View mode shows address + manager info, edit mode with inline form (address, managerName, managerPhone). Phone validation with formatPhoneInput. Uses mgmt-* CSS classes. Section divider between sites and contacts."
-    },
-    {
-      "id": "US-030",
-      "title": "Temporary link create/manage UI",
-      "description": "As an admin, I need to create and manage temporary CCTV links to share with external parties.",
-      "acceptanceCriteria": [
-        "Create link button generates new temporary link",
-        "Shows copyable URL after creation",
-        "List of active links with creation time and expiry",
-        "Revoke button per link with confirmation",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 30,
-      "passes": true,
-      "notes": "Temp links section in ManagementPage.tsx between sites and contacts. Create button calls POST /api/links/temp, shows copyable URL. Active links list with creation/expiry times. Revoke with confirmation modal (DELETE /api/links/{id}). Clipboard copy with fallback. mgmt-link-* CSS classes."
-    },
-    {
-      "id": "US-031",
-      "title": "Account management UI (admin only)",
-      "description": "As an admin, I need to view and approve/reject pending user registrations.",
-      "acceptanceCriteria": [
-        "List of pending registrations with name and username",
-        "Approve and reject buttons per user",
-        "List of active users",
-        "Only visible to admin role",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 31,
-      "passes": true,
-      "notes": "Account management section in ManagementPage.tsx (admin only via JWT role check). GET /auth/pending for pending users, GET /auth/users for active users (new endpoint). Approve/reject buttons per pending user. Active user list with admin badge. isAdmin() decodes JWT payload from localStorage. mgmt-sub-header and mgmt-badge-admin CSS classes."
-    },
-    {
-      "id": "US-032",
-      "title": "Equipment restart button (2-step confirmation)",
-      "description": "As a user, I need to restart equipment remotely with safety confirmation to prevent accidental restarts.",
-      "acceptanceCriteria": [
-        "Restart button visible on CCTV or equipment status area",
-        "First click: confirmation dialog asking Are you sure you want to restart?",
-        "Second click: final confirm with optional reason text input",
-        "Sends restart request to web-backend API",
-        "Shows success/failure result",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 32,
-      "passes": true,
-      "notes": "Restart button (↻) on expanded camera view (top-right). RestartDialog component with 2-step flow: step 1 asks confirmation, step 2 collects optional reason + final confirm. Sends POST /api/equipment/restart. Shows success/failure result. Reuses mgmt-modal-overlay/mgmt-modal CSS."
-    },
-    {
-      "id": "US-033",
-      "title": "119 emergency call button with location",
-      "description": "As a user, I need to quickly call 119 emergency services with location information during a crisis.",
-      "acceptanceCriteria": [
-        "Prominent 119 button on crisis alert banner and CCTV page",
-        "On tap: requests browser Geolocation permission",
-        "Shows confirmation with site address before dialing",
-        "Initiates tel:119 call on confirmation",
-        "Falls back to site address from settings if geolocation unavailable",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 33,
-      "passes": true,
-      "notes": "EmergencyCallButton component with geolocation + site address fallback. Confirmation dialog before tel:119. Compact variant on crisis alert banner, full button on CCTV page header."
-    },
-    {
-      "id": "US-034",
-      "title": "Viewer-only page /view/{token}",
-      "description": "As an external viewer with a temporary link, I need to view CCTV feeds without logging in.",
-      "acceptanceCriteria": [
-        "Route /view/{token} validates JWT token via web-backend API",
-        "Valid token: shows CCTV multi-view (same as main CCTV tab)",
-        "Expired/invalid token: shows error message with no access",
-        "No tab bar, no management UI — CCTV player only",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 34,
-      "passes": true,
-      "notes": "URL-based routing via window.location.pathname match for /view/{token}. ViewerPage validates token via GET /api/links/verify/{token}, then fetches cameras with temp link JWT. Auth middleware updated to accept temp link JWTs as 'viewer' role with blacklist check. No tab bar, no management UI — CCTV player only."
-    },
-    {
-      "id": "US-035",
-      "title": "Incident history page",
-      "description": "As a user, I want to review past crisis incidents to understand patterns and response times.",
-      "acceptanceCriteria": [
-        "List of incidents with: date/time, confirmed status, confirmed by",
-        "Paginated (load more or infinite scroll)",
-        "Date range filter",
-        "Sorted newest first",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 35,
-      "passes": true,
-      "notes": "IncidentsPage with paginated list (load more button), date range filter, confirmed/unconfirmed badges. Fetches GET /api/incidents with page, limit, from, to params. incidents-* CSS class prefix."
-    },
-    {
-      "id": "US-036",
-      "title": "Login and registration UI",
-      "description": "As a user, I need login and registration pages so I can access or request access to the system.",
-      "acceptanceCriteria": [
-        "Login page with username + password fields",
-        "Registration page with username, password, name fields",
-        "Login redirects to CCTV tab on success",
-        "Registration shows pending approval message on success",
-        "Error messages for invalid credentials / duplicate username",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 36,
-      "passes": true,
-      "notes": "LoginPage with login/register tabs. Login calls POST /auth/login, stores JWT in localStorage. Register calls POST /auth/register, shows pending approval message. App.tsx gates behind auth (checks localStorage token). SettingsPage has logout button. Reuses mgmt-form-field and mgmt-btn CSS classes. login-* CSS prefix for login-specific styles."
-    },
-    {
-      "id": "US-037",
-      "title": "Crisis E2E — Mock H/W to notification receipt",
-      "description": "As a developer, I need to verify the full crisis flow end-to-end to ensure all services work together.",
-      "acceptanceCriteria": [
-        "Mock MQTT publisher sends alert to safety/site1/alert",
-        "hw-gateway receives and forwards to notifier and web-backend",
-        "notifier requests temp link from web-backend",
-        "notifier sends KakaoTalk (or mock) with temp link",
-        "web-backend broadcasts WebSocket event to connected clients",
-        "Incident record created in database",
-        "Full chain completes within 5 seconds",
-        "Typecheck passes"
-      ],
-      "priority": 37,
-      "passes": true,
-      "notes": "Go E2E test in tests/e2e-crisis/ runs as Docker service with profile 'test'. Tests: admin login → WebSocket connect → MQTT alert publish → WS crisis_alert receipt → incident DB verification → timing check. Full chain completes in ~500ms. Fixed GET /api/contacts on main mux for internal service access (notifier). Run: docker compose --profile test run --rm e2e-crisis"
-    },
-    {
-      "id": "US-038",
-      "title": "Restart E2E — Web button to H/W mock receipt",
-      "description": "As a developer, I need to verify the full restart flow end-to-end.",
-      "acceptanceCriteria": [
-        "Web frontend restart button triggers POST to web-backend",
-        "web-backend forwards to hw-gateway",
-        "hw-gateway publishes to MQTT safety/site1/cmd/restart",
-        "Mock MQTT subscriber receives restart command with correct payload",
-        "Typecheck passes"
-      ],
-      "priority": 38,
-      "passes": true,
-      "notes": "Go E2E test in tests/e2e-restart/ runs as Docker service with profile 'test'. Tests: admin login → MQTT subscribe safety/site1/cmd/restart → POST /api/equipment/restart → verify MQTT message received with correct payload (deviceId, siteId, reason, requestedBy, timestamp). Full chain completes in ~13ms. Run: docker compose --profile test run --rm e2e-restart"
+      "passes": false,
+      "notes": ""
     }
   ]
 }
