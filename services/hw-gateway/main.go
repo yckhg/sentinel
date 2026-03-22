@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -233,10 +234,20 @@ func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
 }
 
 func forwardToNotifier(notifierURL string, alert *AlertPayload) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	body, _ := json.Marshal(alert)
 	url := fmt.Sprintf("%s/api/notify", notifierURL)
 
-	resp, err := httpClient.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[FORWARD] Failed to create notifier request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Printf("[FORWARD] Failed to send alert to notifier: %v", err)
 		return
@@ -246,6 +257,9 @@ func forwardToNotifier(notifierURL string, alert *AlertPayload) {
 }
 
 func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	incident := IncidentPayload{
 		SiteID:      alert.SiteID,
 		Description: alert.Description,
@@ -254,11 +268,29 @@ func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
 	body, _ := json.Marshal(incident)
 	url := fmt.Sprintf("%s/api/incidents", webBackendURL)
 
-	resp, err := httpClient.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[FORWARD] Failed to create web-backend request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Printf("[FORWARD] Failed to send incident to web-backend: %v (retrying in 1s)", err)
 		time.Sleep(1 * time.Second)
-		resp, err = httpClient.Post(url, "application/json", bytes.NewReader(body))
+
+		retryCtx, retryCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer retryCancel()
+
+		retryReq, retryErr := http.NewRequestWithContext(retryCtx, http.MethodPost, url, bytes.NewReader(body))
+		if retryErr != nil {
+			log.Printf("[FORWARD] Failed to create web-backend retry request: %v", retryErr)
+			return
+		}
+		retryReq.Header.Set("Content-Type", "application/json")
+
+		resp, err = httpClient.Do(retryReq)
 		if err != nil {
 			log.Printf("[FORWARD] Retry failed for web-backend: %v", err)
 			return
