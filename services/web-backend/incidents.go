@@ -3,10 +3,10 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 type createIncidentRequest struct {
@@ -111,21 +111,23 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 		from := r.URL.Query().Get("from")
 		to := r.URL.Query().Get("to")
 
-		// Build query with optional date filters
-		where := ""
+		// Build query with optional date filters using parameterized builder
+		conditions := []string{"1=1"}
 		args := []any{}
 		if from != "" {
-			where += " AND occurred_at >= ?"
+			conditions = append(conditions, "occurred_at >= ?")
 			args = append(args, from)
 		}
 		if to != "" {
-			where += " AND occurred_at <= ?"
+			conditions = append(conditions, "occurred_at <= ?")
 			args = append(args, to)
 		}
 
+		whereClause := "WHERE " + strings.Join(conditions, " AND ")
+
 		// Count total
 		var total int
-		countQuery := "SELECT COUNT(*) FROM incidents WHERE 1=1" + where
+		countQuery := "SELECT COUNT(*) FROM incidents " + whereClause
 		if err := db.QueryRow(countQuery, args...).Scan(&total); err != nil {
 			log.Printf("count incidents error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
@@ -133,10 +135,8 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Fetch page
-		dataQuery := fmt.Sprintf(
-			"SELECT id, site_id, description, datetime(occurred_at), confirmed_at, confirmed_by FROM incidents WHERE 1=1%s ORDER BY datetime(occurred_at) DESC LIMIT ? OFFSET ?",
-			where,
-		)
+		dataQuery := "SELECT id, site_id, description, datetime(occurred_at), confirmed_at, confirmed_by FROM incidents " +
+			whereClause + " ORDER BY datetime(occurred_at) DESC LIMIT ? OFFSET ?"
 		dataArgs := append(args, limit, offset)
 		rows, err := db.Query(dataQuery, dataArgs...)
 		if err != nil {
