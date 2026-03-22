@@ -128,9 +128,30 @@ services:
       - "3080:80"
     networks:
       - sentinel-net
+      - yc-network
     depends_on:
       - web-backend
       - streaming
+
+  youtube-adapter:
+    build: ./services/youtube-adapter
+    container_name: sentinel-youtube-adapter
+    restart: unless-stopped
+    environment:
+      - YOUTUBE_CONFIG_PATH=/config/youtube-sources.json
+      - STREAMING_RTMP_URL=rtmp://streaming:1935/live
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - ./config/youtube-sources.json:/config/youtube-sources.json:ro
+    depends_on:
+      - streaming
+    networks:
+      - sentinel-net
+    # ports: internal only
 
   # E2E test services (run with: docker compose --profile test run --rm <test-name>)
   e2e-crisis:
@@ -171,6 +192,8 @@ services:
 networks:
   sentinel-net:
     driver: bridge
+  yc-network:
+    external: true
 
 volumes:
   db-data:

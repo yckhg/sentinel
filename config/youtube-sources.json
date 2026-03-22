@@ -1,0 +1,12 @@
+[
+  {
+    "id": "yt-cam-1",
+    "youtubeUrl": "https://www.youtube.com/watch?v=PLACEHOLDER_1",
+    "streamKey": "yt-cam-1"
+  },
+  {
+    "id": "yt-cam-2",
+    "youtubeUrl": "https://www.youtube.com/watch?v=PLACEHOLDER_2",
+    "streamKey": "yt-cam-2"
+  }
+]
