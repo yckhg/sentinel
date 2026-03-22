@@ -73,12 +73,7 @@ func (h *wsHub) broadcast(msg WSMessage, filter func(c *wsClient) bool) {
 		if filter != nil && !filter(c) {
 			continue
 		}
-		select {
-		case c.send <- data:
-		default:
-			// Client send buffer full, skip
-			log.Printf("ws: dropping message for slow client role=%s userId=%d", c.role, c.userID)
-		}
+		c.safeSend(data)
 	}
 }
 
@@ -100,6 +95,21 @@ func BroadcastSystemAlarm(payload any) {
 	}, func(c *wsClient) bool {
 		return c.role == "admin"
 	})
+}
+
+// safeSend attempts a non-blocking send to the client's channel.
+// Recovers from panic if the channel is already closed.
+func (c *wsClient) safeSend(data []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("ws: send on closed channel role=%s userId=%d", c.role, c.userID)
+		}
+	}()
+	select {
+	case c.send <- data:
+	default:
+		log.Printf("ws: dropping message for slow client role=%s userId=%d", c.role, c.userID)
+	}
 }
 
 const (
@@ -159,7 +169,7 @@ func handleWebSocket() http.HandlerFunc {
 		hub.register(client)
 
 		// Send connected message
-		connMsg, _ := json.Marshal(WSMessage{
+		connMsg, err := json.Marshal(WSMessage{
 			Type: "connected",
 			Payload: map[string]any{
 				"userId":      userID,
@@ -168,7 +178,11 @@ func handleWebSocket() http.HandlerFunc {
 			},
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		})
-		client.send <- connMsg
+		if err != nil {
+			log.Printf("ws: marshal connected message error: %v", err)
+		} else {
+			client.safeSend(connMsg)
+		}
 
 		go client.writePump()
 		go client.readPump()
