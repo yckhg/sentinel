@@ -76,8 +76,8 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "RTSP scheme validation, YouTube URL pattern matching, private/loopback IP rejection via net.IP, applied in both POST and PUT handlers"
     }
   ]
 }

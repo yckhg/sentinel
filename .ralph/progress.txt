@@ -10,6 +10,8 @@ Started: Sun Mar 22 16:53:43 KST 2026
 - Go modules use `go 1.22` with multi-stage Docker builds (golang:1.22-alpine → alpine:3.19)
 - `links.go` already uses `crypto/rand` for UUID generation — no external uuid dep needed for random tokens
 - Runtime containers don't have Go toolchain — typecheck by running `docker compose build <service>`
+- For SSRF prevention: use `net.IP.IsLoopback()`, `IsPrivate()`, `IsLinkLocalUnicast()` — covers all RFC1918 + loopback ranges
+- RTSP URLs use non-standard scheme — replace with http:// before `url.Parse()` to extract hostname
 
 ---
 
@@ -46,4 +48,18 @@ Started: Sun Mar 22 16:53:43 KST 2026
   - StopCamera/StartCamera acquire their own locks — cannot call them while holding cm.mu (deadlock). Inline the logic instead.
   - Process kill (SIGTERM + sleep + SIGKILL) is blocking — must happen outside the lock
   - Goroutine launches are safe outside lock since cameraState is already registered in statuses map
+---
+
+## 2026-03-22 - US-005
+- Added `validateSourceURL()` to cameras.go — validates scheme and blocks SSRF
+- RTSP URLs must start with `rtsp://` or `rtsps://`; YouTube URLs must match domain pattern
+- Private/loopback IPs rejected via `net.IP.IsLoopback()`, `IsPrivate()`, `IsLinkLocalUnicast()`, `IsLinkLocalMulticast()`
+- Also blocks `localhost` and `[::1]` by string check
+- Validation applied in both `handleCreateCamera` (POST) and `handleUpdateCamera` (PUT)
+- In PUT handler, validation runs after all partial updates are applied (so sourceType+sourceURL are consistent)
+- Files changed: services/web-backend/cameras.go
+- **Learnings for future iterations:**
+  - `net/url.Parse` can't parse `rtsp://` scheme correctly for hostname extraction — replace scheme with `http://` first
+  - `handleUpdateCamera` uses partial updates — validate the final merged state, not just the incoming request fields
+  - `net.IP.IsPrivate()` covers 10/8, 172.16/12, 192.168/16 — no need for manual CIDR checks
 ---
