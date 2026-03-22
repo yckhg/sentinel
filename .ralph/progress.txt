@@ -185,3 +185,22 @@ Started: Sun Mar 22 15:44:26 KST 2026
   - Auto-expire logic is checked at read time (list + verify), not via background job
   - registerRequest extended with InviteToken field — backwards compatible (zero value = no invite)
 ---
+
+## 2026-03-22 - US-011
+- Added invitation management section to ManagementPage (admin only)
+- Email input with invite button, invitation list with status badges (pending/accepted/expired/cancelled)
+- Cancel button per pending invitation with confirmation dialog
+- Modified LoginPage to handle /register?invite={token} URL
+- Verifies invite token via GET /api/invitations/verify/{token} on page load
+- Shows invited context banner with email when valid invite detected
+- Registration with invite token sends inviteToken in request body (auto-approves)
+- Success message changes based on invite context
+- Added /register route handling in App.tsx (shows LoginPage for register path)
+- Added mgmt-badge-invite-* CSS classes for invitation status badges
+- Files changed: services/web-frontend/src/pages/ManagementPage.tsx, services/web-frontend/src/pages/LoginPage.tsx, services/web-frontend/src/App.tsx, services/web-frontend/src/App.css
+- **Learnings for future iterations:**
+  - URL params: use `new URLSearchParams(window.location.search)` for query params, `window.location.pathname` for route matching
+  - SPA routing without react-router: use `window.history.replaceState({}, "", "/")` to clean up URL after processing params
+  - Invite verification is public endpoint (no auth) — registered on bare mux at /api/invitations/verify/{token}
+  - createdAt from backend is UTC without timezone suffix — append "Z" for correct Date parsing: `new Date(inv.createdAt + "Z")`
+---
