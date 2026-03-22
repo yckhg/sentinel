@@ -98,6 +98,8 @@ func main() {
 	// Mount protected routes behind auth middleware
 	mux.Handle("/api/", authMiddleware(apiMux))
 
+	startLinkCleanup()
+
 	log.Println("web-backend listening on :8080")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatal(err)

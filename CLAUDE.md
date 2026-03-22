@@ -19,17 +19,13 @@ docker compose logs -f         # Follow logs
 docker compose logs -f <svc>   # Follow specific service logs
 ```
 
-## Development Workflow
-
-This project uses Ralph Loop:
-1. API design first (OpenAPI/markdown specs)
-2. Parallel front/back implementation against specs
-3. Integration verification (E2E tests)
+## Workflow & Task Division
+@~/.claude/docs/ralph-workflow.md
 
 Key files:
 - `AGENTS.md` — Architecture and design principles
-- `prd.json` — User stories and completion tracking
-- `progress.txt` — Iteration learnings
+- `.ralph/prd.json` — User stories and completion tracking
+- `.ralph/progress.txt` — Iteration learnings
 - `services/{name}/AGENTS.md` — Per-service documentation
 
 ## Architecture

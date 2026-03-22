@@ -40,6 +40,35 @@ var linkStore = &tempLinkStore{
 	blacklist: make(map[string]struct{}),
 }
 
+// startLinkCleanup runs a background goroutine that periodically removes
+// expired temporary links and their corresponding blacklist entries.
+func startLinkCleanup() {
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			now := time.Now()
+			linkStore.mu.Lock()
+			removedLinks := 0
+			removedBlacklist := 0
+			for id, link := range linkStore.links {
+				if link.ExpiresAt.Before(now) {
+					delete(linkStore.links, id)
+					removedLinks++
+					if _, ok := linkStore.blacklist[id]; ok {
+						delete(linkStore.blacklist, id)
+						removedBlacklist++
+					}
+				}
+			}
+			linkStore.mu.Unlock()
+			if removedLinks > 0 || removedBlacklist > 0 {
+				log.Printf("link cleanup: removed %d expired links, %d blacklist entries", removedLinks, removedBlacklist)
+			}
+		}
+	}()
+}
+
 func generateUUID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
