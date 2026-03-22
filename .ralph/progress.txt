@@ -1,0 +1,92 @@
+# Ralph Progress Log
+Started: Sun Mar 22 19:40:28 KST 2026
+---
+
+## Codebase Patterns
+- Stream adapters follow the pattern: Go binary + FFmpeg in alpine:3.19, listening on :8080 with /healthz
+- Container naming: sentinel-{source-type}-adapter
+- Config files go in /config/ directory, mounted read-only from ./config/
+- All adapters depend on streaming service and connect to sentinel-net
+- RTMP push destination: rtmp://streaming:1935/live/{streamKey}
+- Existing adapters: cctv-adapter (RTSP, passthrough), youtube-adapter (YouTube/file, re-encode)
+- AGENTS.md files are gitignored — use `git add -f` when they need to be committed
+- Shared FFmpeg base image: build with `docker build -f docker/ffmpeg-base.Dockerfile -t sentinel-ffmpeg-base .` before `docker compose build`
+
+---
+
+## 2026-03-22 - US-001
+- Created docs/adapter-checklist.md with two sections:
+  - Section 1: Stream adapter checklist (files, Go skeleton, Dockerfile, docker-compose entry, testing steps)
+  - Section 2: H/W adapter checklist (Case A: MQTT-native, Case B: new signal type, Case C: protocol adapter)
+- Files changed: docs/adapter-checklist.md (new)
+- **Learnings for future iterations:**
+  - cctv-adapter/main.go is a full reference impl with FFmpeg management, watchdog, reconnection, hot reload
+  - youtube-adapter additionally installs python3 + yt-dlp on top of ffmpeg
+  - hw-gateway MQTT topics follow pattern: safety/{siteId}/<signal-type>
+  - All services expose /healthz and use wget --spider for Docker healthcheck
+---
+
+## 2026-03-22 - US-002
+- Created docs/operational-rules.md with 5 sections:
+  1. Container naming convention (sentinel-{service-name} pattern with full table)
+  2. Config management (file location, naming, hot reload, env var conventions)
+  3. Monitoring (required /healthz endpoint, docker healthcheck template, stream health rules)
+  4. Resource limit guidelines (CPU/memory budgets for re-encoding vs passthrough vs lightweight services)
+  5. Scaling rules (one adapter per source type, split at 20+ FFmpeg processes)
+- Files changed: docs/operational-rules.md (new)
+- **Learnings for future iterations:**
+  - Resource limits use deploy.resources.limits in docker-compose.yml
+  - youtube-adapter needs 2.0 CPU / 512M (re-encoding), cctv-adapter needs 1.0 CPU / 256M (passthrough)
+  - Non-FFmpeg services (web-backend, notifier, hw-gateway) need only 128M memory
+---
+
+## 2026-03-22 - US-003
+- Updated 4 AGENTS.md files with references to policy docs:
+  - Root AGENTS.md: added "Policy Documents" section referencing both adapter-checklist.md and operational-rules.md
+  - services/streaming/AGENTS.md: added link to adapter checklist after RTMP Input Specification
+  - services/cctv-adapter/AGENTS.md: noted as reference implementation with link to adapter checklist
+  - services/hw-gateway/AGENTS.md: added link to adapter checklist Section 2 for H/W extension cases
+- Files changed: AGENTS.md, services/streaming/AGENTS.md, services/cctv-adapter/AGENTS.md, services/hw-gateway/AGENTS.md
+- **Learnings for future iterations:**
+  - AGENTS.md files are in .gitignore under "Claude / Ralph" section — need `git add -f` to commit them
+  - When force-adding gitignored files, they show as "create" even if they existed locally before
+---
+
+## 2026-03-22 - US-004
+- Replaced dummy RTSP camera entries in config/cameras.json with empty array `[]`
+- Previous entries (cam1, cam2) pointed to non-existent IPs (192.168.1.101/102), causing failed RTSP connection attempts
+- cctv-adapter handles empty array gracefully: `main.go:448` skips `Start()` when no cameras configured
+- YouTube adapter cameras (yt-cam-1, yt-cam-2) are in separate config/youtube-sources.json — unaffected
+- Files changed: config/cameras.json
+- **Learnings for future iterations:**
+  - cctv-adapter has a fallback at line 426-428: if config file fails to load, it defaults to empty slice and logs a warning
+  - Camera configs: RTSP cameras in config/cameras.json, YouTube sources in config/youtube-sources.json — separate files
+---
+
+## 2026-03-22 - US-006
+- Created docker/ffmpeg-base.Dockerfile: alpine:3.19 + ffmpeg, with build instructions in comment header
+- Updated cctv-adapter Dockerfile to use `FROM sentinel-ffmpeg-base` instead of `FROM alpine:3.19` + `RUN apk add --no-cache ffmpeg`
+- Updated youtube-adapter Dockerfile to use `FROM sentinel-ffmpeg-base` and only add python3/yt-dlp on top
+- Verified `docker compose build cctv-adapter youtube-adapter` succeeds
+- Files changed: docker/ffmpeg-base.Dockerfile (new), services/cctv-adapter/Dockerfile, services/youtube-adapter/Dockerfile
+- **Learnings for future iterations:**
+  - Base image must be built locally first before `docker compose build` (`docker build -f docker/ffmpeg-base.Dockerfile -t sentinel-ffmpeg-base .`)
+  - youtube-adapter layers python3 + yt-dlp on top of the shared ffmpeg base — it's not a pure ffmpeg adapter
+---
+
+## 2026-03-22 - US-005
+- Added deploy.resources.limits to 6 services in docker-compose.yml:
+  - youtube-adapter: cpus 2.0, memory 512M (re-encodes with libx264)
+  - cctv-adapter: cpus 1.0, memory 256M (passthrough, minimal CPU)
+  - hw-gateway, notifier, web-backend: memory 128M (lightweight Go services)
+  - streaming: memory 256M (RTMP/HLS server)
+- Verified limits applied via `docker inspect` — all values correct
+- All services start and run normally with limits
+- Files changed: docker-compose.yml
+- **Learnings for future iterations:**
+  - Docker Compose `deploy.resources.limits` works in non-Swarm mode with recent Docker versions
+  - NanoCpus value = cpus × 1e9 (e.g., 2.0 CPU = 2000000000 NanoCpus)
+  - Memory value in bytes (e.g., 512M = 536870912)
+  - web-frontend was not given limits as it serves static files via nginx (very low resource usage)
+  - mosquitto was not given limits as it's a third-party image with minimal resource usage
+---

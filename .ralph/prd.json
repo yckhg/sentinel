@@ -1,0 +1,105 @@
+{
+  "project": "Sentinel",
+  "branchName": "ralph/adapter-extension-policy",
+  "description": "Implement adapter extension policy — checklist docs, operational rules, AGENTS.md references, config cleanup, resource limits, shared base image",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Create adapter checklist document",
+      "description": "As a developer, I need a step-by-step guide for adding new adapters so that I can extend the system without reading all the code.",
+      "acceptanceCriteria": [
+        "docs/adapter-checklist.md created",
+        "Section 1: Stream adapter checklist (files to create, interface to conform to, docker-compose entry, testing steps)",
+        "Section 2: H/W adapter checklist (Case A: MQTT-native device, Case B: new signal type, Case C: protocol adapter)",
+        "References services/streaming/AGENTS.md for RTMP Input Specification",
+        "References services/hw-gateway/AGENTS.md for MQTT Input Specification",
+        "References services/cctv-adapter/AGENTS.md as reference implementation",
+        "Includes example Dockerfile, go.mod, main.go skeleton",
+        "Includes docker-compose.yml entry template",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Create operational rules document",
+      "description": "As an operator, I need documented rules for naming, config, monitoring, and resource management so that the system stays consistent as it grows.",
+      "acceptanceCriteria": [
+        "docs/operational-rules.md created",
+        "Container naming convention: sentinel-{source-type}-adapter pattern with examples",
+        "Config management rules: JSON files in /config/, hot reload endpoint, env var conventions",
+        "Monitoring rules: required /healthz endpoint, docker healthcheck template, stream health from streaming server only",
+        "Resource limit guidelines: passthrough vs re-encoding CPU budgets",
+        "Scaling rule: one adapter per source type, split at 20+ FFmpeg processes",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Update AGENTS.md files with policy references",
+      "description": "As a developer, I need AGENTS.md files to point to the new policy docs so that the information is discoverable.",
+      "acceptanceCriteria": [
+        "Root AGENTS.md references docs/adapter-checklist.md and docs/operational-rules.md",
+        "services/streaming/AGENTS.md references adapter checklist for how to add a new adapter",
+        "services/cctv-adapter/AGENTS.md notes it is the reference implementation and points to checklist",
+        "services/hw-gateway/AGENTS.md references adapter checklist for H/W extension cases",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Clean up dummy RTSP cameras from config",
+      "description": "As a developer, I need cameras.json to only contain real/working entries so that cctv-adapter doesn't try to connect to non-existent cameras.",
+      "acceptanceCriteria": [
+        "config/cameras.json contains empty array [] or is removed",
+        "cctv-adapter starts cleanly with no cameras (no error logs about failed RTSP connections)",
+        "Existing yt-cam-1 and yt-cam-2 still work (they are YouTube adapter, not cctv-adapter)",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Add resource limits to adapter containers in docker-compose.yml",
+      "description": "As an operator, I need resource limits on FFmpeg-running adapters so that they don't consume all CPU/memory on the mini PC.",
+      "acceptanceCriteria": [
+        "youtube-adapter: CPU limit 2.0, memory limit 512M (re-encodes with libx264)",
+        "cctv-adapter: CPU limit 1.0, memory limit 256M (passthrough, minimal CPU)",
+        "Other services (web-backend, notifier, hw-gateway): memory limit 128M",
+        "streaming: memory limit 256M",
+        "Limits set via deploy.resources.limits in docker-compose.yml",
+        "All services still start and run with limits applied",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Create shared FFmpeg base image Dockerfile",
+      "description": "As a developer, I need a shared base image with FFmpeg pre-installed so that new adapters don't repeat the same apk install step.",
+      "acceptanceCriteria": [
+        "docker/ffmpeg-base.Dockerfile created",
+        "Based on alpine:3.19 with ffmpeg pre-installed",
+        "Build instructions in a comment at top of file",
+        "youtube-adapter and cctv-adapter Dockerfiles updated to reference this base or documented how to use it",
+        "docker compose build succeeds",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
