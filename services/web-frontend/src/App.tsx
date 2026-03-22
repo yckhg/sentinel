@@ -6,6 +6,7 @@ import SettingsPage from "./pages/SettingsPage";
 import ViewerPage from "./pages/ViewerPage";
 import LoginPage from "./pages/LoginPage";
 import CrisisAlertBanner from "./components/CrisisAlertBanner";
+import { isTokenExpired } from "./utils/isTokenExpired";
 import "./App.css";
 
 type Tab = "cctv" | "incidents" | "management" | "settings";
@@ -24,9 +25,14 @@ function getViewerToken(): string | null {
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>("cctv");
-  const [token, setToken] = useState<string | null>(
-    localStorage.getItem("token")
-  );
+  const [token, setToken] = useState<string | null>(() => {
+    const stored = localStorage.getItem("token");
+    if (stored && isTokenExpired(stored)) {
+      localStorage.removeItem("token");
+      return null;
+    }
+    return stored;
+  });
   const viewerToken = getViewerToken();
 
   if (viewerToken) {
