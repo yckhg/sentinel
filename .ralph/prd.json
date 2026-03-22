@@ -116,8 +116,8 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Replaced cmd.Process.Kill() (SIGKILL) with SIGTERM → 5s wait → SIGKILL in both watchdog timeout and Stop() shutdown. Watchdog uses processDone channel for efficient exit detection. Stop() sends SIGTERM to all, waits 5s, then SIGKILL remaining."
     },
     {
       "id": "US-009",

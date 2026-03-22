@@ -21,6 +21,7 @@ Started: Sat Mar 22 13:44:00 KST 2026
 - Frontend: `isTimeoutError(err)` + `timeoutMessage()` helpers provide consistent Korean timeout error messages
 - Frontend: For useEffect with periodic fetches, pass AbortController.signal to fetchWithTimeout and abort on cleanup — replaces `cancelled` flag pattern
 - Frontend: `isTokenExpired()` in `src/utils/isTokenExpired.ts` — client-side JWT exp check (no signature verification)
+- cctv-adapter: FFmpeg processes use graceful shutdown (SIGTERM → 5s → SIGKILL) via `syscall.SIGTERM`
 ---
 
 ## 2026-03-22 13:44 - US-001
@@ -89,4 +90,14 @@ Started: Sat Mar 22 13:44:00 KST 2026
   - JWT payload is the second segment (index 1), base64-encoded. `atob()` decodes it — no library needed.
   - Using `useState(() => ...)` lazy initializer is cleaner than `useEffect` for one-time init logic that determines initial state.
   - Malformed tokens (wrong segment count, invalid base64, missing exp) are treated as expired — safe default.
+---
+
+## 2026-03-22 - US-008
+- **What was implemented**: FFmpeg graceful shutdown via SIGTERM → 5s wait → SIGKILL. Two kill sites updated: (1) watchdog timeout in `manageCameraStream` goroutine, (2) `Stop()` method for container shutdown. Watchdog uses `processDone` channel to detect if process exited within 5s. `Stop()` sends SIGTERM to all processes, sleeps 5s, then SIGKILL any remaining.
+- **Files changed**: services/cctv-adapter/main.go
+- **Learnings for future iterations:**
+  - `syscall.SIGTERM` requires `"syscall"` import — available on all Go targets (Linux/Alpine)
+  - `os.Process.Kill()` after process has already exited returns error — safe to call unconditionally as fallback
+  - `Stop()` releases mutex before sleeping 5s to avoid blocking status queries during shutdown
+  - Watchdog goroutine has access to `processDone` channel (closed when `cmd.Wait()` returns) — efficient signal for graceful exit detection without polling
 ---
