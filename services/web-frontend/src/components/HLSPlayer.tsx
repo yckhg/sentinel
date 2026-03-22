@@ -26,7 +26,15 @@ export default function HLSPlayer({
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || status === "disconnected") return;
+    if (!video) return;
+
+    // Destroy any existing HLS instance before creating a new one or on disconnect
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+
+    if (status === "disconnected") return;
 
     setError(false);
 
@@ -49,6 +57,7 @@ export default function HLSPlayer({
         if (data.fatal) {
           setError(true);
           hls.destroy();
+          hlsRef.current = null;
         }
       });
 
