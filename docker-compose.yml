@@ -7,6 +7,11 @@ services:
     container_name: sentinel-mosquitto
     restart: unless-stopped
     command: mosquitto -c /mosquitto-no-auth.conf
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-W", "3"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks:
       - sentinel-net
     # ports: internal only (1883)
@@ -20,6 +25,11 @@ services:
       - NOTIFIER_URL=http://notifier:8080
       - WEB_BACKEND_URL=http://web-backend:8080
       - HEARTBEAT_TIMEOUT=30
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     depends_on:
       - mosquitto
     networks:
@@ -33,6 +43,11 @@ services:
     environment:
       - CAMERAS_CONFIG_PATH=/config/cameras.json
       - STREAMING_RTMP_URL=rtmp://streaming:1935/live
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     volumes:
       - ./config/cameras.json:/config/cameras.json:ro
     depends_on:
@@ -45,6 +60,11 @@ services:
     build: ./services/streaming
     container_name: sentinel-streaming
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks:
       - sentinel-net
     # ports: internal only
@@ -63,6 +83,11 @@ services:
       - NHN_SMS_APP_KEY=${NHN_SMS_APP_KEY:-}
       - NHN_SMS_SECRET_KEY=${NHN_SMS_SECRET_KEY:-}
       - NHN_SMS_SENDER_NO=${NHN_SMS_SENDER_NO:-}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     depends_on:
       - web-backend
     networks:
@@ -77,6 +102,11 @@ services:
       - HW_GATEWAY_URL=http://hw-gateway:8080
       - STREAMING_URL=http://streaming:8080
       - CCTV_ADAPTER_URL=http://cctv-adapter:8080
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     volumes:
       - db-data:/data
     networks:
@@ -87,6 +117,11 @@ services:
     build: ./services/web-frontend
     container_name: sentinel-web-frontend
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:80/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     ports:
       - "3080:80"
     networks:
