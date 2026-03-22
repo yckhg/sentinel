@@ -376,6 +376,12 @@ body {
   margin-bottom: 8px;
 }
 
+.mgmt-form-success {
+  color: #2e7d32;
+  font-size: 0.75rem;
+  margin-bottom: 8px;
+}
+
 .mgmt-form-actions {
   display: flex;
   gap: 8px;
