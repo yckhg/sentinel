@@ -18,11 +18,13 @@ Real-time crisis detection and notification system for preventing workplace inju
 
 1. **H/W-S/W layer separation** — S/W only receives signals. No H/W internals.
 2. **Single H/W contact point** — hw-gateway is the only H/W interface.
-3. **External abstraction** — cctv-adapter abstracts camera types.
-4. **No transcoding** — Mini PC resource preservation. Cameras must output H.264.
-5. **Mobile first** — All UI designed for mobile screens.
-6. **Lightweight first** — Runs on a single on-premise mini PC. Minimize processes.
-7. **Ralph Loop development** — API design first, then parallel front/back implementation.
+3. **External abstraction** — Adapters (cctv-adapter, youtube-adapter) abstract source types. They only push streams to the streaming server.
+4. **Streaming server = single source of truth for stream status** — Whether a stream is alive/dead is determined ONLY by the streaming server. Adapters do NOT report stream status. web-backend queries streaming server for both HLS URLs and active/inactive status.
+5. **No transcoding** — Mini PC resource preservation. Cameras must output H.264.
+6. **Mobile first** — All UI designed for mobile screens.
+7. **Lightweight first** — Runs on a single on-premise mini PC. Minimize processes.
+8. **Relative URLs for frontend** — All URLs returned to the browser (HLS, API) must be relative paths (e.g., `/live/cam1/index.m3u8`), never Docker-internal addresses. nginx proxies to internal services.
+9. **Ralph Loop development** — API design first, then parallel front/back implementation.
 
 ## Architecture
 

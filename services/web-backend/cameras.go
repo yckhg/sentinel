@@ -178,25 +178,18 @@ func handleListCameras(db *sql.DB) http.HandlerFunc {
 			cameras = append(cameras, c)
 		}
 
-		// Fetch streams and statuses from internal services (uses cache)
+		// Fetch active streams from streaming server (single source of truth)
 		streams := cache.getStreams(client)
-		statuses := cache.getStatuses(client)
 
 		streamMap := make(map[string]streamInfo)
 		for _, s := range streams {
 			streamMap[s.CameraID] = s
 		}
-		statusMap := make(map[string]string)
-		for _, s := range statuses {
-			statusMap[s.CameraID] = s.Status
-		}
 
 		for i := range cameras {
 			if s, ok := streamMap[cameras[i].Name]; ok && s.Active {
-				cameras[i].HLSUrl = streamingURL + s.HLSUrl
-			}
-			if status, ok := statusMap[cameras[i].Name]; ok {
-				cameras[i].Status = status
+				cameras[i].HLSUrl = s.HLSUrl
+				cameras[i].Status = "connected"
 			} else {
 				cameras[i].Status = "disconnected"
 			}

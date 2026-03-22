@@ -33,6 +33,10 @@ Hybrid container with two processes:
 
 nginx proxies `/healthz` and `/api/*` requests from :8080 to the Go binary on :8081.
 
+## Critical Role: Single Source of Truth for Stream Status
+
+This service is the ONLY authority on whether a camera stream is alive or dead. Adapters (cctv-adapter, youtube-adapter) push streams here, but they do NOT report status. web-backend MUST query `/api/streams` for both HLS URLs and active/inactive status. If a stream is active here, the camera is "connected". If not, it's "disconnected". No other service should be consulted for stream status.
+
 ## Implementation Notes
 
 - **NO TRANSCODING** — Remux only (H.264 -> HLS container). CPU usage must stay minimal.
