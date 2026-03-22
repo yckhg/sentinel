@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -41,9 +42,14 @@ func main() {
 		w.Write([]byte(`{"status":"ok","service":"web-backend"}`))
 	})
 
-	// Auth routes (public)
-	mux.HandleFunc("POST /auth/register", handleRegister(db))
-	mux.HandleFunc("POST /auth/login", handleLogin(db))
+	// Rate limiters for public auth endpoints
+	loginLimiter := newRateLimiter(10, time.Minute)    // 10 req/min per IP
+	registerLimiter := newRateLimiter(5, time.Minute)  // 5 req/min per IP
+	startRateLimitCleanup(loginLimiter, registerLimiter)
+
+	// Auth routes (public — rate limited)
+	mux.HandleFunc("POST /auth/register", rateLimitMiddleware(registerLimiter, handleRegister(db)))
+	mux.HandleFunc("POST /auth/login", rateLimitMiddleware(loginLimiter, handleLogin(db)))
 
 	// Auth routes (admin only — JWT validated inline)
 	mux.HandleFunc("GET /auth/pending", handlePendingUsers(db))
