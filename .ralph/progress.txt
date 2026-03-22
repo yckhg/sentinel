@@ -3,6 +3,7 @@ Started: Sun Mar 22 16:53:43 KST 2026
 ---
 
 ## Codebase Patterns
+- CameraManager.Reload() must hold cm.mu.Lock() for the entire read-old + compute-diff + update operation; process kills and goroutine launches go outside the lock
 - Notifier service (services/notifier/main.go) has no external Go dependencies — all sanitization/validation must use stdlib only
 - Docker services communicate via `sentinel-net` bridge network — internal IPs are in private ranges (172.x)
 - Email sending goes: web-backend → notifier `/api/send-email` → SMTP
@@ -33,4 +34,16 @@ Started: Sun Mar 22 16:53:43 KST 2026
   - `google/uuid` remains in go.mod as indirect dep (used by modernc.org/sqlite) — don't remove from go.mod
   - Token verification uses string comparison (`WHERE token = ?`), so any token format works
   - Build check: `docker compose build web-backend` (runtime container has no Go toolchain)
+---
+
+## 2026-03-22 - US-004
+- Fixed race condition in CameraManager.Reload() — replaced split-lock pattern (RLock → unlock → operations → Lock) with single Lock scope
+- All state reads, diff computation, status map updates, and camera list update happen under one cm.mu.Lock()
+- Process kills (SIGTERM/SIGKILL) and goroutine launches moved outside the lock to avoid holding it during blocking I/O
+- Inlined StopCamera/StartCamera logic to avoid nested lock acquisition (deadlock)
+- Files changed: services/cctv-adapter/main.go
+- **Learnings for future iterations:**
+  - StopCamera/StartCamera acquire their own locks — cannot call them while holding cm.mu (deadlock). Inline the logic instead.
+  - Process kill (SIGTERM + sleep + SIGKILL) is blocking — must happen outside the lock
+  - Goroutine launches are safe outside lock since cameraState is already registered in statuses map
 ---

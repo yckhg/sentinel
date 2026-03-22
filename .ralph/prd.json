@@ -60,8 +60,8 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Single lock scope for entire read-old + compute-diff + update-config operation; process kills and goroutine launches moved outside lock"
     },
     {
       "id": "US-005",
