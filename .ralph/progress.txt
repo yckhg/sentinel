@@ -46,3 +46,13 @@ Started: Sat Mar 22 13:44:00 KST 2026
   - `db.PingContext(ctx)` replaces `db.Ping()` for context-aware connectivity checks
   - All 7 Go files in web-backend needed changes — no DB calls in equipment.go, links.go, or websocket.go
 ---
+
+## 2026-03-22 - US-004
+- **What was implemented**: Replaced single fixed-delay retry in `forwardToWebBackend` with exponential backoff loop (1s, 2s, 4s base delays) with ±25% random jitter. Max 3 retries before giving up. Extracted `backoffWithJitter()` helper function.
+- **Files changed**: services/hw-gateway/main.go
+- **Learnings for future iterations:**
+  - Only `forwardToWebBackend` had retry logic; `forwardToNotifier` has no retries (fire-and-forget for notifications)
+  - `math/rand` added for jitter — no need for `rand.Seed()` since Go 1.20+ auto-seeds
+  - Context cancel must be called explicitly in loop iterations (not deferred) to avoid resource leak
+  - The `httpClient` has its own 10s timeout, plus each request gets a 10s context timeout — effectively double-bounded
+---
