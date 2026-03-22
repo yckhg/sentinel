@@ -10,6 +10,10 @@ Started: Sun Mar 22 15:44:26 KST 2026
 - All services on `sentinel-net` internal Docker network
 - Graceful shutdown: SIGTERM → wait → SIGKILL pattern for FFmpeg processes
 - Exponential backoff with max 30s for reconnection loops
+- Web-backend cameras API matches DB `cameras.name` with streaming `cameraId` — names must be identical
+- YouTube stream cameras need DB entries in `cameras` table to appear in CCTV multi-view
+- Camera status from cctv-adapter only tracks RTSP cameras; YouTube cameras show "disconnected" status but still stream
+- verify.sh must use `docker run` with build images (golang:1.22-alpine, node:20-alpine) since runtime containers don't have dev tools
 
 ---
 
@@ -24,4 +28,19 @@ Started: Sun Mar 22 15:44:26 KST 2026
   - `-re` flag needed in FFmpeg for YouTube (reads at native frame rate, unlike RTSP which is real-time)
   - Config uses {id, youtubeUrl, streamKey} format at /config/youtube-sources.json
   - Added youtube-adapter to verify.sh service list for go vet checks
+---
+
+## 2026-03-22 - US-002
+- Configured 2 real YouTube streams from @YC-corporation channel
+- Video 1 (yt-cam-1): wvBnTOR36A4 — 스마트제조 (947s)
+- Video 2 (yt-cam-2): aqsvNWQTiQ0 — CNC 가공 (470s)
+- Added migration v2 to seed yt-cam-1, yt-cam-2 in cameras DB table
+- Fixed verify.sh to use `docker run` with build images instead of `docker exec` on runtime containers
+- Files changed: config/youtube-sources.json, services/web-backend/migrations.go, .ralph/verify.sh
+- **Learnings for future iterations:**
+  - YouTube channel videos can be listed via `yt-dlp --flat-playlist --print "%(id)s %(title)s %(duration)s"` inside youtube-adapter container
+  - Runtime containers (alpine:3.19) don't have Go/Node — use build images for vet/typecheck
+  - Cameras need entries in BOTH config (youtube-sources.json) AND DB (cameras table) to appear in UI
+  - `INSERT ... WHERE NOT EXISTS` pattern needed for idempotent seeding since cameras.name has no UNIQUE constraint
+  - RTMP streams may show transient "Connection reset by peer" errors on startup; the reconnection loop handles this
 ---
