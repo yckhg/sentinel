@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import HLSPlayer from "../components/HLSPlayer";
+import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 
 interface Camera {
   id: number;
@@ -23,7 +24,7 @@ export default function ViewerPage({ token }: { token: string }) {
   useEffect(() => {
     const verify = async () => {
       try {
-        const res = await fetch(`/api/links/verify/${token}`);
+        const res = await fetchWithTimeout(`/api/links/verify/${token}`);
         if (!res.ok) {
           setState("invalid");
           setErrorMsg(
@@ -34,9 +35,9 @@ export default function ViewerPage({ token }: { token: string }) {
           return;
         }
         setState("valid");
-      } catch {
+      } catch (err) {
         setState("invalid");
-        setErrorMsg("서버에 연결할 수 없습니다");
+        setErrorMsg(isTimeoutError(err) ? timeoutMessage() : "서버에 연결할 수 없습니다");
       }
     };
     verify();
@@ -45,27 +46,27 @@ export default function ViewerPage({ token }: { token: string }) {
   useEffect(() => {
     if (state !== "valid") return;
 
-    let cancelled = false;
+    const controller = new AbortController();
 
     const fetchCameras = async () => {
       try {
-        const res = await fetch("/api/cameras", {
+        const res = await fetchWithTimeout("/api/cameras", {
           headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: Camera[] = await res.json();
-        if (!cancelled) {
-          setCameras(data);
-          setCameraError(null);
-        }
+        setCameras(data);
+        setCameraError(null);
       } catch (err) {
-        if (!cancelled) {
-          setCameraError(
-            err instanceof Error ? err.message : "카메라 목록을 불러올 수 없습니다"
-          );
-        }
+        if (controller.signal.aborted) return;
+        setCameraError(
+          isTimeoutError(err)
+            ? timeoutMessage()
+            : err instanceof Error ? err.message : "카메라 목록을 불러올 수 없습니다"
+        );
       } finally {
-        if (!cancelled) setCamerasLoading(false);
+        if (!controller.signal.aborted) setCamerasLoading(false);
       }
     };
 
@@ -73,7 +74,7 @@ export default function ViewerPage({ token }: { token: string }) {
     const interval = setInterval(fetchCameras, 30000);
 
     return () => {
-      cancelled = true;
+      controller.abort();
       clearInterval(interval);
     };
   }, [state, token]);

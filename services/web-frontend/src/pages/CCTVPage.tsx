@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import HLSPlayer from "../components/HLSPlayer";
 import RestartDialog from "../components/RestartDialog";
 import EmergencyCallButton from "../components/EmergencyCallButton";
+import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 
 interface Camera {
   id: number;
@@ -22,28 +23,30 @@ export default function CCTVPage() {
   const [restartCamera, setRestartCamera] = useState<Camera | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
 
     const fetchCameras = async () => {
       try {
         const token = localStorage.getItem("token");
-        const res = await fetch("/api/cameras", {
+        const res = await fetchWithTimeout("/api/cameras", {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
+          signal: controller.signal,
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: Camera[] = await res.json();
-        if (!cancelled) {
-          setCameras(data);
-          setFetchError(null);
-        }
+        setCameras(data);
+        setFetchError(null);
       } catch (err) {
-        if (!cancelled) {
-          setFetchError(
-            err instanceof Error ? err.message : "카메라 목록을 불러올 수 없습니다"
-          );
-        }
+        if (controller.signal.aborted) return;
+        setFetchError(
+          isTimeoutError(err)
+            ? timeoutMessage()
+            : err instanceof Error
+              ? err.message
+              : "카메라 목록을 불러올 수 없습니다"
+        );
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     };
 
@@ -51,7 +54,7 @@ export default function CCTVPage() {
     const interval = setInterval(fetchCameras, 30000);
 
     return () => {
-      cancelled = true;
+      controller.abort();
       clearInterval(interval);
     };
   }, []);

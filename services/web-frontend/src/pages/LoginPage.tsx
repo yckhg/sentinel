@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 
 type Mode = "login" | "register";
 
@@ -20,10 +21,11 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
     setError("");
     setLoading(true);
     try {
-      const res = await fetch("/auth/login", {
+      const res = await fetchWithTimeout("/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
+        timeoutMs: 30_000,
       });
       const data = await res.json();
       if (!res.ok) {
@@ -31,8 +33,8 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
         return;
       }
       onLoginSuccess(data.token);
-    } catch {
-      setError("서버에 연결할 수 없습니다");
+    } catch (err) {
+      setError(isTimeoutError(err) ? timeoutMessage() : "서버에 연결할 수 없습니다");
     } finally {
       setLoading(false);
     }
@@ -48,10 +50,11 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
     }
     setLoading(true);
     try {
-      const res = await fetch("/auth/register", {
+      const res = await fetchWithTimeout("/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password, name }),
+        timeoutMs: 30_000,
       });
       const data = await res.json();
       if (!res.ok) {
@@ -66,8 +69,8 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
       setUsername("");
       setPassword("");
       setName("");
-    } catch {
-      setError("서버에 연결할 수 없습니다");
+    } catch (err) {
+      setError(isTimeoutError(err) ? timeoutMessage() : "서버에 연결할 수 없습니다");
     } finally {
       setLoading(false);
     }

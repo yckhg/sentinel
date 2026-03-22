@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 
 interface Contact {
   id: number;
@@ -123,14 +124,16 @@ export default function ManagementPage() {
 
   const fetchContacts = async () => {
     try {
-      const res = await fetch("/api/contacts", { headers: getAuthHeaders() });
+      const res = await fetchWithTimeout("/api/contacts", { headers: getAuthHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: Contact[] = await res.json();
       setContacts(data);
       setError(null);
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "연락처를 불러올 수 없습니다"
+        isTimeoutError(err)
+          ? timeoutMessage()
+          : err instanceof Error ? err.message : "연락처를 불러올 수 없습니다"
       );
     } finally {
       setLoading(false);
@@ -139,14 +142,16 @@ export default function ManagementPage() {
 
   const fetchSites = async () => {
     try {
-      const res = await fetch("/api/sites", { headers: getAuthHeaders() });
+      const res = await fetchWithTimeout("/api/sites", { headers: getAuthHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: Site[] = await res.json();
       setSites(data);
       setSitesError(null);
     } catch (err) {
       setSitesError(
-        err instanceof Error ? err.message : "현장 정보를 불러올 수 없습니다"
+        isTimeoutError(err)
+          ? timeoutMessage()
+          : err instanceof Error ? err.message : "현장 정보를 불러올 수 없습니다"
       );
     } finally {
       setSitesLoading(false);
@@ -155,14 +160,16 @@ export default function ManagementPage() {
 
   const fetchTempLinks = async () => {
     try {
-      const res = await fetch("/api/links", { headers: getAuthHeaders() });
+      const res = await fetchWithTimeout("/api/links", { headers: getAuthHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: TempLink[] = await res.json();
       setTempLinks(data || []);
       setLinksError(null);
     } catch (err) {
       setLinksError(
-        err instanceof Error ? err.message : "임시 링크를 불러올 수 없습니다"
+        isTimeoutError(err)
+          ? timeoutMessage()
+          : err instanceof Error ? err.message : "임시 링크를 불러올 수 없습니다"
       );
     } finally {
       setLinksLoading(false);
@@ -171,26 +178,30 @@ export default function ManagementPage() {
 
   const fetchPendingUsers = async () => {
     try {
-      const res = await fetch("/auth/pending", { headers: getAuthHeaders() });
+      const res = await fetchWithTimeout("/auth/pending", { headers: getAuthHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: PendingUser[] = await res.json();
       setPendingUsers(data || []);
     } catch (err) {
       setAccountsError(
-        err instanceof Error ? err.message : "계정 정보를 불러올 수 없습니다"
+        isTimeoutError(err)
+          ? timeoutMessage()
+          : err instanceof Error ? err.message : "계정 정보를 불러올 수 없습니다"
       );
     }
   };
 
   const fetchActiveUsers = async () => {
     try {
-      const res = await fetch("/auth/users", { headers: getAuthHeaders() });
+      const res = await fetchWithTimeout("/auth/users", { headers: getAuthHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: ActiveUser[] = await res.json();
       setActiveUsers(data || []);
     } catch (err) {
       setAccountsError(
-        err instanceof Error ? err.message : "계정 정보를 불러올 수 없습니다"
+        isTimeoutError(err)
+          ? timeoutMessage()
+          : err instanceof Error ? err.message : "계정 정보를 불러올 수 없습니다"
       );
     }
   };
@@ -205,7 +216,7 @@ export default function ManagementPage() {
   const handleApprove = async (userId: number) => {
     setApproveLoading(userId);
     try {
-      const res = await fetch(`/auth/approve/${userId}`, {
+      const res = await fetchWithTimeout(`/auth/approve/${userId}`, {
         method: "POST",
         headers: getAuthHeaders(),
       });
@@ -215,7 +226,7 @@ export default function ManagementPage() {
       }
       await fetchAccounts();
     } catch (err) {
-      setAccountsError(err instanceof Error ? err.message : "승인 실패");
+      setAccountsError(isTimeoutError(err) ? timeoutMessage() : err instanceof Error ? err.message : "승인 실패");
     } finally {
       setApproveLoading(null);
     }
@@ -224,7 +235,7 @@ export default function ManagementPage() {
   const handleReject = async (userId: number) => {
     setRejectLoading(userId);
     try {
-      const res = await fetch(`/auth/reject/${userId}`, {
+      const res = await fetchWithTimeout(`/auth/reject/${userId}`, {
         method: "POST",
         headers: getAuthHeaders(),
       });
@@ -234,7 +245,7 @@ export default function ManagementPage() {
       }
       await fetchAccounts();
     } catch (err) {
-      setAccountsError(err instanceof Error ? err.message : "거절 실패");
+      setAccountsError(isTimeoutError(err) ? timeoutMessage() : err instanceof Error ? err.message : "거절 실패");
     } finally {
       setRejectLoading(null);
     }
@@ -244,7 +255,7 @@ export default function ManagementPage() {
     setCreateLinkLoading(true);
     setNewLinkUrl(null);
     try {
-      const res = await fetch("/api/links/temp", {
+      const res = await fetchWithTimeout("/api/links/temp", {
         method: "POST",
         headers: getAuthHeaders(),
         body: JSON.stringify({}),
@@ -257,7 +268,7 @@ export default function ManagementPage() {
       setNewLinkUrl(data.url);
       await fetchTempLinks();
     } catch (err) {
-      setLinksError(err instanceof Error ? err.message : "링크 생성 실패");
+      setLinksError(isTimeoutError(err) ? timeoutMessage() : err instanceof Error ? err.message : "링크 생성 실패");
     } finally {
       setCreateLinkLoading(false);
     }
@@ -285,7 +296,7 @@ export default function ManagementPage() {
     if (!revokeTarget) return;
     setRevokeLoading(true);
     try {
-      const res = await fetch(`/api/links/${revokeTarget.id}`, {
+      const res = await fetchWithTimeout(`/api/links/${revokeTarget.id}`, {
         method: "DELETE",
         headers: getAuthHeaders(),
       });
@@ -339,7 +350,7 @@ export default function ManagementPage() {
     }
     setSiteEditLoading(true);
     try {
-      const res = await fetch(`/api/sites/${siteEditId}`, {
+      const res = await fetchWithTimeout(`/api/sites/${siteEditId}`, {
         method: "PUT",
         headers: getAuthHeaders(),
         body: JSON.stringify({
@@ -355,7 +366,7 @@ export default function ManagementPage() {
       setSiteEditId(null);
       await fetchSites();
     } catch (err) {
-      setSiteEditError(err instanceof Error ? err.message : "수정 실패");
+      setSiteEditError(isTimeoutError(err) ? timeoutMessage() : err instanceof Error ? err.message : "수정 실패");
     } finally {
       setSiteEditLoading(false);
     }
@@ -373,7 +384,7 @@ export default function ManagementPage() {
     }
     setAddLoading(true);
     try {
-      const res = await fetch("/api/contacts", {
+      const res = await fetchWithTimeout("/api/contacts", {
         method: "POST",
         headers: getAuthHeaders(),
         body: JSON.stringify({ name: addName.trim(), phone: addPhone }),
@@ -387,7 +398,7 @@ export default function ManagementPage() {
       setShowAddForm(false);
       await fetchContacts();
     } catch (err) {
-      setAddError(err instanceof Error ? err.message : "추가 실패");
+      setAddError(isTimeoutError(err) ? timeoutMessage() : err instanceof Error ? err.message : "추가 실패");
     } finally {
       setAddLoading(false);
     }
@@ -418,7 +429,7 @@ export default function ManagementPage() {
     }
     setEditLoading(true);
     try {
-      const res = await fetch(`/api/contacts/${editId}`, {
+      const res = await fetchWithTimeout(`/api/contacts/${editId}`, {
         method: "PUT",
         headers: getAuthHeaders(),
         body: JSON.stringify({ name: editName.trim(), phone: editPhone }),
@@ -430,7 +441,7 @@ export default function ManagementPage() {
       setEditId(null);
       await fetchContacts();
     } catch (err) {
-      setEditError(err instanceof Error ? err.message : "수정 실패");
+      setEditError(isTimeoutError(err) ? timeoutMessage() : err instanceof Error ? err.message : "수정 실패");
     } finally {
       setEditLoading(false);
     }
@@ -440,7 +451,7 @@ export default function ManagementPage() {
     if (!deleteTarget) return;
     setDeleteLoading(true);
     try {
-      const res = await fetch(`/api/contacts/${deleteTarget.id}`, {
+      const res = await fetchWithTimeout(`/api/contacts/${deleteTarget.id}`, {
         method: "DELETE",
         headers: getAuthHeaders(),
       });

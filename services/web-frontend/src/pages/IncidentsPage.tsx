@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 
 interface Incident {
   id: number;
@@ -69,7 +70,7 @@ export default function IncidentsPage() {
       if (from) params.set("from", from);
       if (to) params.set("to", to + "T23:59:59");
 
-      const res = await fetch(`/api/incidents?${params}`, { headers: getAuthHeaders() });
+      const res = await fetchWithTimeout(`/api/incidents?${params}`, { headers: getAuthHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
 
@@ -80,7 +81,7 @@ export default function IncidentsPage() {
       }
       setPagination(json.pagination);
     } catch (err) {
-      setError("사고 이력을 불러오지 못했습니다.");
+      setError(isTimeoutError(err) ? timeoutMessage() : "사고 이력을 불러오지 못했습니다.");
       console.error("fetch incidents error:", err);
     } finally {
       setLoading(false);
