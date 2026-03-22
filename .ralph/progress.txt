@@ -1,0 +1,55 @@
+# Ralph Progress Log — Streaming Fix
+Started: Sun Mar 22 18:43:04 KST 2026
+
+## Codebase Patterns
+- All services use Go stdlib only with go.mod at service root
+- Streaming server: nginx-rtmp v1.2.2 (Alpine apk, NOT tiangolo image) + Go API binary
+- youtube-adapter: reads config from /config/youtube-sources.json, localFile field for pre-downloaded videos
+- FFmpeg command: -re -i <source> -c:v libx264 -preset ultrafast -tune zerolatency -b:v 300k -g 60 -c:a aac -b:a 48k -f flv rtmp://streaming:1935/live/<key>
+- nginx-rtmp config at services/streaming/nginx.conf: chunk_size 8192, hls_fragment 2s, hls_playlist_length 10s
+- nginx-rtmp v1.2.2 CANNOT handle H.264 B-frames in FLV — always re-encode with -tune zerolatency (bframes=0)
+- Typecheck: docker run --rm -v "$PWD":/app -w /app golang:1.22-alpine go vet ./...
+
+## Known Facts
+- cam-2 (110kbps, HE-AAC 47k, 606x360) streams fine from local file
+- cam-1 (258kbps, AAC LC 128k, 640x360) fails after ~5s with Connection reset by peer
+- Another video (300kbps) also fails after ~5s
+- Error always on audio packet muxing: [aost#0:1/copy] Error submitting a packet to the muxer: Connection reset by peer
+- Happens with single stream too (not concurrency issue)
+- nginx-rtmp error.log shows only HTTP 404s, no RTMP-level errors at all
+- Local files, not YouTube rate limiting
+- exit status 152 = signal 24 (SIGXCPU? or custom)
+
+## Attempted (all failed)
+- Re-encoding audio with -c:a aac -b:a 64k — still fails
+- Different video from same channel — still fails  
+- Running single stream only — still fails
+- YouTube live streaming (yt-dlp) — fails due to concurrent download limit
+
+## Things to investigate
+1. nginx-rtmp module version — does it have known issues with AAC LC?
+2. FLV container limitation — FLV spec only supports certain AAC profiles?
+3. Try -c:a aac -ar 44100 -ac 2 (full re-encode to baseline AAC)
+4. Try removing -re flag (maybe timing issue with buffered local file)
+5. Try -stream_loop -1 flag instead of manual loop
+6. Check Dockerfile for streaming — what nginx-rtmp image/version?
+7. Try increasing chunk_size to 8192 or 65536
+8. Try adding buflen directive to nginx-rtmp
+9. Check if the audio stream has B-frames or DTS issues incompatible with FLV
+10. Try -bsf:a aac_adtstoasc (AAC bitstream filter for FLV compatibility)
+---
+
+## 2026-03-22 18:54 KST - US-001 (RESOLVED)
+- **Root cause**: nginx-rtmp module v1.2.2 drops RTMP connections when H.264 B-frames are present in the FLV container. The composition time offsets (CTS) from B-frames cause the module to reset the connection after ~5 seconds. This was NOT an audio issue — the error appeared on audio packets simply because audio happened to be the packet being written when the connection was dropped.
+- **Key diagnostic steps**:
+  - Tested video-only (no audio): cam-2 (no B-frame issues at 60kbps) worked, cam-1 (127kbps, 29.97fps) still failed at ~5s → proved audio was not the cause
+  - Tested cam-1 with libx264 re-encode (bframes=0, -tune zerolatency): streamed stably for 15+ seconds → confirmed B-frames were the root cause
+- **Fix**: Changed FFmpeg from `-c copy` to `-c:v libx264 -preset ultrafast -tune zerolatency -b:v 300k -g 60 -c:a aac -b:a 48k`
+- **Files changed**: services/youtube-adapter/main.go, services/streaming/nginx.conf
+- **Learnings for future iterations:**
+  - nginx-rtmp v1.2.2 (Alpine apk) cannot handle H.264 B-frames in FLV — always use -tune zerolatency or -bf 0
+  - "Connection reset by peer" on audio muxing is misleading — the actual cause can be video-related
+  - The streaming Dockerfile uses `alpine:3.19 + apk add nginx nginx-mod-rtmp`, NOT a pre-built tiangolo image
+  - Exit status 152 from FFmpeg = signal 24 (SIGXCPU) — appears to be how FFmpeg exits on RTMP connection reset
+  - go vet must be run via Docker: `docker run --rm -v "$PWD":/app -w /app golang:1.22-alpine go vet ./...`
+---

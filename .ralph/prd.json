@@ -1,0 +1,23 @@
+{
+  "project": "Sentinel",
+  "branchName": "ralph/fix-streaming",
+  "description": "Fix RTMP streaming failure — some video files cause Connection reset by peer after ~5 seconds when pushed via FFmpeg to nginx-rtmp. cam-2 (110kbps HE-AAC) works, cam-1 (258kbps AAC LC) fails. Must diagnose root cause and fix.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Diagnose and fix RTMP streaming failure for high-bitrate videos",
+      "description": "As a developer, I need to find why some local mp4 files fail with 'Connection reset by peer' after ~5 seconds when FFmpeg pushes to nginx-rtmp, and fix it so all demo videos stream reliably.",
+      "acceptanceCriteria": [
+        "Root cause identified and documented in progress.txt",
+        "Both yt-cam-1 and yt-cam-2 stream continuously without Connection reset by peer errors",
+        "Videos loop without interruption (FFmpeg restarts cleanly at video end)",
+        "docker compose up -d starts all services and both streams are visible within 30 seconds",
+        "Fix committed with clear explanation in commit message",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Known facts: cam-2 (110kbps, HE-AAC 47k) works. cam-1 (258kbps, AAC LC 128k) fails after ~5s. New video (300kbps) also fails. Error is always 'Connection reset by peer' on audio packet muxing. nginx-rtmp error log shows no RTMP-level errors. Happens with single stream too (not concurrency issue). nginx-rtmp config: chunk_size 4096, no explicit limits. Streaming container uses tiangolo/nginx-rtmp or similar alpine-based image. Things to investigate: 1) nginx-rtmp version/module compatibility with AAC LC vs HE-AAC 2) FLV container limitations for certain AAC profiles 3) chunk_size vs bitrate ratio 4) FFmpeg -re flag timing issues with higher bitrate 5) Try re-encoding audio to HE-AAC before streaming 6) Try removing -re flag 7) Check if -stream_loop works vs manual loop 8) Check nginx-rtmp access log (not just error log) 9) Try increasing chunk_size to 8192 or higher 10) Try adding buflen/max_streams directives"
+    }
+  ]
+}
