@@ -56,3 +56,14 @@ Started: Sun Mar 22 13:02:53 KST 2026
   - Use conditions []string + strings.Join(" AND ") pattern for parameterized query builders
   - incidents.go handles both create and list endpoints for incidents table
 ---
+
+## 2026-03-22 - US-005
+- Added context.WithTimeout(10s) to forwardToNotifier and forwardToWebBackend
+- Replaced httpClient.Post with http.NewRequestWithContext + httpClient.Do
+- Retry logic in forwardToWebBackend also uses its own context with timeout
+- Files changed: services/hw-gateway/main.go
+- **Learnings for future iterations:**
+  - http.NewRequestWithContext is the standard way to add context/timeout to HTTP calls in Go
+  - When retrying with context, need a fresh context for each attempt (original may be expired)
+  - httpClient already has a 10s Timeout, but context.WithTimeout gives per-request control and cleaner goroutine cleanup
+---
