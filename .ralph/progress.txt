@@ -67,3 +67,16 @@ Started: Sun Mar 22 13:02:53 KST 2026
   - When retrying with context, need a fresh context for each attempt (original may be expired)
   - httpClient already has a 10s Timeout, but context.WithTimeout gives per-request control and cleaner goroutine cleanup
 ---
+
+## 2026-03-22 - US-006
+- Added safeSend() method to wsClient that uses select/default for non-blocking sends
+- safeSend() includes defer/recover to catch panics from writing to closed channels
+- Replaced direct `client.send <- connMsg` with `client.safeSend(connMsg)` for initial connection message
+- broadcast() now uses safeSend() instead of inline select/default
+- Also fixed json.Marshal error being discarded with _ for the connected message
+- Files changed: services/web-backend/websocket.go
+- **Learnings for future iterations:**
+  - select/default prevents blocking but does NOT prevent panic on closed channels — need recover() too
+  - unregister() closes c.send after removing from map, so broadcast won't find it, but safeSend recover is defense-in-depth
+  - wsClient.send channel has 64-element buffer — unlikely to fill but safeSend handles it gracefully
+---
