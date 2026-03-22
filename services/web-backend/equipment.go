@@ -54,7 +54,12 @@ func handleEquipmentRestart() http.HandlerFunc {
 			"requestedBy": fmt.Sprintf("user:%d", user.UserID),
 			"reason":      req.Reason,
 		}
-		body, _ := json.Marshal(payload)
+		body, err := json.Marshal(payload)
+		if err != nil {
+			log.Printf("failed to marshal restart payload: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
 
 		resp, err := client.Post(hwGatewayURL+"/api/restart", "application/json", bytes.NewReader(body))
 		if err != nil {

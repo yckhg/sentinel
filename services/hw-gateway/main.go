@@ -237,7 +237,11 @@ func forwardToNotifier(notifierURL string, alert *AlertPayload) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	body, _ := json.Marshal(alert)
+	body, err := json.Marshal(alert)
+	if err != nil {
+		log.Printf("[FORWARD] Failed to marshal alert for notifier: %v", err)
+		return
+	}
 	url := fmt.Sprintf("%s/api/notify", notifierURL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -265,7 +269,11 @@ func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
 		Description: alert.Description,
 		OccurredAt:  alert.Timestamp,
 	}
-	body, _ := json.Marshal(incident)
+	body, err := json.Marshal(incident)
+	if err != nil {
+		log.Printf("[FORWARD] Failed to marshal incident for web-backend: %v", err)
+		return
+	}
 	url := fmt.Sprintf("%s/api/incidents", webBackendURL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
