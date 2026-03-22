@@ -223,14 +223,23 @@ func resolveStreamURL(youtubeURL string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// runFFmpeg streams from sourceURL to rtmpDest
+// runFFmpeg streams from sourceURL to rtmpDest.
+// Video is re-encoded with libx264 (no B-frames) because nginx-rtmp module v1.2.2
+// drops connections when H.264 B-frame composition time offsets are present in FLV.
+// Audio is re-encoded to AAC 48k for consistent FLV compatibility.
 func runFFmpeg(sourceURL, rtmpDest string, stopCh chan struct{}) error {
 	cmd := exec.Command("ffmpeg",
 		"-hide_banner",
-		"-loglevel", "warning",
+		"-loglevel", "error",
 		"-re",
 		"-i", sourceURL,
-		"-c", "copy",
+		"-c:v", "libx264",
+		"-preset", "ultrafast",
+		"-tune", "zerolatency",
+		"-b:v", "300k",
+		"-g", "60",
+		"-c:a", "aac",
+		"-b:a", "48k",
 		"-f", "flv",
 		"-flvflags", "no_duration_filesize",
 		rtmpDest,
