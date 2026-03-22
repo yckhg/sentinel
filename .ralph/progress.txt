@@ -17,6 +17,9 @@ Started: Sat Mar 22 13:44:00 KST 2026
 - cctv-adapter: watchdogWriter wraps io.Writer with atomic.Int64 for lock-free output timestamp tracking
 - web-backend DB calls: all handlers use factory pattern `func handleXxx(db *sql.DB) http.HandlerFunc` with `r *http.Request` available for `r.Context()`
 - web-backend: `dbCtx(parent)` helper in auth.go provides 5s timeout context — reuse across all files in the package
+- Frontend: `fetchWithTimeout()` in `src/utils/fetchWithTimeout.ts` wraps fetch with AbortController timeout — use for all API calls
+- Frontend: `isTimeoutError(err)` + `timeoutMessage()` helpers provide consistent Korean timeout error messages
+- Frontend: For useEffect with periodic fetches, pass AbortController.signal to fetchWithTimeout and abort on cleanup — replaces `cancelled` flag pattern
 ---
 
 ## 2026-03-22 13:44 - US-001
@@ -65,4 +68,15 @@ Started: Sat Mar 22 13:44:00 KST 2026
   - `clientIP()` checks X-Forwarded-For first (nginx proxy), falls back to RemoteAddr
   - `rateLimitMiddleware` wraps `http.HandlerFunc` — applied inline at route registration in main.go
   - Cleanup goroutine uses `sync.Map.Range` + `Delete` which is safe for concurrent access
+---
+
+## 2026-03-22 - US-006
+- **What was implemented**: Added AbortController timeout to all fetch() calls across LoginPage, CCTVPage, ManagementPage, ViewerPage, and IncidentsPage. Created `fetchWithTimeout` utility in `src/utils/fetchWithTimeout.ts`. Auth calls (login/register) use 30s timeout; all other data fetches use 10s default. Timeout errors display Korean user-friendly message.
+- **Files changed**: src/utils/fetchWithTimeout.ts (new), LoginPage.tsx, CCTVPage.tsx, ManagementPage.tsx, ViewerPage.tsx, IncidentsPage.tsx
+- **Learnings for future iterations:**
+  - `fetchWithTimeout` accepts optional `signal` from caller — enables composing with useEffect cleanup AbortController
+  - CCTVPage and ViewerPage replaced `cancelled` boolean flag with `controller.signal.aborted` check — cleaner pattern
+  - ManagementPage has ~15 fetch calls across CRUD operations — all converted
+  - RestartDialog and EmergencyCallButton also have fetch calls but were not in AC scope
+  - TypeScript `RequestInit & { timeoutMs?: number }` works cleanly for extending fetch options
 ---

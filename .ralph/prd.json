@@ -85,8 +85,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Created fetchWithTimeout utility with AbortController. All fetch() calls in LoginPage (30s for auth), CCTVPage, ManagementPage, ViewerPage, IncidentsPage (10s default) use AbortController timeout. Timeout errors show Korean message. useEffect cleanup uses AbortController.abort() instead of cancelled flag."
     },
     {
       "id": "US-007",
