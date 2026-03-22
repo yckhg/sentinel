@@ -6,10 +6,20 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
 const hlsDir = "/tmp/hls"
+
+var streamActiveTimeout = func() time.Duration {
+	if v := os.Getenv("STREAM_ACTIVE_TIMEOUT"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return 30 * time.Second
+}()
 
 type StreamInfo struct {
 	CameraID  string `json:"cameraId"`
@@ -59,8 +69,8 @@ func handleStreams(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Consider stream active if playlist was modified in the last 15 seconds
-		active := time.Since(info.ModTime()) < 15*time.Second
+		// Consider stream active if playlist was modified within the detection window
+		active := time.Since(info.ModTime()) < streamActiveTimeout
 
 		streams = append(streams, StreamInfo{
 			CameraID:  cameraID,
