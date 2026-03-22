@@ -1,18 +1,46 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
+
+// youtubeURLPattern matches valid YouTube video URLs.
+var youtubeURLPattern = regexp.MustCompile(
+	`^https://(www\.)?youtube\.com/watch\?v=[\w-]+|^https://youtu\.be/[\w-]+`,
+)
+
+const maxYouTubeURLLength = 200
+
+// validateYouTubeURL checks that the URL is a valid YouTube video URL.
+func validateYouTubeURL(rawURL string) error {
+	if len(rawURL) > maxYouTubeURLLength {
+		return fmt.Errorf("URL exceeds maximum length of %d characters", maxYouTubeURLLength)
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("URL must use https scheme, got %q", parsed.Scheme)
+	}
+	if !youtubeURLPattern.MatchString(rawURL) {
+		return fmt.Errorf("URL must match https://(www.)youtube.com/watch?v=... or https://youtu.be/...")
+	}
+	return nil
+}
 
 // YouTubeSource represents a single YouTube video to stream
 type YouTubeSource struct {
@@ -158,9 +186,17 @@ func (m *StreamManager) manageStream(src YouTubeSource, state *streamState) {
 	}
 }
 
-// resolveStreamURL uses yt-dlp to get the direct stream URL
+// resolveStreamURL uses yt-dlp to get the direct stream URL.
+// It validates the YouTube URL before execution and enforces a 30s timeout.
 func resolveStreamURL(youtubeURL string) (string, error) {
-	cmd := exec.Command("yt-dlp",
+	if err := validateYouTubeURL(youtubeURL); err != nil {
+		return "", fmt.Errorf("invalid YouTube URL: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "yt-dlp",
 		"--no-warnings",
 		"-f", "best[ext=mp4]/best",
 		"--get-url",
@@ -168,6 +204,9 @@ func resolveStreamURL(youtubeURL string) (string, error) {
 	)
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("yt-dlp timed out after 30s")
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return "", fmt.Errorf("%v: %s", err, string(exitErr.Stderr))
 		}
@@ -252,7 +291,17 @@ func loadConfig(path string) ([]YouTubeSource, error) {
 	if err := json.Unmarshal(data, &sources); err != nil {
 		return nil, err
 	}
-	return sources, nil
+
+	// Validate all YouTube URLs at config load time
+	var valid []YouTubeSource
+	for _, src := range sources {
+		if err := validateYouTubeURL(src.YouTubeURL); err != nil {
+			log.Printf("WARNING: Skipping source %q: invalid YouTube URL %q: %v", src.ID, src.YouTubeURL, err)
+			continue
+		}
+		valid = append(valid, src)
+	}
+	return valid, nil
 }
 
 func main() {
