@@ -1,113 +1,27 @@
 # Ralph Progress Log
-Started: Sat Mar 22 13:44:00 KST 2026
+Started: Sun Mar 22 15:44:26 KST 2026
 
 ## Codebase Patterns
-- Alpine containers resolve `localhost` to IPv6 `::1`, but Go/nginx listen on IPv4 `0.0.0.0`. Use `127.0.0.1` in healthcheck URLs.
-- Go services are multi-stage Docker builds (golang:1.22-alpine builder → alpine:3.19 runtime)
-- Source code lives at services/{name}/*.go with go.mod in each service dir
-- Typecheck via `docker run --rm -v "$(pwd):/app" -w /app golang:1.22-alpine sh -c "go mod tidy && go vet ./..."` from service dir
-- Frontend typecheck: `docker run --rm -v "$(pwd):/app" -w /app node:20-alpine sh -c "npm install --silent 2>/dev/null && npx tsc --noEmit"` from web-frontend dir
-- Master branch is `master` not `main`
-- /data/ is volume-mounted in web-backend container — use it for persistent state files
-- All services expose GET /healthz endpoints — use for Docker healthchecks
-- Alpine images have wget (not curl) — use `wget --spider -q` for healthchecks
-- Streaming: nginx on port 8080 proxies `/healthz` to Go API on port 8081. RTMP on 1935.
-- Web-frontend: nginx on port 80, proxies /api/ and /auth/ to web-backend:8080, /live/ to streaming:8080.
-- Web-frontend's `nginx:alpine` crashes if upstream hosts (web-backend, streaming) are not DNS-resolvable at startup.
-- cctv-adapter: watchdogWriter wraps io.Writer with atomic.Int64 for lock-free output timestamp tracking
-- web-backend DB calls: all handlers use factory pattern `func handleXxx(db *sql.DB) http.HandlerFunc` with `r *http.Request` available for `r.Context()`
-- web-backend: `dbCtx(parent)` helper in auth.go provides 5s timeout context — reuse across all files in the package
-- Frontend: `fetchWithTimeout()` in `src/utils/fetchWithTimeout.ts` wraps fetch with AbortController timeout — use for all API calls
-- Frontend: `isTimeoutError(err)` + `timeoutMessage()` helpers provide consistent Korean timeout error messages
-- Frontend: For useEffect with periodic fetches, pass AbortController.signal to fetchWithTimeout and abort on cleanup — replaces `cancelled` flag pattern
-- Frontend: `isTokenExpired()` in `src/utils/isTokenExpired.ts` — client-side JWT exp check (no signature verification)
-- cctv-adapter: FFmpeg processes use graceful shutdown (SIGTERM → 5s → SIGKILL) via `syscall.SIGTERM`
-- streaming: `streamActiveTimeout` var (default 30s, configurable via STREAM_ACTIVE_TIMEOUT env var) controls stream active detection window
+- All services use Go stdlib only (no external deps) with `go.mod` at service root
+- Health endpoint pattern: `GET /healthz` → `{"status":"ok","service":"<name>"}`
+- FFmpeg streams use `-c copy` (no transcoding) and `-f flv` to RTMP destination
+- Docker images: `golang:1.22-alpine` builder + `alpine:3.19` runtime
+- Config files mounted read-only from `config/` directory
+- All services on `sentinel-net` internal Docker network
+- Graceful shutdown: SIGTERM → wait → SIGKILL pattern for FFmpeg processes
+- Exponential backoff with max 30s for reconnection loops
+
 ---
 
-## 2026-03-22 13:44 - US-001
-- **What was implemented**: Fixed streaming service healthcheck by changing `localhost` to `127.0.0.1` in docker-compose.yml healthcheck URL. Added `start_period: 10s` and reduced interval to 15s for faster detection.
-- **Files changed**: docker-compose.yml (streaming healthcheck section)
+## 2026-03-22 - US-001
+- Implemented youtube-adapter service: Go HTTP server + yt-dlp + FFmpeg
+- Resolves YouTube URLs via `yt-dlp --get-url`, streams via FFmpeg to RTMP
+- Auto-loops on video completion, exponential backoff on errors
+- Health endpoint at `/healthz`, status endpoint at `/api/streams/status`
+- Files changed: services/youtube-adapter/{Dockerfile,go.mod,main.go}, config/youtube-sources.json, docker-compose.yml, .ralph/verify.sh
 - **Learnings for future iterations:**
-  - Root cause: Alpine's busybox wget resolves `localhost` to IPv6 `::1`, but nginx listens on `0.0.0.0:8080` (IPv4 only). Same issue affects ALL service healthchecks using `localhost`.
-  - Verified fix by running `docker run` + `wget --spider -q http://127.0.0.1:8080/healthz` inside container.
-  - Other service healthchecks (hw-gateway, cctv-adapter, notifier, web-backend, web-frontend) have the same IPv6 issue — they should all use `127.0.0.1`.
----
-
-## 2026-03-22 - US-002
-- **What was implemented**: Fixed web-frontend healthcheck by changing `localhost` to `127.0.0.1` in docker-compose.yml. Added `start_period: 10s` and reduced interval to 15s.
-- **Files changed**: docker-compose.yml (web-frontend healthcheck section)
-- **Learnings for future iterations:**
-  - Web-frontend nginx.conf already has a `/healthz` endpoint (line 40) that returns JSON — no need to use root `/`.
-  - Verified container reports `healthy` within 15s after restart.
-  - verify.sh fails on all go vet/typecheck steps because runtime containers don't have dev tools. For docker-compose-only changes, rely on `docker compose config` validation and runtime health verification.
----
-
-## 2026-03-22 - US-003
-- **What was implemented**: Added context.WithTimeout (5s) to all database operations in web-backend. Changed db.Query/QueryRow/Exec to their Context variants (QueryContext/QueryRowContext/ExecContext). HTTP handlers derive context from r.Context(); startup code (migrations, seedAdminUser, initDB) uses context.Background().
-- **Files changed**: auth.go, cameras.go, contacts.go, incidents.go, main.go, migrations.go, sites.go
-- **Learnings for future iterations:**
-  - Created `dbCtx(parent)` helper in auth.go — available to all files in the `main` package without imports
-  - `db.BeginTx(ctx, nil)` replaces `db.Begin()` for context-aware transactions; `tx.ExecContext(ctx, ...)` for transaction queries
-  - `db.PingContext(ctx)` replaces `db.Ping()` for context-aware connectivity checks
-  - All 7 Go files in web-backend needed changes — no DB calls in equipment.go, links.go, or websocket.go
----
-
-## 2026-03-22 - US-004
-- **What was implemented**: Replaced single fixed-delay retry in `forwardToWebBackend` with exponential backoff loop (1s, 2s, 4s base delays) with ±25% random jitter. Max 3 retries before giving up. Extracted `backoffWithJitter()` helper function.
-- **Files changed**: services/hw-gateway/main.go
-- **Learnings for future iterations:**
-  - Only `forwardToWebBackend` had retry logic; `forwardToNotifier` has no retries (fire-and-forget for notifications)
-  - `math/rand` added for jitter — no need for `rand.Seed()` since Go 1.20+ auto-seeds
-  - Context cancel must be called explicitly in loop iterations (not deferred) to avoid resource leak
-  - The `httpClient` has its own 10s timeout, plus each request gets a 10s context timeout — effectively double-bounded
----
-
-## 2026-03-22 - US-005
-- **What was implemented**: Added IP-based rate limiting on POST /auth/login (10 req/min) and POST /auth/register (5 req/min). New ratelimit.go file with sync.Map + atomic counters for lock-free concurrent access. Middleware wrapper pattern. Stale entries cleaned every 5 minutes via background goroutine.
-- **Files changed**: services/web-backend/ratelimit.go (new), services/web-backend/main.go
-- **Learnings for future iterations:**
-  - Rate limiter uses atomic.Int64 for count and windowEnd — no mutex needed for the hot path
-  - `clientIP()` checks X-Forwarded-For first (nginx proxy), falls back to RemoteAddr
-  - `rateLimitMiddleware` wraps `http.HandlerFunc` — applied inline at route registration in main.go
-  - Cleanup goroutine uses `sync.Map.Range` + `Delete` which is safe for concurrent access
----
-
-## 2026-03-22 - US-006
-- **What was implemented**: Added AbortController timeout to all fetch() calls across LoginPage, CCTVPage, ManagementPage, ViewerPage, and IncidentsPage. Created `fetchWithTimeout` utility in `src/utils/fetchWithTimeout.ts`. Auth calls (login/register) use 30s timeout; all other data fetches use 10s default. Timeout errors display Korean user-friendly message.
-- **Files changed**: src/utils/fetchWithTimeout.ts (new), LoginPage.tsx, CCTVPage.tsx, ManagementPage.tsx, ViewerPage.tsx, IncidentsPage.tsx
-- **Learnings for future iterations:**
-  - `fetchWithTimeout` accepts optional `signal` from caller — enables composing with useEffect cleanup AbortController
-  - CCTVPage and ViewerPage replaced `cancelled` boolean flag with `controller.signal.aborted` check — cleaner pattern
-  - ManagementPage has ~15 fetch calls across CRUD operations — all converted
-  - RestartDialog and EmergencyCallButton also have fetch calls but were not in AC scope
-  - TypeScript `RequestInit & { timeoutMs?: number }` works cleanly for extending fetch options
----
-
-## 2026-03-22 - US-007
-- **What was implemented**: JWT expiration check on app load. Created `isTokenExpired()` utility that decodes JWT base64 payload and checks `exp` claim against current time. Used as lazy initializer in `useState` — expired tokens are removed from localStorage before first render, causing the login page to show.
-- **Files changed**: src/utils/isTokenExpired.ts (new), src/App.tsx
-- **Learnings for future iterations:**
-  - JWT payload is the second segment (index 1), base64-encoded. `atob()` decodes it — no library needed.
-  - Using `useState(() => ...)` lazy initializer is cleaner than `useEffect` for one-time init logic that determines initial state.
-  - Malformed tokens (wrong segment count, invalid base64, missing exp) are treated as expired — safe default.
----
-
-## 2026-03-22 - US-008
-- **What was implemented**: FFmpeg graceful shutdown via SIGTERM → 5s wait → SIGKILL. Two kill sites updated: (1) watchdog timeout in `manageCameraStream` goroutine, (2) `Stop()` method for container shutdown. Watchdog uses `processDone` channel to detect if process exited within 5s. `Stop()` sends SIGTERM to all processes, sleeps 5s, then SIGKILL any remaining.
-- **Files changed**: services/cctv-adapter/main.go
-- **Learnings for future iterations:**
-  - `syscall.SIGTERM` requires `"syscall"` import — available on all Go targets (Linux/Alpine)
-  - `os.Process.Kill()` after process has already exited returns error — safe to call unconditionally as fallback
-  - `Stop()` releases mutex before sleeping 5s to avoid blocking status queries during shutdown
-  - Watchdog goroutine has access to `processDone` channel (closed when `cmd.Wait()` returns) — efficient signal for graceful exit detection without polling
----
-
-## 2026-03-22 - US-009
-- **What was implemented**: Increased stream active detection window from 15s to 30s. Made threshold configurable via `STREAM_ACTIVE_TIMEOUT` env var. Uses package-level var initialized via IIFE at startup.
-- **Files changed**: services/streaming/main.go
-- **Learnings for future iterations:**
-  - `streamActiveTimeout` is a package-level var initialized once via IIFE — avoids parsing env var on every request
-  - HLS playlist timing: 2s fragments, 10s window (5 segments) — 30s threshold gives ~3x headroom for brief network hiccups
-  - streaming service is simple (~80 lines) — single main.go with two endpoints: /healthz and /api/streams
+  - youtube-adapter follows same pattern as cctv-adapter but uses yt-dlp for URL resolution instead of direct RTSP
+  - `-re` flag needed in FFmpeg for YouTube (reads at native frame rate, unlike RTSP which is real-time)
+  - Config uses {id, youtubeUrl, streamKey} format at /config/youtube-sources.json
+  - Added youtube-adapter to verify.sh service list for go vet checks
 ---

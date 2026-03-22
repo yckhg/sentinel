@@ -1,137 +1,193 @@
 {
   "project": "Sentinel",
-  "branchName": "ralph/sentinel-stabilize",
-  "description": "Stabilization — fix broken healthchecks + address all medium-severity issues from evaluation (DB timeouts, retry jitter, rate limiting, fetch timeouts, JWT expiration check, FFmpeg graceful shutdown, stream detection window)",
+  "branchName": "ralph/sentinel-improvements",
+  "description": "Feature improvements — YouTube adapter for demo streaming, camera CRUD, dual calendar date picker, password change, email invitation",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Fix streaming service healthcheck",
-      "description": "As an operator, I need the streaming container to report healthy so that Docker can detect failures.",
+      "title": "YouTube adapter container with yt-dlp + FFmpeg",
+      "description": "As a developer, I need a new container that pulls YouTube videos and pushes them as RTMP streams to the streaming server, so that we can demo the system without real cameras.",
       "acceptanceCriteria": [
-        "Streaming healthcheck uses correct port/path that nginx-rtmp proxies to Go API",
-        "docker compose up -d shows streaming as healthy within 60s",
+        "New service youtube-adapter in services/youtube-adapter/",
+        "Dockerfile includes yt-dlp and FFmpeg",
+        "Reads source config from JSON file (array of {id, youtubeUrl, streamKey})",
+        "Uses yt-dlp to get stream URL, FFmpeg to push to rtmp://streaming:1935/live/{streamKey} with -c copy (no transcoding)",
+        "Loops video on completion (continuous streaming)",
+        "Health endpoint at GET /healthz",
+        "Added to docker-compose.yml with sentinel-net network",
         "Typecheck passes"
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Fixed: localhost resolves to IPv6 ::1 in Alpine but nginx listens on IPv4 only. Changed to 127.0.0.1."
+      "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Fix web-frontend healthcheck",
-      "description": "As an operator, I need the web-frontend container to report healthy so that Docker can detect failures.",
+      "title": "Configure 2 sample YouTube streams from YC-corporation channel",
+      "description": "As a user, I need sample camera feeds showing real content so that I can demo the monitoring system.",
       "acceptanceCriteria": [
-        "Healthcheck uses http://localhost:80/ instead of /healthz",
-        "docker compose up -d shows web-frontend as healthy within 60s",
+        "Config file at config/youtube-sources.json with 2 videos from https://www.youtube.com/@YC-corporation",
+        "Stream keys match camera entries: e.g. yt-cam-1, yt-cam-2",
+        "Both streams visible in CCTV multi-view after startup",
+        "Streams play continuously (loop on end)",
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "Fixed: Same IPv6 issue as US-001. Changed localhost to 127.0.0.1 in healthcheck URL. Kept /healthz endpoint (exists in nginx.conf). Added start_period: 10s."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-003",
-      "title": "Add context timeout to all database operations",
-      "description": "As the system, I need database queries to have timeouts so that a locked or slow SQLite doesn't block HTTP handlers indefinitely.",
+      "title": "Camera CRUD — DB schema update and API",
+      "description": "As an admin, I need API endpoints to add, edit, and delete cameras so that camera management doesn't require config file changes.",
       "acceptanceCriteria": [
-        "All db.Query(), db.QueryRow(), db.Exec() calls use context.WithTimeout (5s)",
-        "Context derived from r.Context() where available (HTTP handlers)",
-        "Timeout errors return 500 with appropriate message",
+        "Migration adds stream_key, source_type (rtsp/youtube), source_url, enabled columns to cameras table",
+        "POST /api/cameras creates a camera (admin only)",
+        "PUT /api/cameras/{id} updates a camera (admin only)",
+        "DELETE /api/cameras/{id} removes a camera (admin only)",
+        "GET /api/cameras returns all cameras (existing, enhanced with new fields)",
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "Added 5s context.WithTimeout to all db.Query/QueryRow/Exec calls. HTTP handlers use r.Context(), startup code uses context.Background(). Helper dbCtx() defined in auth.go for reuse across package."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-004",
-      "title": "Add exponential backoff with jitter to hw-gateway retries",
-      "description": "As the system, I need retry logic to use jitter so that multiple failing requests don't create a thundering herd.",
+      "title": "Camera CRUD — Hot reload endpoint on cctv-adapter",
+      "description": "As the system, I need cctv-adapter to reload its camera list from the API without restart so that new cameras start streaming immediately.",
       "acceptanceCriteria": [
-        "Incident forwarding retry in hw-gateway uses exponential backoff (1s, 2s, 4s) instead of fixed 1s",
-        "Random jitter added (plus/minus 25% of delay) to prevent synchronized retries",
-        "Max 3 retries before giving up (existing behavior)",
+        "POST /api/cameras/reload on cctv-adapter triggers re-fetch of camera config",
+        "Stops streams for removed cameras, starts streams for new cameras",
+        "Existing streams for unchanged cameras are not interrupted",
+        "web-backend calls reload after camera create/update/delete",
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "Replaced single fixed-1s retry with exponential backoff loop (1s, 2s, 4s base delays) with ±25% random jitter. Max 3 retries. backoffWithJitter() helper extracted for reuse."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-005",
-      "title": "Add rate limiting on public auth endpoints",
-      "description": "As the system, I need rate limiting on login and registration endpoints to prevent brute-force attacks.",
+      "title": "Camera management UI",
+      "description": "As an admin, I need to add, edit, and delete cameras from the web UI so that I can manage cameras without SSH access.",
       "acceptanceCriteria": [
-        "In-memory IP-based rate limiter using Go sync.Map",
-        "POST /auth/login: max 10 requests per minute per IP",
-        "POST /auth/register: max 5 requests per minute per IP",
-        "Rate-limited requests return 429 Too Many Requests",
-        "Stale entries cleaned up periodically (every 5 minutes)",
-        "Typecheck passes"
+        "Camera management section in Management tab (admin only)",
+        "List of cameras with name, location, zone, source type, enabled status",
+        "Add camera form: name, location, zone, source_type (RTSP/YouTube), source_url, stream_key",
+        "Edit camera inline or via modal",
+        "Delete camera with confirmation dialog",
+        "After add/edit/delete, triggers adapter reload automatically",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
       ],
       "priority": 5,
-      "passes": true,
-      "notes": "In-memory IP-based rate limiter using sync.Map with atomic counters. Login: 10 req/min, Register: 5 req/min per IP. Returns 429 Too Many Requests. Stale entries cleaned every 5 minutes. X-Forwarded-For supported for proxied requests."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-006",
-      "title": "Add AbortController timeout to frontend fetch calls",
-      "description": "As a user, I need API calls to timeout so that the UI doesn't appear frozen when the backend is unresponsive.",
+      "title": "Dual calendar date range picker for incidents",
+      "description": "As a user, I want to select a date range using two side-by-side calendars so that filtering incidents by period is intuitive.",
       "acceptanceCriteria": [
-        "All fetch() calls in LoginPage, CCTVPage, ManagementPage, ViewerPage, IncidentsPage use AbortController",
-        "Default timeout: 10 seconds for data fetches, 30 seconds for auth calls",
-        "On timeout, show user-friendly error message in Korean",
+        "Replace current date input fields with dual calendar component",
+        "Two calendars side by side: start month (left) and end month (right)",
+        "Click first date to set start, click second date to set end",
+        "Selected range highlighted visually between start and end dates",
+        "Navigation arrows to move months forward/backward",
+        "Reset button to clear date filter",
+        "Mobile: calendars stack vertically",
         "Typecheck passes",
         "Verify in browser using dev-browser skill"
       ],
       "priority": 6,
-      "passes": true,
-      "notes": "Created fetchWithTimeout utility with AbortController. All fetch() calls in LoginPage (30s for auth), CCTVPage, ManagementPage, ViewerPage, IncidentsPage (10s default) use AbortController timeout. Timeout errors show Korean message. useEffect cleanup uses AbortController.abort() instead of cancelled flag."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-007",
-      "title": "Validate JWT expiration on app load",
-      "description": "As the system, I need to check if the stored JWT token is expired on app load so that users with stale tokens are redirected to login.",
+      "title": "Password change API",
+      "description": "As a user, I need an API endpoint to change my password so that I can update my credentials.",
       "acceptanceCriteria": [
-        "On app mount, decode JWT from localStorage and check exp claim",
-        "If expired, remove token from localStorage and show login page",
-        "If valid, proceed normally (existing behavior)",
-        "No server call needed — client-side check only",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
+        "POST /api/auth/change-password accepts {currentPassword, newPassword}",
+        "Verifies current password matches before updating",
+        "New password minimum 8 characters",
+        "Password hashed with bcrypt before storage",
+        "Returns 400 if current password wrong, 400 if new password too short",
+        "Any authenticated user can change their own password",
+        "Typecheck passes"
       ],
       "priority": 7,
-      "passes": true,
-      "notes": "Created isTokenExpired() utility that decodes JWT base64 payload and checks exp claim. Used as lazy initializer in useState — expired tokens are cleared from localStorage before first render. No server call needed."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-008",
-      "title": "Implement FFmpeg graceful shutdown (SIGTERM)",
-      "description": "As the system, I need FFmpeg processes to be stopped gracefully so that ongoing streams are not corrupted.",
+      "title": "Password change UI in settings",
+      "description": "As a user, I need a password change form in the Settings tab so that I can update my password from the app.",
       "acceptanceCriteria": [
-        "On camera stop or container shutdown, send SIGTERM to FFmpeg process first",
-        "Wait up to 5 seconds for graceful exit after SIGTERM",
-        "If still running after 5s, send SIGKILL",
-        "Existing watchdog timeout behavior unchanged",
-        "Typecheck passes"
+        "Settings tab shows password change section",
+        "Form fields: current password, new password, confirm new password",
+        "Client-side validation: new password minimum 8 chars, confirm must match",
+        "Success message on change, error message on failure",
+        "Fields cleared after successful change",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
       ],
       "priority": 8,
-      "passes": true,
-      "notes": "Replaced cmd.Process.Kill() (SIGKILL) with SIGTERM → 5s wait → SIGKILL in both watchdog timeout and Stop() shutdown. Watchdog uses processDone channel for efficient exit detection. Stop() sends SIGTERM to all, waits 5s, then SIGKILL remaining."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-009",
-      "title": "Increase stream active detection window",
-      "description": "As the system, I need the stream active detection to be more tolerant so that brief network hiccups don't cause false disconnected states.",
+      "title": "Email sending capability in notifier",
+      "description": "As the system, I need notifier to send emails via SMTP so that invitation emails can be dispatched.",
       "acceptanceCriteria": [
-        "Change active detection threshold from 15s to 30s in streaming service",
-        "Threshold is configurable via env var (STREAM_ACTIVE_TIMEOUT, default 30)",
-        "HLS playlist timing (2s fragments, 10s window) still fits within the new threshold",
+        "New POST /api/send-email endpoint on notifier",
+        "Accepts {to, subject, body} (HTML body supported)",
+        "SMTP config via env vars: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM",
+        "If SMTP not configured, returns 503 with email not configured message",
+        "Logs send success/failure",
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": true,
-      "notes": "Changed active detection threshold from 15s to 30s. Made configurable via STREAM_ACTIVE_TIMEOUT env var (parsed at init). Default 30s fits HLS playlist timing (2s fragments, 10s window)."
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Invitation API in web-backend",
+      "description": "As an admin, I need to create invitations that generate a unique registration URL and trigger an email.",
+      "acceptanceCriteria": [
+        "New invitations table: id, email, token (UUID), status (pending/accepted/expired), created_at, expires_at (7 days)",
+        "POST /api/invitations creates invitation, calls notifier to send email (admin only)",
+        "Email contains registration URL: {FRONTEND_URL}/register?invite={token}",
+        "GET /api/invitations lists all invitations with status (admin only)",
+        "DELETE /api/invitations/{id} cancels invitation (admin only)",
+        "GET /api/invitations/verify/{token} validates token (public, for registration page)",
+        "Registration with valid invite token auto-approves user (skips admin approval)",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Invitation management UI",
+      "description": "As an admin, I need to invite users by email and see invitation status in the management tab.",
+      "acceptanceCriteria": [
+        "Invitation section in Management tab (admin only)",
+        "Invite button with email input field",
+        "List of sent invitations with: email, status (pending/accepted/expired), date",
+        "Cancel button per pending invitation",
+        "Registration page shows invited context when accessed via invite link",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
     }
   ]
 }
