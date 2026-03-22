@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/smtp"
 	"os"
 	"sync"
 	"time"
@@ -73,6 +74,12 @@ type AlarmPayload struct {
 	Details map[string]interface{} `json:"details,omitempty"`
 }
 
+type SendEmailRequest struct {
+	To      string `json:"to"`
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+}
+
 // --- Config ---
 
 type Config struct {
@@ -85,6 +92,11 @@ type Config struct {
 	NHNAppKey         string
 	NHNSecretKey      string
 	NHNSenderNo       string
+	SMTPHost          string
+	SMTPPort          string
+	SMTPUser          string
+	SMTPPass          string
+	SMTPFrom          string
 }
 
 func loadConfig() Config {
@@ -98,6 +110,11 @@ func loadConfig() Config {
 		NHNAppKey:         getEnv("NHN_SMS_APP_KEY", ""),
 		NHNSecretKey:      getEnv("NHN_SMS_SECRET_KEY", ""),
 		NHNSenderNo:       getEnv("NHN_SMS_SENDER_NO", ""),
+		SMTPHost:          getEnv("SMTP_HOST", ""),
+		SMTPPort:          getEnv("SMTP_PORT", "587"),
+		SMTPUser:          getEnv("SMTP_USER", ""),
+		SMTPPass:          getEnv("SMTP_PASS", ""),
+		SMTPFrom:          getEnv("SMTP_FROM", ""),
 	}
 }
 
@@ -443,6 +460,66 @@ func handleNotify(cfg Config) http.HandlerFunc {
 	}
 }
 
+// --- Email Sending ---
+
+func sendEmail(cfg Config, to, subject, body string) error {
+	addr := fmt.Sprintf("%s:%s", cfg.SMTPHost, cfg.SMTPPort)
+
+	mime := "MIME-Version: 1.0\r\n" +
+		"Content-Type: text/html; charset=\"UTF-8\"\r\n"
+	msg := []byte(fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n%s\r\n%s",
+		cfg.SMTPFrom, to, subject, mime, body))
+
+	auth := smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPHost)
+	if err := smtp.SendMail(addr, auth, cfg.SMTPFrom, []string{to}, msg); err != nil {
+		return fmt.Errorf("smtp send: %w", err)
+	}
+	return nil
+}
+
+func handleSendEmail(cfg Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if cfg.SMTPHost == "" || cfg.SMTPFrom == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"error": "email not configured"})
+			return
+		}
+
+		var req SendEmailRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid JSON payload"}`, http.StatusBadRequest)
+			return
+		}
+
+		if req.To == "" {
+			http.Error(w, `{"error":"to is required"}`, http.StatusBadRequest)
+			return
+		}
+		if req.Subject == "" {
+			http.Error(w, `{"error":"subject is required"}`, http.StatusBadRequest)
+			return
+		}
+		if req.Body == "" {
+			http.Error(w, `{"error":"body is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		if err := sendEmail(cfg, req.To, req.Subject, req.Body); err != nil {
+			log.Printf("[email] Failed to send email to %s: %v", req.To, err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("failed to send email: %v", err)})
+			return
+		}
+
+		log.Printf("[email] Successfully sent email to %s (subject: %s)", req.To, req.Subject)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "sent"})
+	}
+}
+
 // --- Main ---
 
 func main() {
@@ -457,9 +534,10 @@ func main() {
 	})
 
 	mux.HandleFunc("POST /api/notify", handleNotify(cfg))
+	mux.HandleFunc("POST /api/send-email", handleSendEmail(cfg))
 
-	log.Printf("notifier listening on :8080 (kakao configured: %v, sms configured: %v, frontend: %s)",
-		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "", cfg.FrontendURL)
+	log.Printf("notifier listening on :8080 (kakao configured: %v, sms configured: %v, smtp configured: %v, frontend: %s)",
+		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "", cfg.SMTPHost != "", cfg.FrontendURL)
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatal(err)
 	}

@@ -85,6 +85,11 @@ services:
       - NHN_SMS_APP_KEY=${NHN_SMS_APP_KEY:-}
       - NHN_SMS_SECRET_KEY=${NHN_SMS_SECRET_KEY:-}
       - NHN_SMS_SENDER_NO=${NHN_SMS_SENDER_NO:-}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 30s
