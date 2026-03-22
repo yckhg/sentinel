@@ -322,8 +322,14 @@ func seedAdminUser(db *sql.DB) error {
 	if adminUser == "" {
 		adminUser = "admin"
 	}
-	if adminPass == "" {
-		adminPass = "sentinel1234"
+	if adminPass == "" || adminPass == "sentinel1234" {
+		if adminPass == "" {
+			adminPass = "sentinel1234"
+		}
+		log.Printf("WARNING: Using default admin password. Set ADMIN_PASSWORD env var for production.")
+	}
+	if len(adminPass) < 8 {
+		log.Printf("WARNING: Admin password is shorter than 8 characters. Use a stronger password for production.")
 	}
 
 	var exists int
