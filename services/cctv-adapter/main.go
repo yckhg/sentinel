@@ -285,41 +285,80 @@ func (cm *CameraManager) StartCamera(cam CameraConfig) {
 // Reload reconciles the running cameras with a new config list.
 // Unchanged cameras (same cameraID + rtspUrl) are not interrupted.
 // Removed cameras are stopped. New/changed cameras are (re)started.
+// Uses a single lock scope to prevent race conditions between reading
+// old state and writing new state.
 func (cm *CameraManager) Reload(newCameras []CameraConfig) {
-	cm.mu.RLock()
+	cm.mu.Lock()
+
+	// Build old state map
 	oldMap := make(map[string]string) // cameraID -> rtspUrl
 	for _, cam := range cm.cameras {
 		oldMap[cam.CameraID] = cam.RtspURL
 	}
-	cm.mu.RUnlock()
 
 	newMap := make(map[string]CameraConfig)
 	for _, cam := range newCameras {
 		newMap[cam.CameraID] = cam
 	}
 
-	// Stop removed or changed cameras
+	// Collect cameras to stop (removed or changed)
+	type stoppedCamera struct {
+		id    string
+		state *cameraState
+	}
+	var toStop []stoppedCamera
 	for id, oldURL := range oldMap {
 		newCam, exists := newMap[id]
 		if !exists || newCam.RtspURL != oldURL {
 			log.Printf("[reload] Stopping camera %s (removed or changed)", id)
-			cm.StopCamera(id)
+			if state, ok := cm.statuses[id]; ok {
+				close(state.stopCh)
+				delete(cm.statuses, id)
+				toStop = append(toStop, stoppedCamera{id, state})
+			}
 		}
 	}
 
-	// Start new or changed cameras
+	// Prepare new/changed cameras for start
+	var toStart []CameraConfig
 	for id, newCam := range newMap {
 		oldURL, existed := oldMap[id]
 		if !existed || oldURL != newCam.RtspURL {
 			log.Printf("[reload] Starting camera %s", id)
-			cm.StartCamera(newCam)
+			toStart = append(toStart, newCam)
+			state := &cameraState{
+				status: "disconnected",
+				stopCh: make(chan struct{}),
+			}
+			cm.statuses[newCam.CameraID] = state
 		}
 	}
 
-	// Update the cameras list
-	cm.mu.Lock()
+	// Update the cameras list while still holding the lock
 	cm.cameras = newCameras
+
+	// Snapshot new states to start goroutines after unlock
+	startStates := make(map[string]*cameraState, len(toStart))
+	for _, cam := range toStart {
+		startStates[cam.CameraID] = cm.statuses[cam.CameraID]
+	}
+
 	cm.mu.Unlock()
+
+	// Kill FFmpeg processes outside the lock (these are blocking operations)
+	for _, s := range toStop {
+		if s.state.cmd != nil && s.state.cmd.Process != nil {
+			log.Printf("[%s] Sending SIGTERM to FFmpeg process", s.id)
+			s.state.cmd.Process.Signal(syscall.SIGTERM)
+			time.Sleep(3 * time.Second)
+			s.state.cmd.Process.Kill()
+		}
+	}
+
+	// Launch goroutines for new cameras
+	for _, cam := range toStart {
+		go cm.manageCameraStream(cam, startStates[cam.CameraID])
+	}
 
 	log.Printf("[reload] Reconciled: %d cameras active", len(newCameras))
 }
