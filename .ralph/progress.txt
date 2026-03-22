@@ -22,6 +22,7 @@ Started: Sat Mar 22 13:44:00 KST 2026
 - Frontend: For useEffect with periodic fetches, pass AbortController.signal to fetchWithTimeout and abort on cleanup — replaces `cancelled` flag pattern
 - Frontend: `isTokenExpired()` in `src/utils/isTokenExpired.ts` — client-side JWT exp check (no signature verification)
 - cctv-adapter: FFmpeg processes use graceful shutdown (SIGTERM → 5s → SIGKILL) via `syscall.SIGTERM`
+- streaming: `streamActiveTimeout` var (default 30s, configurable via STREAM_ACTIVE_TIMEOUT env var) controls stream active detection window
 ---
 
 ## 2026-03-22 13:44 - US-001
@@ -100,4 +101,13 @@ Started: Sat Mar 22 13:44:00 KST 2026
   - `os.Process.Kill()` after process has already exited returns error — safe to call unconditionally as fallback
   - `Stop()` releases mutex before sleeping 5s to avoid blocking status queries during shutdown
   - Watchdog goroutine has access to `processDone` channel (closed when `cmd.Wait()` returns) — efficient signal for graceful exit detection without polling
+---
+
+## 2026-03-22 - US-009
+- **What was implemented**: Increased stream active detection window from 15s to 30s. Made threshold configurable via `STREAM_ACTIVE_TIMEOUT` env var. Uses package-level var initialized via IIFE at startup.
+- **Files changed**: services/streaming/main.go
+- **Learnings for future iterations:**
+  - `streamActiveTimeout` is a package-level var initialized once via IIFE — avoids parsing env var on every request
+  - HLS playlist timing: 2s fragments, 10s window (5 segments) — 30s threshold gives ~3x headroom for brief network hiccups
+  - streaming service is simple (~80 lines) — single main.go with two endpoints: /healthz and /api/streams
 ---

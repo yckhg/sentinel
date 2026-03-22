@@ -130,8 +130,8 @@
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Changed active detection threshold from 15s to 30s. Made configurable via STREAM_ACTIVE_TIMEOUT env var (parsed at init). Default 30s fits HLS playlist timing (2s fragments, 10s window)."
     }
   ]
 }
