@@ -14,6 +14,9 @@ Started: Sun Mar 22 15:44:26 KST 2026
 - YouTube stream cameras need DB entries in `cameras` table to appear in CCTV multi-view
 - Camera status from cctv-adapter only tracks RTSP cameras; YouTube cameras show "disconnected" status but still stream
 - verify.sh must use `docker run` with build images (golang:1.22-alpine, node:20-alpine) since runtime containers don't have dev tools
+- Camera CRUD follows same pattern as contacts CRUD: admin-only, partial updates via non-empty fields, `Enabled` uses *bool for explicit false
+- cameras table has: id, name, location, zone, stream_key, source_type (rtsp/youtube), source_url, enabled (INTEGER 0/1)
+- cameraResponse includes all DB fields plus HLSUrl and Status enriched from streaming/cctv-adapter services
 
 ---
 
@@ -43,4 +46,17 @@ Started: Sun Mar 22 15:44:26 KST 2026
   - Cameras need entries in BOTH config (youtube-sources.json) AND DB (cameras table) to appear in UI
   - `INSERT ... WHERE NOT EXISTS` pattern needed for idempotent seeding since cameras.name has no UNIQUE constraint
   - RTMP streams may show transient "Connection reset by peer" errors on startup; the reconnection loop handles this
+---
+
+## 2026-03-22 - US-003
+- Added migration v3: stream_key, source_type, source_url, enabled columns to cameras table
+- Backfilled yt-cam-* entries with source_type='youtube' and stream_key=name
+- Added POST/PUT/DELETE /api/cameras endpoints (admin only), following contacts CRUD pattern
+- Enhanced GET /api/cameras to return new fields (streamKey, sourceType, sourceUrl, enabled)
+- Files changed: services/web-backend/cameras.go, services/web-backend/migrations.go, services/web-backend/main.go
+- **Learnings for future iterations:**
+  - SQLite ALTER TABLE only supports ADD COLUMN, one per statement — multiple ALTERs need separate statements
+  - Partial update pattern: use pointer (*bool) for boolean fields to distinguish "not provided" from "false"
+  - scanCamera helper uses interface{Scan} to work with both sql.Row and sql.Rows
+  - All new camera routes go under apiMux (JWT-protected), not bare mux
 ---
