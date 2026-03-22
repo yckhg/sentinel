@@ -3,9 +3,11 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -30,9 +32,9 @@ func initServiceURLs() {
 
 // Cached responses from internal services
 type streamCache struct {
-	mu        sync.RWMutex
-	streams   []streamInfo
-	statuses  []cameraStatus
+	mu          sync.RWMutex
+	streams     []streamInfo
+	statuses    []cameraStatus
 	streamsTTL  time.Time
 	statusesTTL time.Time
 }
@@ -52,12 +54,26 @@ type cameraStatus struct {
 }
 
 type cameraResponse struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	Location string `json:"location"`
-	Zone     string `json:"zone"`
-	HLSUrl   string `json:"hlsUrl"`
-	Status   string `json:"status"`
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Location   string `json:"location"`
+	Zone       string `json:"zone"`
+	StreamKey  string `json:"streamKey"`
+	SourceType string `json:"sourceType"`
+	SourceURL  string `json:"sourceUrl"`
+	Enabled    bool   `json:"enabled"`
+	HLSUrl     string `json:"hlsUrl"`
+	Status     string `json:"status"`
+}
+
+type cameraRequest struct {
+	Name       string `json:"name"`
+	Location   string `json:"location"`
+	Zone       string `json:"zone"`
+	StreamKey  string `json:"streamKey"`
+	SourceType string `json:"sourceType"`
+	SourceURL  string `json:"sourceUrl"`
+	Enabled    *bool  `json:"enabled"`
 }
 
 var cache = &streamCache{}
@@ -125,15 +141,23 @@ func (c *streamCache) getStatuses(client *http.Client) []cameraStatus {
 	return statuses
 }
 
+func scanCamera(rows interface{ Scan(dest ...any) error }) (cameraResponse, error) {
+	var c cameraResponse
+	var enabled int
+	err := rows.Scan(&c.ID, &c.Name, &c.Location, &c.Zone, &c.StreamKey, &c.SourceType, &c.SourceURL, &enabled)
+	c.Enabled = enabled != 0
+	return c, err
+}
+
 func handleListCameras(db *sql.DB) http.HandlerFunc {
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		// 1. Query cameras from DB
 		ctx, cancel := dbCtx(r.Context())
 		defer cancel()
 
-		rows, err := db.QueryContext(ctx, "SELECT id, name, location, zone FROM cameras ORDER BY id ASC")
+		rows, err := db.QueryContext(ctx,
+			"SELECT id, name, location, zone, stream_key, source_type, source_url, enabled FROM cameras ORDER BY id ASC")
 		if err != nil {
 			log.Printf("query cameras error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
@@ -143,19 +167,18 @@ func handleListCameras(db *sql.DB) http.HandlerFunc {
 
 		cameras := []cameraResponse{}
 		for rows.Next() {
-			var c cameraResponse
-			if err := rows.Scan(&c.ID, &c.Name, &c.Location, &c.Zone); err != nil {
+			c, err := scanCamera(rows)
+			if err != nil {
 				log.Printf("scan camera error: %v", err)
 				continue
 			}
 			cameras = append(cameras, c)
 		}
 
-		// 2. Fetch streams and statuses from internal services (uses cache)
+		// Fetch streams and statuses from internal services (uses cache)
 		streams := cache.getStreams(client)
 		statuses := cache.getStatuses(client)
 
-		// Build lookup maps
 		streamMap := make(map[string]streamInfo)
 		for _, s := range streams {
 			streamMap[s.CameraID] = s
@@ -165,9 +188,7 @@ func handleListCameras(db *sql.DB) http.HandlerFunc {
 			statusMap[s.CameraID] = s.Status
 		}
 
-		// 3. Merge: enrich DB cameras with HLS URLs and statuses
 		for i := range cameras {
-			// Match by camera name (DB name used as cameraId in streaming/adapter config)
 			if s, ok := streamMap[cameras[i].Name]; ok && s.Active {
 				cameras[i].HLSUrl = streamingURL + s.HLSUrl
 			}
@@ -179,5 +200,212 @@ func handleListCameras(db *sql.DB) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, cameras)
+	}
+}
+
+func validateSourceType(st string) bool {
+	return st == "rtsp" || st == "youtube"
+}
+
+func handleCreateCamera(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := getAuthUser(r)
+		if user.Role != "admin" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
+			return
+		}
+
+		var req cameraRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+
+		req.Name = strings.TrimSpace(req.Name)
+		req.Location = strings.TrimSpace(req.Location)
+		req.Zone = strings.TrimSpace(req.Zone)
+		req.StreamKey = strings.TrimSpace(req.StreamKey)
+		req.SourceType = strings.TrimSpace(req.SourceType)
+		req.SourceURL = strings.TrimSpace(req.SourceURL)
+
+		if req.Name == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+			return
+		}
+		if req.StreamKey == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "streamKey is required"})
+			return
+		}
+		if req.SourceType == "" {
+			req.SourceType = "rtsp"
+		}
+		if !validateSourceType(req.SourceType) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sourceType must be 'rtsp' or 'youtube'"})
+			return
+		}
+
+		enabled := 1
+		if req.Enabled != nil && !*req.Enabled {
+			enabled = 0
+		}
+
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		result, err := db.ExecContext(ctx,
+			"INSERT INTO cameras (name, location, zone, stream_key, source_type, source_url, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			req.Name, req.Location, req.Zone, req.StreamKey, req.SourceType, req.SourceURL, enabled,
+		)
+		if err != nil {
+			log.Printf("insert camera error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		id, _ := result.LastInsertId()
+		log.Printf("camera created: id=%d name=%s streamKey=%s by user=%d", id, req.Name, req.StreamKey, user.UserID)
+
+		writeJSON(w, http.StatusCreated, cameraResponse{
+			ID:         id,
+			Name:       req.Name,
+			Location:   req.Location,
+			Zone:       req.Zone,
+			StreamKey:  req.StreamKey,
+			SourceType: req.SourceType,
+			SourceURL:  req.SourceURL,
+			Enabled:    enabled != 0,
+		})
+	}
+}
+
+func handleUpdateCamera(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := getAuthUser(r)
+		if user.Role != "admin" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
+			return
+		}
+
+		idStr := r.PathValue("id")
+		var id int64
+		if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+			return
+		}
+
+		var req cameraRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+
+		req.Name = strings.TrimSpace(req.Name)
+		req.Location = strings.TrimSpace(req.Location)
+		req.Zone = strings.TrimSpace(req.Zone)
+		req.StreamKey = strings.TrimSpace(req.StreamKey)
+		req.SourceType = strings.TrimSpace(req.SourceType)
+		req.SourceURL = strings.TrimSpace(req.SourceURL)
+
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		// Load existing camera
+		var existing cameraResponse
+		var enabledInt int
+		err := db.QueryRowContext(ctx,
+			"SELECT id, name, location, zone, stream_key, source_type, source_url, enabled FROM cameras WHERE id = ?", id,
+		).Scan(&existing.ID, &existing.Name, &existing.Location, &existing.Zone,
+			&existing.StreamKey, &existing.SourceType, &existing.SourceURL, &enabledInt)
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "camera not found"})
+			return
+		}
+		if err != nil {
+			log.Printf("query camera error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+		existing.Enabled = enabledInt != 0
+
+		// Apply partial updates
+		if req.Name != "" {
+			existing.Name = req.Name
+		}
+		if req.Location != "" {
+			existing.Location = req.Location
+		}
+		if req.Zone != "" {
+			existing.Zone = req.Zone
+		}
+		if req.StreamKey != "" {
+			existing.StreamKey = req.StreamKey
+		}
+		if req.SourceType != "" {
+			if !validateSourceType(req.SourceType) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sourceType must be 'rtsp' or 'youtube'"})
+				return
+			}
+			existing.SourceType = req.SourceType
+		}
+		if req.SourceURL != "" {
+			existing.SourceURL = req.SourceURL
+		}
+		if req.Enabled != nil {
+			existing.Enabled = *req.Enabled
+		}
+
+		enabledVal := 0
+		if existing.Enabled {
+			enabledVal = 1
+		}
+
+		_, err = db.ExecContext(ctx,
+			"UPDATE cameras SET name = ?, location = ?, zone = ?, stream_key = ?, source_type = ?, source_url = ?, enabled = ? WHERE id = ?",
+			existing.Name, existing.Location, existing.Zone, existing.StreamKey, existing.SourceType, existing.SourceURL, enabledVal, id,
+		)
+		if err != nil {
+			log.Printf("update camera error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		log.Printf("camera updated: id=%d by user=%d", id, user.UserID)
+		writeJSON(w, http.StatusOK, existing)
+	}
+}
+
+func handleDeleteCamera(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := getAuthUser(r)
+		if user.Role != "admin" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
+			return
+		}
+
+		idStr := r.PathValue("id")
+		var id int64
+		if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+			return
+		}
+
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		result, err := db.ExecContext(ctx, "DELETE FROM cameras WHERE id = ?", id)
+		if err != nil {
+			log.Printf("delete camera error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "camera not found"})
+			return
+		}
+
+		log.Printf("camera deleted: id=%d by user=%d", id, user.UserID)
+		w.WriteHeader(http.StatusNoContent)
 	}
 }

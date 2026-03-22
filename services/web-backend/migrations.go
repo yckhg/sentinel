@@ -71,6 +71,18 @@ var migrations = []migration{
 			WHERE NOT EXISTS (SELECT 1 FROM cameras WHERE name = 'yt-cam-2');
 		`,
 	},
+	{
+		version: 3,
+		name:    "add_camera_crud_fields",
+		sql: `
+			ALTER TABLE cameras ADD COLUMN stream_key TEXT NOT NULL DEFAULT '';
+			ALTER TABLE cameras ADD COLUMN source_type TEXT NOT NULL DEFAULT 'rtsp';
+			ALTER TABLE cameras ADD COLUMN source_url TEXT NOT NULL DEFAULT '';
+			ALTER TABLE cameras ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
+
+			UPDATE cameras SET stream_key = name, source_type = 'youtube' WHERE name LIKE 'yt-cam-%';
+		`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {

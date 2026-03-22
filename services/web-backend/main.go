@@ -91,6 +91,9 @@ func main() {
 
 	// Cameras
 	apiMux.HandleFunc("GET /api/cameras", handleListCameras(db))
+	apiMux.HandleFunc("POST /api/cameras", handleCreateCamera(db))
+	apiMux.HandleFunc("PUT /api/cameras/{id}", handleUpdateCamera(db))
+	apiMux.HandleFunc("DELETE /api/cameras/{id}", handleDeleteCamera(db))
 
 	// Incidents (any authenticated user)
 	apiMux.HandleFunc("GET /api/incidents", handleListIncidents(db))
