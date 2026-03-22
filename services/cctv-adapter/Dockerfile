@@ -5,8 +5,7 @@ RUN go mod download
 COPY *.go ./
 RUN go build -o cctv-adapter .
 
-FROM alpine:3.19
-RUN apk add --no-cache ffmpeg
+FROM sentinel-ffmpeg-base
 WORKDIR /app
 COPY --from=builder /app/cctv-adapter .
 RUN mkdir -p /config

@@ -5,8 +5,8 @@ RUN go mod download
 COPY *.go ./
 RUN go build -o youtube-adapter .
 
-FROM alpine:3.19
-RUN apk add --no-cache ffmpeg python3 py3-pip && \
+FROM sentinel-ffmpeg-base
+RUN apk add --no-cache python3 py3-pip && \
     pip3 install --break-system-packages yt-dlp
 WORKDIR /app
 COPY --from=builder /app/youtube-adapter .
