@@ -101,3 +101,15 @@ Started: Sun Mar 22 13:02:53 KST 2026
   - When allowing empty body but rejecting malformed JSON, check `err != io.EOF` to distinguish
   - json.Decoder returns io.EOF for empty body — this is not an error for optional fields
 ---
+
+## 2026-03-22 - US-009
+- Fixed 4 json.Marshal calls that discarded errors with `_`
+- notifier/main.go:142 — requestTempLink now returns error on marshal failure
+- hw-gateway/main.go:240 — forwardToNotifier logs and returns on marshal failure
+- hw-gateway/main.go:268 — forwardToWebBackend logs and returns on marshal failure
+- web-backend/equipment.go:57 — restart handler returns 500 on marshal failure
+- Files changed: services/hw-gateway/main.go, services/notifier/main.go, services/web-backend/equipment.go
+- **Learnings for future iterations:**
+  - json.Marshal on simple map[string]string or structs with basic types won't realistically fail, but checking errors is good hygiene
+  - For HTTP handler context, return 500; for fire-and-forget goroutines, log and return
+---
