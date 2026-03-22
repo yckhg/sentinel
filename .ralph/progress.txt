@@ -90,3 +90,14 @@ Started: Sun Mar 22 13:02:53 KST 2026
   - seedAdminUser runs at startup in main.go — good place for security warnings
   - Default password "sentinel1234" is 12 chars so it passes length check, but still gets the default password warning
 ---
+
+## 2026-03-22 - US-008
+- Added error checking to json.NewDecoder(r.Body).Decode(&req) in handleCreateTempLink
+- Invalid JSON returns 400 with "invalid request body" error message
+- Empty body (io.EOF) is allowed — label is optional, so empty body still works
+- Added `io` import for io.EOF comparison
+- Files changed: services/web-backend/links.go
+- **Learnings for future iterations:**
+  - When allowing empty body but rejecting malformed JSON, check `err != io.EOF` to distinguish
+  - json.Decoder returns io.EOF for empty body — this is not an error for optional fields
+---
