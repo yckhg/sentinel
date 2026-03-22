@@ -130,3 +130,18 @@ Started: Sun Mar 22 15:44:26 KST 2026
   - apiMux routes are already JWT-protected, so any `/api/` route gets auth for free
   - viewer tokens (UserID=0) are rejected by checking user.UserID == 0
 ---
+
+## 2026-03-22 - US-008
+- Added password change form to SettingsPage.tsx
+- Three fields: current password, new password, confirm new password
+- Client-side validation: all fields required, min 8 chars, confirm must match
+- Calls POST /api/auth/change-password with currentPassword + newPassword
+- Success message shown, fields cleared after successful change
+- Error message on failure (wrong password, server error, timeout)
+- Added `.mgmt-form-success` CSS class for success messages (green, matching error style)
+- Files changed: services/web-frontend/src/pages/SettingsPage.tsx, services/web-frontend/src/App.css
+- **Learnings for future iterations:**
+  - SettingsPage was minimal (just logout button) — now has section dividers and form structure
+  - Reused `getAuthHeaders()` pattern locally (same as ManagementPage)
+  - `.mgmt-form-success` added as counterpart to `.mgmt-form-error` — use #2e7d32 green
+---
