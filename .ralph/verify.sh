@@ -16,7 +16,7 @@ echo "=== 2. Go Vet (backend services) ==="
 for svc in hw-gateway cctv-adapter streaming notifier web-backend youtube-adapter; do
   SVC_DIR="$PROJECT_ROOT/services/$svc"
   if [ -f "$SVC_DIR/go.mod" ]; then
-    if docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T "$svc" go vet ./... 2>/dev/null; then
+    if docker run --rm -v "$SVC_DIR:/app" -w /app golang:1.22-alpine go vet ./... 2>&1; then
       pass "$svc: go vet"
     else
       fail "$svc: go vet"
@@ -27,7 +27,7 @@ done
 echo "=== 3. Frontend Typecheck ==="
 SVC_DIR="$PROJECT_ROOT/services/web-frontend"
 if [ -f "$SVC_DIR/tsconfig.json" ]; then
-  if docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T web-frontend npx tsc --noEmit 2>/dev/null; then
+  if docker run --rm -v "$SVC_DIR:/app" -w /app node:20-alpine sh -c "npm ci --ignore-scripts 2>/dev/null && npx tsc --noEmit" 2>&1; then
     pass "web-frontend: typecheck"
   else
     fail "web-frontend: typecheck"

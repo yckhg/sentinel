@@ -59,6 +59,18 @@ var migrations = []migration{
 			);
 		`,
 	},
+	{
+		version: 2,
+		name:    "seed_youtube_cameras",
+		sql: `
+			INSERT INTO cameras (name, location, zone)
+			SELECT 'yt-cam-1', 'YC Factory', 'Demo - Smart Manufacturing'
+			WHERE NOT EXISTS (SELECT 1 FROM cameras WHERE name = 'yt-cam-1');
+			INSERT INTO cameras (name, location, zone)
+			SELECT 'yt-cam-2', 'YC Factory', 'Demo - CNC Machining'
+			WHERE NOT EXISTS (SELECT 1 FROM cameras WHERE name = 'yt-cam-2');
+		`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {
