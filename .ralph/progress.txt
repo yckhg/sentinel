@@ -45,3 +45,14 @@ Started: Sun Mar 22 13:02:53 KST 2026
   - hw-gateway is a single main.go file — all MQTT handling, HTTP handlers, and background goroutines
   - equipmentStore uses embedded sync.RWMutex in anonymous struct pattern
 ---
+
+## 2026-03-22 - US-004
+- Refactored handleListIncidents query builder to use conditions slice + strings.Join
+- Replaced fmt.Sprintf string concatenation with parameterized whereClause pattern
+- Both count and data queries use the same whereClause with ? placeholders
+- Removed unused fmt import, added strings import
+- Files changed: services/web-backend/incidents.go
+- **Learnings for future iterations:**
+  - Use conditions []string + strings.Join(" AND ") pattern for parameterized query builders
+  - incidents.go handles both create and list endpoints for incidents table
+---
