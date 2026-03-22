@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,8 +12,6 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 var notifierURL string
@@ -61,7 +61,13 @@ func handleCreateInvitation(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		token := uuid.New().String()
+		tokenBytes := make([]byte, 32)
+		if _, err := rand.Read(tokenBytes); err != nil {
+			log.Printf("crypto/rand error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+		token := hex.EncodeToString(tokenBytes)
 		now := time.Now().UTC()
 		expiresAt := now.Add(7 * 24 * time.Hour)
 
