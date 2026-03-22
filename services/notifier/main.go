@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/smtp"
 	"os"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -460,6 +463,95 @@ func handleNotify(cfg Config) http.HandlerFunc {
 	}
 }
 
+// --- Internal IP Check ---
+
+func isInternalIP(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+
+	// Docker bridge networks use private ranges
+	privateRanges := []struct {
+		network *net.IPNet
+	}{
+		{mustParseCIDR("10.0.0.0/8")},
+		{mustParseCIDR("172.16.0.0/12")},
+		{mustParseCIDR("192.168.0.0/16")},
+		{mustParseCIDR("127.0.0.0/8")},
+		{mustParseCIDR("::1/128")},
+		{mustParseCIDR("fc00::/7")},
+	}
+
+	for _, r := range privateRanges {
+		if r.network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func mustParseCIDR(s string) *net.IPNet {
+	_, network, err := net.ParseCIDR(s)
+	if err != nil {
+		panic(err)
+	}
+	return network
+}
+
+// --- HTML Sanitization ---
+
+var (
+	// Tags to strip entirely (including content)
+	reScriptTag = regexp.MustCompile(`(?is)<script[\s>].*?</script>`)
+	reIframeTag = regexp.MustCompile(`(?is)<iframe[\s>].*?</iframe>`)
+	// Event handler attributes (on*)
+	reOnEvent = regexp.MustCompile(`(?i)\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*)`)
+	// javascript: URIs in href/src/action attributes
+	reJSURI = regexp.MustCompile(`(?i)(href|src|action)\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*')`)
+	// Match HTML tags for allowlist filtering
+	reHTMLTag = regexp.MustCompile(`</?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>`)
+)
+
+// allowedTags is the set of safe HTML tags
+var allowedTags = map[string]bool{
+	"p": true, "a": true, "br": true, "strong": true, "em": true,
+	"h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true,
+	"html": true, "head": true, "body": true,
+}
+
+func sanitizeHTML(input string) string {
+	// 1. Strip script and iframe tags (including content)
+	result := reScriptTag.ReplaceAllString(input, "")
+	result = reIframeTag.ReplaceAllString(result, "")
+
+	// 2. Strip on* event handler attributes
+	result = reOnEvent.ReplaceAllString(result, "")
+
+	// 3. Strip javascript: URIs
+	result = reJSURI.ReplaceAllString(result, "")
+
+	// 4. Remove disallowed tags (keep content, just strip the tag itself)
+	result = reHTMLTag.ReplaceAllStringFunc(result, func(tag string) string {
+		matches := reHTMLTag.FindStringSubmatch(tag)
+		if len(matches) < 2 {
+			return ""
+		}
+		tagName := strings.ToLower(matches[1])
+		if allowedTags[tagName] {
+			return tag
+		}
+		return ""
+	})
+
+	return result
+}
+
 // --- Email Sending ---
 
 func sendEmail(cfg Config, to, subject, body string) error {
@@ -479,6 +571,15 @@ func sendEmail(cfg Config, to, subject, body string) error {
 
 func handleSendEmail(cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Check source IP — only allow internal Docker network
+		if !isInternalIP(r.RemoteAddr) {
+			log.Printf("[email] Rejected request from external IP: %s", r.RemoteAddr)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{"error": "access denied"})
+			return
+		}
+
 		if cfg.SMTPHost == "" || cfg.SMTPFrom == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -486,9 +587,12 @@ func handleSendEmail(cfg Config) http.HandlerFunc {
 			return
 		}
 
+		// Limit request body to 1MB
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 		var req SendEmailRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid JSON payload"}`, http.StatusBadRequest)
+			http.Error(w, `{"error":"invalid JSON payload or body too large"}`, http.StatusBadRequest)
 			return
 		}
 
@@ -504,6 +608,9 @@ func handleSendEmail(cfg Config) http.HandlerFunc {
 			http.Error(w, `{"error":"body is required"}`, http.StatusBadRequest)
 			return
 		}
+
+		// Sanitize HTML body
+		req.Body = sanitizeHTML(req.Body)
 
 		if err := sendEmail(cfg, req.To, req.Subject, req.Body); err != nil {
 			log.Printf("[email] Failed to send email to %s: %v", req.To, err)
