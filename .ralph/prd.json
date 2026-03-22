@@ -1,214 +1,136 @@
 {
   "project": "Sentinel",
-  "branchName": "ralph/sentinel-hotfix",
-  "description": "Hotfix for Critical and High severity issues found during evaluation — memory leaks, race conditions, security gaps, infrastructure hardening",
+  "branchName": "ralph/sentinel-stabilize",
+  "description": "Stabilization — fix broken healthchecks + address all medium-severity issues from evaluation (DB timeouts, retry jitter, rate limiting, fetch timeouts, JWT expiration check, FFmpeg graceful shutdown, stream detection window)",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Temp link and blacklist cleanup goroutine",
-      "description": "As the system, I need expired temporary links and blacklist entries to be cleaned up periodically so that memory doesn't grow unbounded.",
+      "title": "Fix streaming service healthcheck",
+      "description": "As an operator, I need the streaming container to report healthy so that Docker can detect failures.",
       "acceptanceCriteria": [
-        "Background goroutine runs every 1 hour in web-backend",
-        "Removes expired links from linkStore.links map (expiry < now)",
-        "Removes blacklist entries for expired links from linkStore.blacklist map",
-        "Cleanup is logged (count of removed items)",
+        "Streaming healthcheck uses correct port/path that nginx-rtmp proxies to Go API",
+        "docker compose up -d shows streaming as healthy within 60s",
         "Typecheck passes"
       ],
       "priority": 1,
       "passes": true,
-      "notes": ""
+      "notes": "Fixed: localhost resolves to IPv6 ::1 in Alpine but nginx listens on IPv4 only. Changed to 127.0.0.1."
     },
     {
       "id": "US-002",
-      "title": "Persist JWT secret across restarts",
-      "description": "As the system, I need the JWT secret to persist across container restarts so that existing user tokens remain valid.",
+      "title": "Fix web-frontend healthcheck",
+      "description": "As an operator, I need the web-frontend container to report healthy so that Docker can detect failures.",
       "acceptanceCriteria": [
-        "If JWT_SECRET env var is set, use it (existing behavior)",
-        "If not set, generate a random secret and write it to /data/.jwt-secret file",
-        "On next startup, read secret from /data/.jwt-secret if it exists",
-        "/data/ is already volume-mounted so secret survives restarts",
-        "Log warning if using auto-generated secret (recommend setting JWT_SECRET for production)",
+        "Healthcheck uses http://localhost:80/ instead of /healthz",
+        "docker compose up -d shows web-frontend as healthy within 60s",
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-003",
-      "title": "Fix race condition in hw-gateway device status",
-      "description": "As the system, I need device status updates to be thread-safe so that concurrent heartbeat processing doesn't cause data races.",
+      "title": "Add context timeout to all database operations",
+      "description": "As the system, I need database queries to have timeouts so that a locked or slow SQLite doesn't block HTTP handlers indefinitely.",
       "acceptanceCriteria": [
-        "All field writes to device status happen while holding the write lock",
-        "Lock is not released until all field assignments are complete",
-        "heartbeatChecker goroutine holds read lock while reading lastSeen",
+        "All db.Query(), db.QueryRow(), db.Exec() calls use context.WithTimeout (5s)",
+        "Context derived from r.Context() where available (HTTP handlers)",
+        "Timeout errors return 500 with appropriate message",
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-004",
-      "title": "Use fully parameterized SQL in incident queries",
-      "description": "As a developer, I need incident queries to use parameterized SQL throughout so that the query building pattern is safe and consistent.",
+      "title": "Add exponential backoff with jitter to hw-gateway retries",
+      "description": "As the system, I need retry logic to use jitter so that multiple failing requests don't create a thundering herd.",
       "acceptanceCriteria": [
-        "Replace string concatenation in incidents.go with parameterized query builder",
-        "All WHERE clauses use ? placeholders with args slice",
-        "Count query and data query both use the same parameterized approach",
-        "Existing pagination and date filters still work correctly",
+        "Incident forwarding retry in hw-gateway uses exponential backoff (1s, 2s, 4s) instead of fixed 1s",
+        "Random jitter added (plus/minus 25% of delay) to prevent synchronized retries",
+        "Max 3 retries before giving up (existing behavior)",
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-005",
-      "title": "Add context timeout to alert forwarding goroutines",
-      "description": "As the system, I need alert forwarding in hw-gateway to have timeouts so that goroutines don't leak when downstream services are unresponsive.",
+      "title": "Add rate limiting on public auth endpoints",
+      "description": "As the system, I need rate limiting on login and registration endpoints to prevent brute-force attacks.",
       "acceptanceCriteria": [
-        "Alert forwarding goroutines (to notifier and web-backend) use context.WithTimeout (10s)",
-        "If timeout fires, goroutine logs error and exits cleanly",
-        "HTTP client uses the context for the request",
+        "In-memory IP-based rate limiter using Go sync.Map",
+        "POST /auth/login: max 10 requests per minute per IP",
+        "POST /auth/register: max 5 requests per minute per IP",
+        "Rate-limited requests return 429 Too Many Requests",
+        "Stale entries cleaned up periodically (every 5 minutes)",
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-006",
-      "title": "Fix WebSocket channel close race condition",
-      "description": "As the system, I need WebSocket client message sending to be safe from channel close panics.",
+      "title": "Add AbortController timeout to frontend fetch calls",
+      "description": "As a user, I need API calls to timeout so that the UI doesn't appear frozen when the backend is unresponsive.",
       "acceptanceCriteria": [
-        "Use non-blocking send with select/default for client.send channel writes",
-        "If send channel is full or closed, log and skip (don't panic)",
-        "Initial connection message uses same non-blocking pattern",
-        "No panic possible from writing to closed channel",
-        "Typecheck passes"
+        "All fetch() calls in LoginPage, CCTVPage, ManagementPage, ViewerPage, IncidentsPage use AbortController",
+        "Default timeout: 10 seconds for data fetches, 30 seconds for auth calls",
+        "On timeout, show user-friendly error message in Korean",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
       ],
       "priority": 6,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-007",
-      "title": "Require strong admin password",
-      "description": "As an admin, I need the system to warn about weak default admin passwords so that the deployment is secure.",
+      "title": "Validate JWT expiration on app load",
+      "description": "As the system, I need to check if the stored JWT token is expired on app load so that users with stale tokens are redirected to login.",
       "acceptanceCriteria": [
-        "If ADMIN_PASSWORD env var equals sentinel1234 or is unset, log a WARNING at startup",
-        "Warning message: Using default admin password. Set ADMIN_PASSWORD env var for production.",
-        "Password minimum length validation: at least 8 characters",
-        "Admin seeding still works with custom password via env var",
-        "Typecheck passes"
+        "On app mount, decode JWT from localStorage and check exp claim",
+        "If expired, remove token from localStorage and show login page",
+        "If valid, proceed normally (existing behavior)",
+        "No server call needed — client-side check only",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
       ],
       "priority": 7,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-008",
-      "title": "Check temp link request body decode errors",
-      "description": "As the system, I need malformed temp link requests to return proper errors instead of silently creating links with empty labels.",
+      "title": "Implement FFmpeg graceful shutdown (SIGTERM)",
+      "description": "As the system, I need FFmpeg processes to be stopped gracefully so that ongoing streams are not corrupted.",
       "acceptanceCriteria": [
-        "json.NewDecoder(r.Body).Decode(&req) error is checked",
-        "Invalid JSON returns 400 with error message",
-        "Empty body still works (label is optional)",
+        "On camera stop or container shutdown, send SIGTERM to FFmpeg process first",
+        "Wait up to 5 seconds for graceful exit after SIGTERM",
+        "If still running after 5s, send SIGKILL",
+        "Existing watchdog timeout behavior unchanged",
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-009",
-      "title": "Check json.Marshal errors in all services",
-      "description": "As a developer, I need all json.Marshal calls to check for errors so that serialization failures are not silent.",
+      "title": "Increase stream active detection window",
+      "description": "As the system, I need the stream active detection to be more tolerant so that brief network hiccups don't cause false disconnected states.",
       "acceptanceCriteria": [
-        "All json.Marshal() calls in hw-gateway, notifier, and web-backend check the error return",
-        "On error, log the issue and return 500 (or skip the operation with a log)",
-        "No more _ discarding of marshal errors",
+        "Change active detection threshold from 15s to 30s in streaming service",
+        "Threshold is configurable via env var (STREAM_ACTIVE_TIMEOUT, default 30)",
+        "HLS playlist timing (2s fragments, 10s window) still fits within the new threshold",
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-010",
-      "title": "Add Docker healthchecks to all services",
-      "description": "As an operator, I need Docker healthchecks so that failed containers are detected and can be restarted automatically.",
-      "acceptanceCriteria": [
-        "docker-compose.yml has healthcheck block for all services",
-        "Backend Go services: wget or curl to http://localhost:8080/healthz",
-        "mosquitto: mosquitto_sub check or similar",
-        "web-frontend: curl -f http://localhost:80/",
-        "streaming: curl -f http://localhost:8080/healthz",
-        "interval: 30s, timeout: 5s, retries: 3",
-        "Typecheck passes"
-      ],
-      "priority": 10,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-011",
-      "title": "Fix nginx WebSocket proxy timeouts",
-      "description": "As the system, I need complete nginx proxy timeout configuration for WebSocket connections so that connections don't drop unexpectedly.",
-      "acceptanceCriteria": [
-        "nginx.conf WebSocket location block includes proxy_connect_timeout 60s",
-        "nginx.conf WebSocket location block includes proxy_send_timeout 60s",
-        "proxy_read_timeout 86400s is already present (verify)",
-        "Typecheck passes"
-      ],
-      "priority": 11,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-012",
-      "title": "Fix HLS.js instance cleanup on disconnect",
-      "description": "As the system, I need HLS.js instances to be properly destroyed when a camera disconnects so that memory doesn't accumulate.",
-      "acceptanceCriteria": [
-        "When status === disconnected, destroy existing HLS.js instance before returning",
-        "useEffect cleanup function always destroys HLS.js instance on unmount",
-        "No HLS.js instances accumulate when switching cameras or on disconnect/reconnect cycles",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 12,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-013",
-      "title": "Add FFmpeg command timeout in cctv-adapter",
-      "description": "As the system, I need FFmpeg processes to have timeouts so that hung RTSP connections don't block camera reconnection forever.",
-      "acceptanceCriteria": [
-        "FFmpeg command execution uses context.WithTimeout or equivalent watchdog",
-        "If FFmpeg produces no output for 30 seconds, the process is killed and reconnection starts",
-        "Timeout is configurable via env var (default 30s)",
-        "Typecheck passes"
-      ],
-      "priority": 13,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-014",
-      "title": "Silent camera fetch error handling in frontend",
-      "description": "As a user, I need to see an error state when the camera API is unreachable so that I know the system status.",
-      "acceptanceCriteria": [
-        "ViewerPage and CCTVPage show error message when /api/cameras fetch fails",
-        "Error message shown to user in Korean",
-        "Retry continues in background (existing 30s polling)",
-        "When API recovers, error clears and cameras load",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 14,
-      "passes": true,
+      "passes": false,
       "notes": ""
     }
   ]
