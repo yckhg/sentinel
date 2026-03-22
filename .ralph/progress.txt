@@ -17,6 +17,9 @@ Started: Sun Mar 22 15:44:26 KST 2026
 - Camera CRUD follows same pattern as contacts CRUD: admin-only, partial updates via non-empty fields, `Enabled` uses *bool for explicit false
 - cameras table has: id, name, location, zone, stream_key, source_type (rtsp/youtube), source_url, enabled (INTEGER 0/1)
 - cameraResponse includes all DB fields plus HLSUrl and Status enriched from streaming/cctv-adapter services
+- Internal service-to-service endpoints use `/internal/` prefix (no auth), e.g., `GET /internal/cameras`
+- cctv-adapter reload: fetches from web-backend, filters to enabled RTSP cameras, diffs with running set
+- triggerCCTVReload() is async (goroutine) — fire-and-forget after CRUD operations
 
 ---
 
@@ -59,4 +62,18 @@ Started: Sun Mar 22 15:44:26 KST 2026
   - Partial update pattern: use pointer (*bool) for boolean fields to distinguish "not provided" from "false"
   - scanCamera helper uses interface{Scan} to work with both sql.Row and sql.Rows
   - All new camera routes go under apiMux (JWT-protected), not bare mux
+---
+
+## 2026-03-22 - US-004
+- Added CameraManager.Reload() with diff-based reconciliation (stop removed, start new, keep unchanged)
+- Added POST /api/cameras/reload on cctv-adapter — fetches cameras from web-backend, filters enabled RTSP, reconciles
+- Added GET /internal/cameras on web-backend (no auth, internal service use)
+- Added triggerCCTVReload() calls in handleCreateCamera, handleUpdateCamera, handleDeleteCamera
+- Added WEB_BACKEND_URL env var to cctv-adapter in docker-compose.yml
+- Files changed: services/cctv-adapter/main.go, services/web-backend/cameras.go, services/web-backend/main.go, docker-compose.yml
+- **Learnings for future iterations:**
+  - Internal service-to-service endpoints should use `/internal/` prefix to distinguish from public `/api/` routes
+  - Reload is async (fire-and-forget goroutine) to avoid blocking the CRUD response
+  - CameraManager.Reload() diffs by cameraID+rtspUrl — unchanged cameras keep streaming uninterrupted
+  - StopCamera closes stopCh first, then sends SIGTERM, to cleanly exit the manageCameraStream loop
 ---
