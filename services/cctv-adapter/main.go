@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -169,9 +170,16 @@ func (cm *CameraManager) manageCameraStream(cam CameraConfig, state *cameraState
 						lastOutput = lastStderr
 					}
 					if time.Since(lastOutput) > cm.timeout {
-						log.Printf("[%s] FFmpeg output timeout (%v since last output), killing process", cam.CameraID, cm.timeout)
+						log.Printf("[%s] FFmpeg output timeout (%v since last output), stopping process gracefully", cam.CameraID, cm.timeout)
 						if cmd.Process != nil {
-							cmd.Process.Kill()
+							cmd.Process.Signal(syscall.SIGTERM)
+							select {
+							case <-time.After(5 * time.Second):
+								log.Printf("[%s] FFmpeg did not exit after 5s SIGTERM, sending SIGKILL", cam.CameraID)
+								cmd.Process.Kill()
+							case <-processDone:
+								// Process exited gracefully after SIGTERM
+							}
 						}
 						return
 					}
@@ -243,16 +251,34 @@ func (cm *CameraManager) GetStatuses() []CameraStatus {
 	return result
 }
 
-// Stop terminates all FFmpeg processes.
+// Stop terminates all FFmpeg processes gracefully (SIGTERM → 5s wait → SIGKILL).
 func (cm *CameraManager) Stop() {
 	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
+	type activeProc struct {
+		id   string
+		proc *os.Process
+	}
+	var procs []activeProc
 	for id, state := range cm.statuses {
 		close(state.stopCh)
 		if state.cmd != nil && state.cmd.Process != nil {
-			log.Printf("[%s] Stopping FFmpeg process", id)
-			state.cmd.Process.Kill()
+			log.Printf("[%s] Sending SIGTERM to FFmpeg process", id)
+			state.cmd.Process.Signal(syscall.SIGTERM)
+			procs = append(procs, activeProc{id, state.cmd.Process})
+		}
+	}
+	cm.mu.Unlock()
+
+	if len(procs) == 0 {
+		return
+	}
+
+	// Wait up to 5s for graceful exit, then SIGKILL remaining
+	time.Sleep(5 * time.Second)
+	for _, p := range procs {
+		// Kill is harmless if process already exited
+		if err := p.proc.Kill(); err == nil {
+			log.Printf("[%s] FFmpeg did not exit after 5s SIGTERM, sent SIGKILL", p.id)
 		}
 	}
 }
