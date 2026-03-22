@@ -20,18 +20,38 @@ import (
 // JWT configuration
 var jwtSecret []byte
 
+const jwtSecretFile = "/data/.jwt-secret"
+
 func initJWTSecret() {
 	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		// Generate a random secret if not configured
-		b := make([]byte, 32)
-		if _, err := rand.Read(b); err != nil {
-			log.Fatalf("failed to generate JWT secret: %v", err)
-		}
-		secret = hex.EncodeToString(b)
-		log.Println("WARNING: JWT_SECRET not set, using random secret (tokens will not survive restarts)")
+	if secret != "" {
+		jwtSecret = []byte(secret)
+		return
 	}
+
+	// Try to read persisted secret from file
+	if data, err := os.ReadFile(jwtSecretFile); err == nil && len(data) > 0 {
+		secret = strings.TrimSpace(string(data))
+		if secret != "" {
+			jwtSecret = []byte(secret)
+			log.Println("WARNING: Using auto-generated JWT secret from file. Set JWT_SECRET env var for production.")
+			return
+		}
+	}
+
+	// Generate a new random secret and persist it
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatalf("failed to generate JWT secret: %v", err)
+	}
+	secret = hex.EncodeToString(b)
+
+	if err := os.WriteFile(jwtSecretFile, []byte(secret), 0600); err != nil {
+		log.Printf("WARNING: could not persist JWT secret to %s: %v", jwtSecretFile, err)
+	}
+
 	jwtSecret = []byte(secret)
+	log.Println("WARNING: Using auto-generated JWT secret. Set JWT_SECRET env var for production.")
 }
 
 // JWT claims
