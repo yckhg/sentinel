@@ -3,11 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,12 +29,30 @@ type CameraStatus struct {
 	LastError   *string `json:"lastError"`
 }
 
+// watchdogWriter wraps an io.Writer and tracks the last time data was written.
+type watchdogWriter struct {
+	inner    io.Writer
+	lastSeen atomic.Int64 // unix timestamp of last write
+}
+
+func newWatchdogWriter(inner io.Writer) *watchdogWriter {
+	w := &watchdogWriter{inner: inner}
+	w.lastSeen.Store(time.Now().Unix())
+	return w
+}
+
+func (w *watchdogWriter) Write(p []byte) (int, error) {
+	w.lastSeen.Store(time.Now().Unix())
+	return w.inner.Write(p)
+}
+
 // CameraManager manages FFmpeg processes for all cameras.
 type CameraManager struct {
-	mu       sync.RWMutex
-	cameras  []CameraConfig
-	statuses map[string]*cameraState
+	mu        sync.RWMutex
+	cameras   []CameraConfig
+	statuses  map[string]*cameraState
 	streamURL string
+	timeout   time.Duration
 }
 
 type cameraState struct {
@@ -42,11 +63,12 @@ type cameraState struct {
 	stopCh      chan struct{}
 }
 
-func NewCameraManager(cameras []CameraConfig, streamURL string) *CameraManager {
+func NewCameraManager(cameras []CameraConfig, streamURL string, timeout time.Duration) *CameraManager {
 	return &CameraManager{
-		cameras:  cameras,
-		statuses: make(map[string]*cameraState),
+		cameras:   cameras,
+		statuses:  make(map[string]*cameraState),
 		streamURL: streamURL,
+		timeout:   timeout,
 	}
 }
 
@@ -96,8 +118,11 @@ func (cm *CameraManager) manageCameraStream(cam CameraConfig, state *cameraState
 			"-flvflags", "no_duration_filesize",
 			destURL,
 		)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		// Wrap stdout/stderr with watchdog writers to detect hung FFmpeg
+		stdoutWatcher := newWatchdogWriter(os.Stdout)
+		stderrWatcher := newWatchdogWriter(os.Stderr)
+		cmd.Stdout = stdoutWatcher
+		cmd.Stderr = stderrWatcher
 
 		cm.mu.Lock()
 		state.cmd = cmd
@@ -129,8 +154,38 @@ func (cm *CameraManager) manageCameraStream(cam CameraConfig, state *cameraState
 		log.Printf("[%s] Connected, streaming to %s", cam.CameraID, destURL)
 		backoff = time.Second // reset backoff on successful connect
 
+		// Start watchdog goroutine to kill FFmpeg if no output for timeout duration
+		processDone := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(cm.timeout / 2)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					lastStdout := time.Unix(stdoutWatcher.lastSeen.Load(), 0)
+					lastStderr := time.Unix(stderrWatcher.lastSeen.Load(), 0)
+					lastOutput := lastStdout
+					if lastStderr.After(lastOutput) {
+						lastOutput = lastStderr
+					}
+					if time.Since(lastOutput) > cm.timeout {
+						log.Printf("[%s] FFmpeg output timeout (%v since last output), killing process", cam.CameraID, cm.timeout)
+						if cmd.Process != nil {
+							cmd.Process.Kill()
+						}
+						return
+					}
+				case <-processDone:
+					return
+				case <-state.stopCh:
+					return
+				}
+			}
+		}()
+
 		// Wait for process to exit
 		err = cmd.Wait()
+		close(processDone)
 
 		if err != nil {
 			errMsg := fmt.Sprintf("FFmpeg exited: %v", err)
@@ -235,13 +290,23 @@ func main() {
 		cameras = []CameraConfig{}
 	}
 
-	log.Printf("Loaded %d camera(s) from config", len(cameras))
+	// Parse FFmpeg output timeout (kills hung processes)
+	ffmpegTimeout := 30 * time.Second
+	if envTimeout := os.Getenv("FFMPEG_TIMEOUT"); envTimeout != "" {
+		if secs, err := strconv.Atoi(envTimeout); err == nil && secs > 0 {
+			ffmpegTimeout = time.Duration(secs) * time.Second
+		} else {
+			log.Printf("Warning: Invalid FFMPEG_TIMEOUT '%s', using default %v", envTimeout, ffmpegTimeout)
+		}
+	}
+
+	log.Printf("Loaded %d camera(s) from config (ffmpeg timeout: %v)", len(cameras), ffmpegTimeout)
 	for _, cam := range cameras {
 		log.Printf("  Camera: %s (%s)", cam.CameraID, cam.Name)
 	}
 
 	// Create camera manager and start streaming
-	manager := NewCameraManager(cameras, streamURL)
+	manager := NewCameraManager(cameras, streamURL, ffmpegTimeout)
 	if len(cameras) > 0 {
 		manager.Start()
 	}

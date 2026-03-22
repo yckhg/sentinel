@@ -39,3 +39,5 @@ Abstracts camera types and protocols. Receives video streams from cameras and fo
 - Camera changes require config file update + container restart
 - Minimize resource usage — this runs on a mini PC
 - Adding a new camera type means only modifying this service
+- FFmpeg output watchdog: `FFMPEG_TIMEOUT` env var (default 30s) kills hung processes when no stdout/stderr output is detected
+- watchdogWriter wraps io.Writer with atomic.Int64 timestamp tracking — lightweight, no locks needed for the hot path
