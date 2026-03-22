@@ -101,8 +101,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Created isTokenExpired() utility that decodes JWT base64 payload and checks exp claim. Used as lazy initializer in useState — expired tokens are cleared from localStorage before first render. No server call needed."
     },
     {
       "id": "US-008",
