@@ -24,6 +24,11 @@ Started: Sun Mar 22 15:44:26 KST 2026
 - ManagementPage CRUD pattern: state vars → fetch → handlers → JSX (add form + list with inline edit + delete modal)
 - Admin-only sections gated by `showAccounts` (isAdmin()) in ManagementPage
 - CSS: `mgmt-select` for dropdowns, `mgmt-checkbox-label` for checkbox+label, `mgmt-badge-*` for inline badges
+- Notifier email endpoint: POST /api/send-email {to, subject, body} — internal, no auth; returns 503 if SMTP not configured
+- Invitations table: id, email, token (UUID, UNIQUE), status (pending/accepted/expired/cancelled), created_at, expires_at
+- Invitation CRUD: admin-only POST/GET/DELETE on /api/invitations, public GET /api/invitations/verify/{token}
+- Registration with valid invite token auto-approves user (status='active', skips admin approval)
+- google/uuid used for invitation tokens — already an indirect dep, now direct
 
 ---
 
@@ -144,4 +149,39 @@ Started: Sun Mar 22 15:44:26 KST 2026
   - SettingsPage was minimal (just logout button) — now has section dividers and form structure
   - Reused `getAuthHeaders()` pattern locally (same as ManagementPage)
   - `.mgmt-form-success` added as counterpart to `.mgmt-form-error` — use #2e7d32 green
+---
+
+## 2026-03-22 - US-009
+- Added POST /api/send-email endpoint to notifier service
+- Accepts {to, subject, body} — supports HTML body via Content-Type text/html
+- SMTP config via env vars: SMTP_HOST, SMTP_PORT (default 587), SMTP_USER, SMTP_PASS, SMTP_FROM
+- Returns 503 if SMTP not configured (SMTP_HOST or SMTP_FROM empty)
+- Returns 400 for missing fields, 500 for send failure
+- Uses Go stdlib `net/smtp` with PlainAuth — no external dependencies added
+- Added SMTP env vars to notifier in docker-compose.yml
+- Files changed: services/notifier/main.go, docker-compose.yml
+- **Learnings for future iterations:**
+  - Go stdlib `net/smtp` handles SMTP well — PlainAuth + SendMail for basic email sending
+  - SMTP config check: only need SMTP_HOST and SMTP_FROM to be non-empty to consider email "configured"
+  - Email endpoint is service-internal (no auth) — called by web-backend, not by frontend directly
+  - Pattern: 503 for "not configured" services, 500 for runtime failures
+---
+
+## 2026-03-22 - US-010
+- Added invitations table (migration v4): id, email, token (UUID), status, created_at, expires_at
+- POST /api/invitations creates invitation + sends email via notifier (admin only, async email)
+- GET /api/invitations lists all invitations with auto-expire check (admin only)
+- DELETE /api/invitations/{id} cancels pending invitation (admin only)
+- GET /api/invitations/verify/{token} validates token (public, for registration page)
+- Modified handleRegister to accept inviteToken — valid invite auto-approves user (status='active')
+- acceptInvitation marks token as 'accepted' after successful registration
+- Added NOTIFIER_URL and FRONTEND_URL env vars to web-backend in docker-compose.yml
+- Files changed: services/web-backend/invitations.go (new), services/web-backend/migrations.go, services/web-backend/auth.go, services/web-backend/main.go, docker-compose.yml
+- **Learnings for future iterations:**
+  - google/uuid was already an indirect dep — promoted to direct use for invitation tokens
+  - Public routes (no auth) registered on bare mux, not apiMux; verify endpoint is public for registration page
+  - Invitation email sent async (goroutine) — fire-and-forget, same pattern as triggerCCTVReload
+  - DELETE /api/invitations/{id} does soft-cancel (status='cancelled') not hard delete, for audit trail
+  - Auto-expire logic is checked at read time (list + verify), not via background job
+  - registerRequest extended with InviteToken field — backwards compatible (zero value = no invite)
 ---
