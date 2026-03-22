@@ -20,6 +20,10 @@ services:
     build: ./services/hw-gateway
     container_name: sentinel-hw-gateway
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
     environment:
       - MQTT_BROKER_URL=tcp://mosquitto:1883
       - NOTIFIER_URL=http://notifier:8080
@@ -40,6 +44,11 @@ services:
     build: ./services/cctv-adapter
     container_name: sentinel-cctv-adapter
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
     environment:
       - CAMERAS_CONFIG_PATH=/config/cameras.json
       - STREAMING_RTMP_URL=rtmp://streaming:1935/live
@@ -61,6 +70,10 @@ services:
     build: ./services/streaming
     container_name: sentinel-streaming
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
       interval: 15s
@@ -75,6 +88,10 @@ services:
     build: ./services/notifier
     container_name: sentinel-notifier
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
     environment:
       - WEB_BACKEND_URL=http://web-backend:8080
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3080}
@@ -105,6 +122,10 @@ services:
     build: ./services/web-backend
     container_name: sentinel-web-backend
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
     environment:
       - HW_GATEWAY_URL=http://hw-gateway:8080
       - STREAMING_URL=http://streaming:8080
@@ -145,6 +166,11 @@ services:
     build: ./services/youtube-adapter
     container_name: sentinel-youtube-adapter
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
     environment:
       - YOUTUBE_CONFIG_PATH=/config/youtube-sources.json
       - STREAMING_RTMP_URL=rtmp://streaming:1935/live
