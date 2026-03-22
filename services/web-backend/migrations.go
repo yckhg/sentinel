@@ -83,6 +83,20 @@ var migrations = []migration{
 			UPDATE cameras SET stream_key = name, source_type = 'youtube' WHERE name LIKE 'yt-cam-%';
 		`,
 	},
+	{
+		version: 4,
+		name:    "create_invitations_table",
+		sql: `
+			CREATE TABLE IF NOT EXISTS invitations (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				email TEXT NOT NULL,
+				token TEXT NOT NULL UNIQUE,
+				status TEXT NOT NULL DEFAULT 'pending',
+				created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+				expires_at DATETIME NOT NULL
+			);
+		`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {

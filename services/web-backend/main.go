@@ -30,6 +30,7 @@ func main() {
 	initJWTSecret()
 	initHWGatewayURL()
 	initServiceURLs()
+	initNotifierURL()
 
 	if err := seedAdminUser(db); err != nil {
 		log.Fatalf("failed to seed admin user: %v", err)
@@ -68,6 +69,9 @@ func main() {
 	// Internal cameras list (no auth — for cctv-adapter reload)
 	mux.HandleFunc("GET /internal/cameras", handleInternalListCameras(db))
 
+	// Public invitation verification (no auth — for registration page)
+	mux.HandleFunc("GET /api/invitations/verify/{token}", handleVerifyInvitation(db))
+
 	// Incident creation (internal — from hw-gateway)
 	mux.HandleFunc("POST /api/incidents", handleCreateIncident(db))
 
@@ -100,6 +104,11 @@ func main() {
 
 	// Auth (authenticated user)
 	apiMux.HandleFunc("POST /api/auth/change-password", handleChangePassword(db))
+
+	// Invitations (admin only)
+	apiMux.HandleFunc("POST /api/invitations", handleCreateInvitation(db))
+	apiMux.HandleFunc("GET /api/invitations", handleListInvitations(db))
+	apiMux.HandleFunc("DELETE /api/invitations/{id}", handleDeleteInvitation(db))
 
 	// Incidents (any authenticated user)
 	apiMux.HandleFunc("GET /api/incidents", handleListIncidents(db))

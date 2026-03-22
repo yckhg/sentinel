@@ -109,6 +109,8 @@ services:
       - HW_GATEWAY_URL=http://hw-gateway:8080
       - STREAMING_URL=http://streaming:8080
       - CCTV_ADAPTER_URL=http://cctv-adapter:8080
+      - NOTIFIER_URL=http://notifier:8080
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3080}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 30s

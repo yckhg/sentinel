@@ -80,9 +80,10 @@ type AuthUser struct {
 // --- Request/Response types ---
 
 type registerRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Name     string `json:"name"`
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	Name        string `json:"name"`
+	InviteToken string `json:"inviteToken"`
 }
 
 type registerResponse struct {
@@ -120,6 +121,7 @@ func handleRegister(db *sql.DB) http.HandlerFunc {
 
 		req.Username = strings.TrimSpace(req.Username)
 		req.Name = strings.TrimSpace(req.Name)
+		inviteToken := strings.TrimSpace(req.InviteToken)
 
 		if req.Username == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username is required"})
@@ -138,6 +140,13 @@ func handleRegister(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// Check if invite token is valid — auto-approve if so
+		autoApprove := inviteToken != "" && isValidInviteToken(db, r, inviteToken)
+		status := "pending"
+		if autoApprove {
+			status = "active"
+		}
+
 		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 		if err != nil {
 			log.Printf("bcrypt error: %v", err)
@@ -149,8 +158,8 @@ func handleRegister(db *sql.DB) http.HandlerFunc {
 		defer cancel()
 
 		result, err := db.ExecContext(ctx,
-			"INSERT INTO users (username, password_hash, name) VALUES (?, ?, ?)",
-			req.Username, string(hash), req.Name,
+			"INSERT INTO users (username, password_hash, name, status) VALUES (?, ?, ?, ?)",
+			req.Username, string(hash), req.Name, status,
 		)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -164,13 +173,18 @@ func handleRegister(db *sql.DB) http.HandlerFunc {
 
 		id, _ := result.LastInsertId()
 
-		log.Printf("user registered: id=%d username=%s name=%s status=pending", id, req.Username, req.Name)
+		// Mark invitation as accepted
+		if autoApprove {
+			acceptInvitation(db, r, inviteToken)
+		}
+
+		log.Printf("user registered: id=%d username=%s name=%s status=%s", id, req.Username, req.Name, status)
 
 		writeJSON(w, http.StatusCreated, registerResponse{
 			ID:       id,
 			Username: req.Username,
 			Name:     req.Name,
-			Status:   "pending",
+			Status:   status,
 		})
 	}
 }
