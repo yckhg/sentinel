@@ -41,6 +41,9 @@ logs/
 # HLS segments (generated at runtime, inside containers only)
 # Note: Do NOT use *.ts here — it blocks TypeScript files
 
+# Media files (downloaded videos for demo streaming)
+media/
+
 # Claude / Ralph (AI agent files)
 AGENTS.md
 CLAUDE.md

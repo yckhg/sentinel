@@ -47,6 +47,7 @@ type YouTubeSource struct {
 	ID         string `json:"id"`
 	YouTubeURL string `json:"youtubeUrl"`
 	StreamKey  string `json:"streamKey"`
+	LocalFile  string `json:"localFile,omitempty"`
 }
 
 // StreamStatus tracks the runtime state of a stream
@@ -125,22 +126,29 @@ func (m *StreamManager) manageStream(src YouTubeSource, state *streamState) {
 		default:
 		}
 
-		log.Printf("[%s] Resolving stream URL via yt-dlp for %s", src.ID, src.YouTubeURL)
+		var streamURL string
+		if src.LocalFile != "" {
+			// Use local file — no yt-dlp needed
+			log.Printf("[%s] Using local file: %s", src.ID, src.LocalFile)
+			streamURL = src.LocalFile
+		} else {
+			log.Printf("[%s] Resolving stream URL via yt-dlp for %s", src.ID, src.YouTubeURL)
+			var err error
+			streamURL, err = resolveStreamURL(src.YouTubeURL)
+			if err != nil {
+				log.Printf("[%s] yt-dlp error: %v", src.ID, err)
+				state.Lock()
+				state.status = "error"
+				state.lastError = fmt.Sprintf("yt-dlp: %v", err)
+				state.Unlock()
 
-		streamURL, err := resolveStreamURL(src.YouTubeURL)
-		if err != nil {
-			log.Printf("[%s] yt-dlp error: %v", src.ID, err)
-			state.Lock()
-			state.status = "error"
-			state.lastError = fmt.Sprintf("yt-dlp: %v", err)
-			state.Unlock()
-
-			select {
-			case <-state.stopCh:
-				return
-			case <-time.After(backoff):
-				backoff = min(backoff*2, maxBackoff)
-				continue
+				select {
+				case <-state.stopCh:
+					return
+				case <-time.After(backoff):
+					backoff = min(backoff*2, maxBackoff)
+					continue
+				}
 			}
 		}
 
@@ -153,7 +161,7 @@ func (m *StreamManager) manageStream(src YouTubeSource, state *streamState) {
 		state.loopCount++
 		state.Unlock()
 
-		err = runFFmpeg(streamURL, rtmpDest, state.stopCh)
+		ffErr := runFFmpeg(streamURL, rtmpDest, state.stopCh)
 
 		select {
 		case <-state.stopCh:
@@ -164,11 +172,11 @@ func (m *StreamManager) manageStream(src YouTubeSource, state *streamState) {
 		default:
 		}
 
-		if err != nil {
-			log.Printf("[%s] FFmpeg exited with error: %v", src.ID, err)
+		if ffErr != nil {
+			log.Printf("[%s] FFmpeg exited with error: %v", src.ID, ffErr)
 			state.Lock()
 			state.status = "error"
-			state.lastError = fmt.Sprintf("ffmpeg: %v", err)
+			state.lastError = fmt.Sprintf("ffmpeg: %v", ffErr)
 			state.Unlock()
 
 			select {

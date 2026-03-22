@@ -155,6 +155,7 @@ services:
       retries: 3
     volumes:
       - ./config/youtube-sources.json:/config/youtube-sources.json:ro
+      - ./media:/media:ro
     depends_on:
       - streaming
     networks:

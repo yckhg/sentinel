@@ -2,11 +2,13 @@
   {
     "id": "yt-cam-1",
     "youtubeUrl": "https://www.youtube.com/watch?v=wvBnTOR36A4",
-    "streamKey": "yt-cam-1"
+    "streamKey": "yt-cam-1",
+    "localFile": "/media/yt-cam-1.mp4"
   },
   {
     "id": "yt-cam-2",
     "youtubeUrl": "https://www.youtube.com/watch?v=aqsvNWQTiQ0",
-    "streamKey": "yt-cam-2"
+    "streamKey": "yt-cam-2",
+    "localFile": "/media/yt-cam-2.mp4"
   }
 ]
