@@ -10,6 +10,8 @@ Started: Sun Mar 22 13:02:53 KST 2026
 - /data/ is volume-mounted in web-backend container — use it for persistent state files
 - hw-gateway has a single main.go with all logic — MQTT handlers, HTTP handlers, heartbeat checker
 - equipmentStore uses sync.RWMutex embedded in anonymous struct
+- All services expose GET /healthz endpoints — use for Docker healthchecks and monitoring
+- Alpine images have wget (not curl) — use `wget --spider -q` for healthchecks
 ---
 
 ## 2026-03-22 - US-001
@@ -112,4 +114,20 @@ Started: Sun Mar 22 13:02:53 KST 2026
 - **Learnings for future iterations:**
   - json.Marshal on simple map[string]string or structs with basic types won't realistically fail, but checking errors is good hygiene
   - For HTTP handler context, return 500; for fire-and-forget goroutines, log and return
+---
+
+## 2026-03-22 - US-010
+- Added Docker healthcheck blocks to all 7 services in docker-compose.yml
+- Go services (hw-gateway, cctv-adapter, notifier, web-backend): wget --spider to localhost:8080/healthz
+- streaming: wget --spider to localhost:8080/healthz (nginx proxies to Go binary on :8081)
+- web-frontend: wget --spider to localhost:80/healthz (nginx returns 200 directly)
+- mosquitto: mosquitto_sub -t '$SYS/#' -C 1 -W 3 (subscribe to system topic, expect 1 message within 3s)
+- All healthchecks use interval: 30s, timeout: 5s, retries: 3
+- Validated with `docker compose config --quiet`
+- Files changed: docker-compose.yml
+- **Learnings for future iterations:**
+  - All services already have /healthz endpoints — no code changes needed, only compose config
+  - Alpine images have wget but not curl — use `wget --spider -q` for healthchecks
+  - mosquitto_sub with -C 1 -W 3 reads 1 message from $SYS/# with 3s timeout — reliable broker check
+  - Use $$SYS in docker-compose.yml to escape the $ (prevents docker compose variable interpolation)
 ---
