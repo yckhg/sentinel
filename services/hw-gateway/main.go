@@ -316,14 +316,30 @@ func heartbeatChecker() {
 
 	for range ticker.C {
 		now := time.Now()
-		equipmentStore.Lock()
+
+		// Phase 1: read lock to identify stale devices
+		var staleKeys []string
+		equipmentStore.RLock()
 		for key, ds := range equipmentStore.devices {
 			if ds.Alive && now.Sub(ds.lastSeen) > heartbeatTimeout {
-				ds.Alive = false
-				log.Printf("[HEARTBEAT] Device %s marked as dead (no heartbeat for %v)", key, heartbeatTimeout)
+				staleKeys = append(staleKeys, key)
 			}
 		}
-		equipmentStore.Unlock()
+		equipmentStore.RUnlock()
+
+		// Phase 2: write lock to mark stale devices as dead
+		if len(staleKeys) > 0 {
+			equipmentStore.Lock()
+			for _, key := range staleKeys {
+				ds := equipmentStore.devices[key]
+				// Re-check under write lock in case heartbeat arrived between phases
+				if ds != nil && ds.Alive && now.Sub(ds.lastSeen) > heartbeatTimeout {
+					ds.Alive = false
+					log.Printf("[HEARTBEAT] Device %s marked as dead (no heartbeat for %v)", key, heartbeatTimeout)
+				}
+			}
+			equipmentStore.Unlock()
+		}
 	}
 }
 
