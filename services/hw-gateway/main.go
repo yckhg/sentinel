@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -260,10 +261,14 @@ func forwardToNotifier(notifierURL string, alert *AlertPayload) {
 	log.Printf("[FORWARD] Notifier response: %d", resp.StatusCode)
 }
 
-func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+// backoffWithJitter returns a duration with exponential backoff and ±25% random jitter.
+func backoffWithJitter(base time.Duration, attempt int) time.Duration {
+	delay := base * time.Duration(math.Pow(2, float64(attempt)))
+	jitter := float64(delay) * 0.25 * (2*rand.Float64() - 1) // ±25%
+	return delay + time.Duration(jitter)
+}
 
+func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
 	incident := IncidentPayload{
 		SiteID:      alert.SiteID,
 		Description: alert.Description,
@@ -276,36 +281,37 @@ func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
 	}
 	url := fmt.Sprintf("%s/api/incidents", webBackendURL)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		log.Printf("[FORWARD] Failed to create web-backend request: %v", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
+	maxRetries := 3
+	baseDelay := 1 * time.Second
 
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		log.Printf("[FORWARD] Failed to send incident to web-backend: %v (retrying in 1s)", err)
-		time.Sleep(1 * time.Second)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 
-		retryCtx, retryCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer retryCancel()
-
-		retryReq, retryErr := http.NewRequestWithContext(retryCtx, http.MethodPost, url, bytes.NewReader(body))
-		if retryErr != nil {
-			log.Printf("[FORWARD] Failed to create web-backend retry request: %v", retryErr)
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if reqErr != nil {
+			cancel()
+			log.Printf("[FORWARD] Failed to create web-backend request: %v", reqErr)
 			return
 		}
-		retryReq.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", "application/json")
 
-		resp, err = httpClient.Do(retryReq)
-		if err != nil {
-			log.Printf("[FORWARD] Retry failed for web-backend: %v", err)
+		resp, doErr := httpClient.Do(req)
+		if doErr == nil {
+			cancel()
+			defer resp.Body.Close()
+			log.Printf("[FORWARD] Web-backend response: %d", resp.StatusCode)
 			return
 		}
+		cancel()
+
+		if attempt < maxRetries {
+			delay := backoffWithJitter(baseDelay, attempt)
+			log.Printf("[FORWARD] Failed to send incident to web-backend: %v (retry %d/%d in %v)", doErr, attempt+1, maxRetries, delay.Round(time.Millisecond))
+			time.Sleep(delay)
+		} else {
+			log.Printf("[FORWARD] All retries exhausted for web-backend: %v", doErr)
+		}
 	}
-	defer resp.Body.Close()
-	log.Printf("[FORWARD] Web-backend response: %d", resp.StatusCode)
 }
 
 func handleHeartbeat(msg mqtt.Message) {
