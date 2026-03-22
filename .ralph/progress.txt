@@ -80,3 +80,13 @@ Started: Sun Mar 22 13:02:53 KST 2026
   - unregister() closes c.send after removing from map, so broadcast won't find it, but safeSend recover is defense-in-depth
   - wsClient.send channel has 64-element buffer — unlikely to fill but safeSend handles it gracefully
 ---
+
+## 2026-03-22 - US-007
+- Added default/weak password warning in seedAdminUser() — logs WARNING when ADMIN_PASSWORD is unset or equals "sentinel1234"
+- Added minimum length validation (< 8 chars) with separate warning log
+- Admin seeding still works with any password via env var
+- Files changed: services/web-backend/auth.go
+- **Learnings for future iterations:**
+  - seedAdminUser runs at startup in main.go — good place for security warnings
+  - Default password "sentinel1234" is 12 chars so it passes length check, but still gets the default password warning
+---
