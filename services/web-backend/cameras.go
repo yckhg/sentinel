@@ -264,6 +264,7 @@ func handleCreateCamera(db *sql.DB) http.HandlerFunc {
 
 		id, _ := result.LastInsertId()
 		log.Printf("camera created: id=%d name=%s streamKey=%s by user=%d", id, req.Name, req.StreamKey, user.UserID)
+		triggerCCTVReload()
 
 		writeJSON(w, http.StatusCreated, cameraResponse{
 			ID:         id,
@@ -370,8 +371,61 @@ func handleUpdateCamera(db *sql.DB) http.HandlerFunc {
 		}
 
 		log.Printf("camera updated: id=%d by user=%d", id, user.UserID)
+		triggerCCTVReload()
 		writeJSON(w, http.StatusOK, existing)
 	}
+}
+
+// handleInternalListCameras returns all cameras for internal service-to-service use (no auth).
+func handleInternalListCameras(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		rows, err := db.QueryContext(ctx,
+			"SELECT id, name, location, zone, stream_key, source_type, source_url, enabled FROM cameras ORDER BY id ASC")
+		if err != nil {
+			log.Printf("query cameras (internal) error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+		defer rows.Close()
+
+		cameras := []cameraResponse{}
+		for rows.Next() {
+			c, err := scanCamera(rows)
+			if err != nil {
+				log.Printf("scan camera error: %v", err)
+				continue
+			}
+			cameras = append(cameras, c)
+		}
+
+		writeJSON(w, http.StatusOK, cameras)
+	}
+}
+
+// triggerCCTVReload calls cctv-adapter's reload endpoint asynchronously.
+func triggerCCTVReload() {
+	go func() {
+		client := &http.Client{Timeout: 10 * time.Second}
+		req, err := http.NewRequest("POST", cctvAdapterURL+"/api/cameras/reload", nil)
+		if err != nil {
+			log.Printf("cctv reload: failed to create request: %v", err)
+			return
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("cctv reload: failed to call cctv-adapter: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			log.Printf("cctv reload: cctv-adapter reloaded successfully")
+		} else {
+			log.Printf("cctv reload: cctv-adapter returned status %d", resp.StatusCode)
+		}
+	}()
 }
 
 func handleDeleteCamera(db *sql.DB) http.HandlerFunc {
@@ -406,6 +460,7 @@ func handleDeleteCamera(db *sql.DB) http.HandlerFunc {
 		}
 
 		log.Printf("camera deleted: id=%d by user=%d", id, user.UserID)
+		triggerCCTVReload()
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

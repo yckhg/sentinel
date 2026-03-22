@@ -65,6 +65,9 @@ func main() {
 	mux.HandleFunc("POST /api/links/temp", handleCreateTempLink())
 	mux.HandleFunc("GET /api/links/verify/{token}", handleVerifyTempLink())
 
+	// Internal cameras list (no auth — for cctv-adapter reload)
+	mux.HandleFunc("GET /internal/cameras", handleInternalListCameras(db))
+
 	// Incident creation (internal — from hw-gateway)
 	mux.HandleFunc("POST /api/incidents", handleCreateIncident(db))
 

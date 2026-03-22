@@ -251,6 +251,79 @@ func (cm *CameraManager) GetStatuses() []CameraStatus {
 	return result
 }
 
+// StopCamera stops a single camera's stream gracefully.
+func (cm *CameraManager) StopCamera(cameraID string) {
+	cm.mu.Lock()
+	state, ok := cm.statuses[cameraID]
+	if ok {
+		close(state.stopCh)
+		delete(cm.statuses, cameraID)
+	}
+	cm.mu.Unlock()
+
+	if ok && state.cmd != nil && state.cmd.Process != nil {
+		log.Printf("[%s] Sending SIGTERM to FFmpeg process", cameraID)
+		state.cmd.Process.Signal(syscall.SIGTERM)
+		time.Sleep(3 * time.Second)
+		state.cmd.Process.Kill()
+	}
+}
+
+// StartCamera starts streaming for a single camera.
+func (cm *CameraManager) StartCamera(cam CameraConfig) {
+	state := &cameraState{
+		status: "disconnected",
+		stopCh: make(chan struct{}),
+	}
+	cm.mu.Lock()
+	cm.statuses[cam.CameraID] = state
+	cm.mu.Unlock()
+
+	go cm.manageCameraStream(cam, state)
+}
+
+// Reload reconciles the running cameras with a new config list.
+// Unchanged cameras (same cameraID + rtspUrl) are not interrupted.
+// Removed cameras are stopped. New/changed cameras are (re)started.
+func (cm *CameraManager) Reload(newCameras []CameraConfig) {
+	cm.mu.RLock()
+	oldMap := make(map[string]string) // cameraID -> rtspUrl
+	for _, cam := range cm.cameras {
+		oldMap[cam.CameraID] = cam.RtspURL
+	}
+	cm.mu.RUnlock()
+
+	newMap := make(map[string]CameraConfig)
+	for _, cam := range newCameras {
+		newMap[cam.CameraID] = cam
+	}
+
+	// Stop removed or changed cameras
+	for id, oldURL := range oldMap {
+		newCam, exists := newMap[id]
+		if !exists || newCam.RtspURL != oldURL {
+			log.Printf("[reload] Stopping camera %s (removed or changed)", id)
+			cm.StopCamera(id)
+		}
+	}
+
+	// Start new or changed cameras
+	for id, newCam := range newMap {
+		oldURL, existed := oldMap[id]
+		if !existed || oldURL != newCam.RtspURL {
+			log.Printf("[reload] Starting camera %s", id)
+			cm.StartCamera(newCam)
+		}
+	}
+
+	// Update the cameras list
+	cm.mu.Lock()
+	cm.cameras = newCameras
+	cm.mu.Unlock()
+
+	log.Printf("[reload] Reconciled: %d cameras active", len(newCameras))
+}
+
 // Stop terminates all FFmpeg processes gracefully (SIGTERM → 5s wait → SIGKILL).
 func (cm *CameraManager) Stop() {
 	cm.mu.Lock()
@@ -350,6 +423,63 @@ func main() {
 		statuses := manager.GetStatuses()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(statuses)
+	})
+
+	// Reload endpoint: fetches camera list from web-backend and reconciles
+	webBackendURL := os.Getenv("WEB_BACKEND_URL")
+	if webBackendURL == "" {
+		webBackendURL = "http://web-backend:8080"
+	}
+	reloadClient := &http.Client{Timeout: 10 * time.Second}
+
+	mux.HandleFunc("POST /api/cameras/reload", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("[reload] Reload triggered, fetching cameras from web-backend")
+
+		resp, err := reloadClient.Get(webBackendURL + "/internal/cameras")
+		if err != nil {
+			log.Printf("[reload] Failed to fetch cameras: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			w.Write([]byte(`{"error":"failed to fetch cameras from web-backend"}`))
+			return
+		}
+		defer resp.Body.Close()
+
+		var cameras []struct {
+			Name       string `json:"name"`
+			StreamKey  string `json:"streamKey"`
+			SourceType string `json:"sourceType"`
+			SourceURL  string `json:"sourceUrl"`
+			Enabled    bool   `json:"enabled"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&cameras); err != nil {
+			log.Printf("[reload] Failed to decode cameras: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"failed to decode cameras response"}`))
+			return
+		}
+
+		// Filter to enabled RTSP cameras only and convert to CameraConfig
+		var rtspCameras []CameraConfig
+		for _, c := range cameras {
+			if c.SourceType == "rtsp" && c.Enabled && c.SourceURL != "" {
+				rtspCameras = append(rtspCameras, CameraConfig{
+					CameraID: c.Name,
+					Name:     c.Name,
+					RtspURL:  c.SourceURL,
+				})
+			}
+		}
+
+		manager.Reload(rtspCameras)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":  "reloaded",
+			"cameras": len(rtspCameras),
+		})
 	})
 
 	log.Println("cctv-adapter listening on :8080")

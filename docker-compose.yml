@@ -43,6 +43,7 @@ services:
     environment:
       - CAMERAS_CONFIG_PATH=/config/cameras.json
       - STREAMING_RTMP_URL=rtmp://streaming:1935/live
+      - WEB_BACKEND_URL=http://web-backend:8080
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 30s
