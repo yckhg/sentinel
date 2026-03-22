@@ -169,3 +169,16 @@ Started: Sun Mar 22 13:02:53 KST 2026
   - Need a processDone channel to cleanly exit watchdog when FFmpeg exits normally (otherwise goroutine leaks)
   - FFmpeg writes diagnostics to stderr, video data to stdout pipe — monitoring both catches all cases
 ---
+
+## 2026-03-22 - US-014
+- Added error state handling to ViewerPage for /api/cameras fetch failures
+- CCTVPage already had proper error handling (fetchError state + UI) from prior work
+- ViewerPage now has cameraError state, shows Korean error message when API fails and no cameras loaded
+- Error clears on successful fetch (setCameraError(null)), retry continues via 30s polling interval
+- Error only blocks UI when cameras.length === 0 — if cameras were previously loaded, they remain visible
+- Files changed: services/web-frontend/src/pages/ViewerPage.tsx
+- **Learnings for future iterations:**
+  - CCTVPage error handling was already complete — always check existing state before modifying
+  - Pattern: show error UI only when no cached data exists (cameraError && cameras.length === 0) for better UX
+  - Reuse existing CSS classes (cctv-error) across pages for consistency
+---
