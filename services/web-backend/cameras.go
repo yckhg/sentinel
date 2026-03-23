@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	streamingURL   string
-	cctvAdapterURL string
+	streamingURL      string
+	cctvAdapterURL    string
+	youtubeAdapterURL string
 )
 
 func initServiceURLs() {
@@ -29,8 +30,13 @@ func initServiceURLs() {
 	if cctvAdapterURL == "" {
 		cctvAdapterURL = "http://cctv-adapter:8080"
 	}
+	youtubeAdapterURL = os.Getenv("YOUTUBE_ADAPTER_URL")
+	if youtubeAdapterURL == "" {
+		youtubeAdapterURL = "http://youtube-adapter:8080"
+	}
 	log.Printf("streaming URL: %s", streamingURL)
 	log.Printf("cctv-adapter URL: %s", cctvAdapterURL)
+	log.Printf("youtube-adapter URL: %s", youtubeAdapterURL)
 }
 
 // Cached responses from internal services
@@ -332,6 +338,7 @@ func handleCreateCamera(db *sql.DB) http.HandlerFunc {
 		id, _ := result.LastInsertId()
 		log.Printf("camera created: id=%d name=%s streamKey=%s by user=%d", id, req.Name, req.StreamKey, user.UserID)
 		triggerCCTVReload()
+		triggerYouTubeReload()
 
 		writeJSON(w, http.StatusCreated, cameraResponse{
 			ID:         id,
@@ -444,6 +451,7 @@ func handleUpdateCamera(db *sql.DB) http.HandlerFunc {
 
 		log.Printf("camera updated: id=%d by user=%d", id, user.UserID)
 		triggerCCTVReload()
+		triggerYouTubeReload()
 		writeJSON(w, http.StatusOK, existing)
 	}
 }
@@ -500,6 +508,29 @@ func triggerCCTVReload() {
 	}()
 }
 
+// triggerYouTubeReload calls youtube-adapter's reload endpoint asynchronously.
+func triggerYouTubeReload() {
+	go func() {
+		client := &http.Client{Timeout: 10 * time.Second}
+		req, err := http.NewRequest("POST", youtubeAdapterURL+"/api/cameras/reload", nil)
+		if err != nil {
+			log.Printf("youtube reload: failed to create request: %v", err)
+			return
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("youtube reload: failed to call youtube-adapter: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			log.Printf("youtube reload: youtube-adapter reloaded successfully")
+		} else {
+			log.Printf("youtube reload: youtube-adapter returned status %d", resp.StatusCode)
+		}
+	}()
+}
+
 func handleDeleteCamera(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := getAuthUser(r)
@@ -533,6 +564,7 @@ func handleDeleteCamera(db *sql.DB) http.HandlerFunc {
 
 		log.Printf("camera deleted: id=%d by user=%d", id, user.UserID)
 		triggerCCTVReload()
+		triggerYouTubeReload()
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

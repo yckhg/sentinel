@@ -97,6 +97,16 @@ var migrations = []migration{
 			);
 		`,
 	},
+	{
+		version: 5,
+		name:    "seed_youtube_camera_source_urls",
+		sql: `
+			UPDATE cameras SET source_url = 'https://www.youtube.com/watch?v=wvBnTOR36A4'
+			WHERE stream_key = 'yt-cam-1' AND source_type = 'youtube' AND source_url = '';
+			UPDATE cameras SET source_url = 'https://www.youtube.com/watch?v=aqsvNWQTiQ0'
+			WHERE stream_key = 'yt-cam-2' AND source_type = 'youtube' AND source_url = '';
+		`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {

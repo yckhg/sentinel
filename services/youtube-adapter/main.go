@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -16,6 +17,18 @@ import (
 	"syscall"
 	"time"
 )
+
+var webBackendURL string
+
+// apiCamera represents a camera from the web-backend API.
+type apiCamera struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	StreamKey  string `json:"streamKey"`
+	SourceType string `json:"sourceType"`
+	SourceURL  string `json:"sourceUrl"`
+	Enabled    bool   `json:"enabled"`
+}
 
 // youtubeURLPattern matches valid YouTube video URLs.
 var youtubeURLPattern = regexp.MustCompile(
@@ -96,6 +109,51 @@ func (m *StreamManager) StopAll() {
 	defer m.mu.RUnlock()
 	for _, state := range m.streams {
 		close(state.stopCh)
+	}
+}
+
+// Reload reconciles running streams with a new set of sources.
+// Unchanged streams (same ID + same YouTubeURL) keep running.
+func (m *StreamManager) Reload(newSources []YouTubeSource) {
+	m.mu.Lock()
+
+	oldByID := make(map[string]YouTubeSource)
+	for _, src := range m.sources {
+		oldByID[src.ID] = src
+	}
+
+	newByID := make(map[string]YouTubeSource)
+	for _, src := range newSources {
+		newByID[src.ID] = src
+	}
+
+	// Stop removed or changed streams
+	for id, old := range oldByID {
+		newSrc, exists := newByID[id]
+		if !exists || newSrc.YouTubeURL != old.YouTubeURL {
+			if state, ok := m.streams[id]; ok {
+				log.Printf("[%s] Stopping stream (removed or changed)", id)
+				close(state.stopCh)
+				delete(m.streams, id)
+			}
+		}
+	}
+
+	// Identify streams to start
+	var toStart []YouTubeSource
+	for id, src := range newByID {
+		old, exists := oldByID[id]
+		if !exists || old.YouTubeURL != src.YouTubeURL {
+			toStart = append(toStart, src)
+		}
+	}
+
+	m.sources = newSources
+	m.mu.Unlock()
+
+	for _, src := range toStart {
+		log.Printf("[%s] Starting stream", src.ID)
+		m.startStream(src)
 	}
 }
 
@@ -321,6 +379,43 @@ func loadConfig(path string) ([]YouTubeSource, error) {
 	return valid, nil
 }
 
+// fetchCamerasFromAPI fetches the camera list from web-backend.
+func fetchCamerasFromAPI() ([]apiCamera, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(webBackendURL + "/internal/cameras")
+	if err != nil {
+		return nil, fmt.Errorf("fetch cameras: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("fetch cameras: status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var cameras []apiCamera
+	if err := json.NewDecoder(resp.Body).Decode(&cameras); err != nil {
+		return nil, fmt.Errorf("decode cameras: %w", err)
+	}
+	return cameras, nil
+}
+
+// camerasToSources converts API cameras to YouTubeSource, filtered by youtube type.
+func camerasToSources(cameras []apiCamera) []YouTubeSource {
+	var sources []YouTubeSource
+	for _, c := range cameras {
+		if c.SourceType != "youtube" || !c.Enabled || c.StreamKey == "" {
+			continue
+		}
+		sources = append(sources, YouTubeSource{
+			ID:         c.StreamKey,
+			YouTubeURL: c.SourceURL,
+			StreamKey:  c.StreamKey,
+		})
+	}
+	return sources
+}
+
 func main() {
 	configPath := os.Getenv("YOUTUBE_CONFIG_PATH")
 	if configPath == "" {
@@ -330,6 +425,11 @@ func main() {
 	rtmpURL := os.Getenv("STREAMING_RTMP_URL")
 	if rtmpURL == "" {
 		rtmpURL = "rtmp://streaming:1935/live"
+	}
+
+	webBackendURL = os.Getenv("WEB_BACKEND_URL")
+	if webBackendURL == "" {
+		webBackendURL = "http://web-backend:8080"
 	}
 
 	sources, err := loadConfig(configPath)
@@ -356,6 +456,27 @@ func main() {
 	http.HandleFunc("/api/streams/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(manager.GetStatuses())
+	})
+
+	http.HandleFunc("POST /api/cameras/reload", func(w http.ResponseWriter, r *http.Request) {
+		cameras, err := fetchCamerasFromAPI()
+		if err != nil {
+			log.Printf("reload: failed to fetch cameras: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		sources := camerasToSources(cameras)
+		log.Printf("reload: %d youtube camera(s) from API", len(sources))
+		manager.Reload(sources)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "ok",
+			"count":  len(sources),
+		})
 	})
 
 	// Graceful shutdown
