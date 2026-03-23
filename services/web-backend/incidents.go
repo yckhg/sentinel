@@ -194,3 +194,138 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
+// handleAcknowledgeIncident handles PATCH /api/incidents/{id}/acknowledge
+func handleAcknowledgeIncident(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := getAuthUser(r)
+		if user.Role != "admin" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role required"})
+			return
+		}
+
+		idStr := r.PathValue("id")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid incident id"})
+			return
+		}
+
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		// Check current status
+		var status string
+		err = db.QueryRowContext(ctx, "SELECT status FROM incidents WHERE id = ?", id).Scan(&status)
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "incident not found"})
+			return
+		}
+		if err != nil {
+			log.Printf("query incident error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+		if status == "resolved" {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "cannot acknowledge a resolved incident"})
+			return
+		}
+
+		// Get username
+		var username string
+		err = db.QueryRowContext(ctx, "SELECT username FROM users WHERE id = ?", user.UserID).Scan(&username)
+		if err != nil {
+			log.Printf("query username error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		_, err = db.ExecContext(ctx,
+			"UPDATE incidents SET status = 'acknowledged', confirmed_at = datetime('now'), confirmed_by = ? WHERE id = ?",
+			username, id,
+		)
+		if err != nil {
+			log.Printf("acknowledge incident error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		log.Printf("incident %d acknowledged by %s", id, username)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "acknowledged"})
+	}
+}
+
+// handleResolveIncident handles PATCH /api/incidents/{id}/resolve
+func handleResolveIncident(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := getAuthUser(r)
+		if user.Role != "admin" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role required"})
+			return
+		}
+
+		idStr := r.PathValue("id")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid incident id"})
+			return
+		}
+
+		var req struct {
+			ResolutionNotes string `json:"resolutionNotes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if strings.TrimSpace(req.ResolutionNotes) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "resolution notes are required"})
+			return
+		}
+
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		// Check incident exists
+		var status string
+		err = db.QueryRowContext(ctx, "SELECT status FROM incidents WHERE id = ?", id).Scan(&status)
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "incident not found"})
+			return
+		}
+		if err != nil {
+			log.Printf("query incident error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		// Get username
+		var username string
+		err = db.QueryRowContext(ctx, "SELECT username FROM users WHERE id = ?", user.UserID).Scan(&username)
+		if err != nil {
+			log.Printf("query username error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		result, err := db.ExecContext(ctx,
+			"UPDATE incidents SET status = 'resolved', resolved_at = datetime('now'), resolved_by = ?, resolution_notes = ? WHERE id = ? AND status != 'resolved'",
+			username, strings.TrimSpace(req.ResolutionNotes), id,
+		)
+		if err != nil {
+			log.Printf("resolve incident error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		rows, _ := result.RowsAffected()
+		if rows == 0 {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "incident is already resolved"})
+			return
+		}
+
+		log.Printf("incident %d resolved by %s: %s", id, username, req.ResolutionNotes)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
+	}
+}
+
