@@ -406,29 +406,25 @@ func sendSystemAlarm(cfg Config, contact Contact, alert AlertPayload, kakaoErr, 
 	log.Printf("[alarm] System alarm sent for contact %s (%s) — both KakaoTalk and SMS failed", contact.Name, contact.Phone)
 }
 
-// --- Recording Archive ---
+// --- Recording Archive (Two-Phase) ---
 
-// requestArchive sends an archive request to the recording service for the given incident.
-// Archives from (incident_time - 1 hour) to (incident_time + 30 minutes).
-func requestArchive(cfg Config, alert AlertPayload) {
+// requestArchiveProtect sends a protect request to the recording service (Phase 1).
+// Protects segments from (incident_time - 1h) for all cameras. Finalization happens on incident resolution.
+func requestArchiveProtect(cfg Config, alert AlertPayload) {
 	if cfg.RecordingURL == "" {
-		log.Printf("[archive] Recording URL not configured, skipping archive request")
+		log.Printf("[archive] Recording URL not configured, skipping protect request")
 		return
 	}
 
 	// Parse incident timestamp
 	incidentTime, err := time.Parse(time.RFC3339, alert.Timestamp)
 	if err != nil {
-		// Try alternative format
 		incidentTime, err = time.Parse("2006-01-02 15:04:05", alert.Timestamp)
 		if err != nil {
 			log.Printf("[archive] Cannot parse incident timestamp %q: %v", alert.Timestamp, err)
 			return
 		}
 	}
-
-	archiveFrom := incidentTime.Add(-1 * time.Hour)
-	archiveTo := incidentTime.Add(30 * time.Minute)
 
 	// Fetch camera list to get all stream keys
 	resp, err := httpClient.Get(cfg.WebBackendURL + "/internal/cameras")
@@ -455,39 +451,37 @@ func requestArchive(cfg Config, alert AlertPayload) {
 	}
 
 	if len(streamKeys) == 0 {
-		log.Printf("[archive] No enabled cameras, skipping archive")
+		log.Printf("[archive] No enabled cameras, skipping protect")
 		return
 	}
 
 	// Build incident ID from alert info
 	incidentID := fmt.Sprintf("incident_%s_%s", alert.SiteID, incidentTime.UTC().Format("20060102_150405"))
 
-	archiveReq := map[string]any{
-		"incidentId": incidentID,
-		"streamKeys": streamKeys,
-		"from":       archiveFrom.UTC().Format(time.RFC3339),
-		"to":         archiveTo.UTC().Format(time.RFC3339),
+	protectReq := map[string]any{
+		"incidentId":   incidentID,
+		"streamKeys":   streamKeys,
+		"incidentTime": incidentTime.UTC().Format(time.RFC3339),
 	}
 
-	payload, err := json.Marshal(archiveReq)
+	payload, err := json.Marshal(protectReq)
 	if err != nil {
-		log.Printf("[archive] Failed to marshal archive request: %v", err)
+		log.Printf("[archive] Failed to marshal protect request: %v", err)
 		return
 	}
 
-	archiveResp, err := httpClient.Post(cfg.RecordingURL+"/api/archives", "application/json", bytes.NewReader(payload))
+	protectResp, err := httpClient.Post(cfg.RecordingURL+"/api/archives/protect", "application/json", bytes.NewReader(payload))
 	if err != nil {
-		log.Printf("[archive] Failed to send archive request: %v", err)
+		log.Printf("[archive] Failed to send protect request: %v", err)
 		return
 	}
-	defer archiveResp.Body.Close()
+	defer protectResp.Body.Close()
 
-	if archiveResp.StatusCode >= 200 && archiveResp.StatusCode < 300 {
-		log.Printf("[archive] Archive request accepted for incident %s (%d cameras, %s to %s)",
-			incidentID, len(streamKeys), archiveFrom.Format(time.RFC3339), archiveTo.Format(time.RFC3339))
+	if protectResp.StatusCode >= 200 && protectResp.StatusCode < 300 {
+		log.Printf("[archive] Protect request accepted for incident %s (%d cameras)", incidentID, len(streamKeys))
 	} else {
-		body, _ := io.ReadAll(archiveResp.Body)
-		log.Printf("[archive] Archive request failed: status %d, body: %s", archiveResp.StatusCode, string(body))
+		body, _ := io.ReadAll(protectResp.Body)
+		log.Printf("[archive] Protect request failed: status %d, body: %s", protectResp.StatusCode, string(body))
 	}
 }
 
@@ -649,8 +643,8 @@ func handleNotify(cfg Config) http.HandlerFunc {
 			log.Printf("[notify] Dispatch complete: %d/%d contacts notified (kakao:%d sms:%d failed:%d)",
 				successCount, contactCount, channels["kakaotalk"], channels["sms"], contactCount-successCount)
 
-			// Request recording archive for this incident (all alerts including test)
-			requestArchive(cfg, alert)
+			// Request segment protection for this incident (Phase 1 of two-phase archiving)
+			requestArchiveProtect(cfg, alert)
 		}()
 
 		// Return immediately (accepted, processing async)

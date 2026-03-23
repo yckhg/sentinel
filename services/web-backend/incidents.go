@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type createIncidentRequest struct {
@@ -291,9 +295,9 @@ func handleResolveIncident(db *sql.DB) http.HandlerFunc {
 		ctx, cancel := dbCtx(r.Context())
 		defer cancel()
 
-		// Check incident exists
-		var status string
-		err = db.QueryRowContext(ctx, "SELECT status FROM incidents WHERE id = ?", id).Scan(&status)
+		// Check incident exists and fetch details for archive finalization
+		var status, siteID, occurredAt string
+		err = db.QueryRowContext(ctx, "SELECT status, site_id, datetime(occurred_at) FROM incidents WHERE id = ?", id).Scan(&status, &siteID, &occurredAt)
 		if err == sql.ErrNoRows {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "incident not found"})
 			return
@@ -329,8 +333,67 @@ func handleResolveIncident(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// Fetch resolved_at timestamp for archive finalization
+		var resolvedAt string
+		db.QueryRowContext(ctx, "SELECT datetime(resolved_at) FROM incidents WHERE id = ?", id).Scan(&resolvedAt)
+
+		// Trigger archive finalization asynchronously (Phase 2 of two-phase archiving)
+		go requestArchiveFinalize(siteID, occurredAt, resolvedAt)
+
 		log.Printf("incident %d resolved by %s: %s", id, username, req.ResolutionNotes)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
+	}
+}
+
+// requestArchiveFinalize calls the recording service to finalize archives for a resolved incident.
+func requestArchiveFinalize(siteID, occurredAt, resolvedAt string) {
+	if recordingURL == "" {
+		return
+	}
+
+	// Reconstruct the archive incidentID (same format as notifier)
+	incidentTime, err := time.Parse("2006-01-02 15:04:05", occurredAt)
+	if err != nil {
+		incidentTime, err = time.Parse(time.RFC3339, occurredAt)
+		if err != nil {
+			log.Printf("[archive-finalize] Cannot parse occurredAt %q: %v", occurredAt, err)
+			return
+		}
+	}
+	incidentID := fmt.Sprintf("incident_%s_%s", siteID, incidentTime.UTC().Format("20060102_150405"))
+
+	// Parse resolvedAt for the finalize request
+	resolvedTime, err := time.Parse("2006-01-02 15:04:05", resolvedAt)
+	if err != nil {
+		resolvedTime, err = time.Parse(time.RFC3339, resolvedAt)
+		if err != nil {
+			log.Printf("[archive-finalize] Cannot parse resolvedAt %q: %v", resolvedAt, err)
+			return
+		}
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"incidentId": incidentID,
+		"resolvedAt": resolvedTime.UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		log.Printf("[archive-finalize] Failed to marshal request: %v", err)
+		return
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Post(recordingURL+"/api/archives/finalize", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("[archive-finalize] Failed to call recording service: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		log.Printf("[archive-finalize] Finalize request accepted for incident %s", incidentID)
+	} else {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("[archive-finalize] Finalize request failed: status %d, body: %s", resp.StatusCode, string(body))
 	}
 }
 

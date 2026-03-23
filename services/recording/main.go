@@ -582,16 +582,17 @@ func (rm *RecordingManager) GeneratePlaylist(streamKey string, from, to time.Tim
 
 // ArchiveMetadata stores information about an archived clip.
 type ArchiveMetadata struct {
-	ID         string `json:"id"`
-	IncidentID string `json:"incidentId"`
-	StreamKey  string `json:"streamKey"`
-	From       string `json:"from"`
-	To         string `json:"to"`
-	CreatedAt  string `json:"createdAt"`
-	SizeBytes  int64  `json:"sizeBytes"`
-	FilePath   string `json:"filePath"`
-	Status     string `json:"status"` // pending, processing, completed, failed
-	Error      string `json:"error,omitempty"`
+	ID           string `json:"id"`
+	IncidentID   string `json:"incidentId"`
+	StreamKey    string `json:"streamKey"`
+	From         string `json:"from"`
+	To           string `json:"to"`
+	CreatedAt    string `json:"createdAt"`
+	SizeBytes    int64  `json:"sizeBytes"`
+	FilePath     string `json:"filePath"`
+	Status       string `json:"status"` // protecting, pending, processing, completed, failed
+	Error        string `json:"error,omitempty"`
+	IncidentTime string `json:"incidentTime,omitempty"` // original incident timestamp for auto-finalize
 }
 
 // ArchiveManager manages archive creation and metadata.
@@ -890,6 +891,179 @@ func (am *ArchiveManager) DeleteIncidentArchives(incidentID string) (int, error)
 	return len(toDelete), nil
 }
 
+// ProtectIncidentSegments marks segments from (incidentTime - 1h) to now as protected for all stream keys.
+// Creates archive entries with status "protecting" — segments won't be cleaned up until finalized.
+func (am *ArchiveManager) ProtectIncidentSegments(incidentID string, streamKeys []string, incidentTime time.Time) []ArchiveMetadata {
+	protectFrom := incidentTime.Add(-1 * time.Hour)
+	now := time.Now().UTC()
+
+	var created []ArchiveMetadata
+	for _, streamKey := range streamKeys {
+		archiveID := fmt.Sprintf("%s_%s_%s", incidentID, streamKey, protectFrom.UTC().Format("20060102_150405"))
+
+		// Check for duplicate
+		am.mu.RLock()
+		exists := false
+		for _, a := range am.archives {
+			if a.ID == archiveID {
+				exists = true
+				created = append(created, a)
+				break
+			}
+		}
+		am.mu.RUnlock()
+		if exists {
+			continue
+		}
+
+		meta := ArchiveMetadata{
+			ID:           archiveID,
+			IncidentID:   incidentID,
+			StreamKey:    streamKey,
+			From:         protectFrom.UTC().Format(time.RFC3339),
+			To:           now.Format(time.RFC3339), // placeholder, will be updated on finalize
+			CreatedAt:    now.Format(time.RFC3339),
+			Status:       "protecting",
+			IncidentTime: incidentTime.UTC().Format(time.RFC3339),
+		}
+
+		am.mu.Lock()
+		am.archives = append(am.archives, meta)
+		am.saveMetadata()
+		am.mu.Unlock()
+
+		// Protect existing segments from cleanup
+		am.protectSegmentsInRange(streamKey, protectFrom, now)
+
+		created = append(created, meta)
+		log.Printf("[archive] Protecting segments for %s/%s from %s", incidentID, streamKey, protectFrom.Format(time.RFC3339))
+	}
+
+	return created
+}
+
+// protectSegmentsInRange marks all segments in the given time range as protected.
+func (am *ArchiveManager) protectSegmentsInRange(streamKey string, from, to time.Time) {
+	streamDir := filepath.Join(am.recordingsDir, streamKey)
+	files, err := os.ReadDir(streamDir)
+	if err != nil {
+		return
+	}
+	const segDuration = 10 * time.Second
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".ts") {
+			continue
+		}
+		name := strings.TrimSuffix(f.Name(), ".ts")
+		t, err := time.Parse("20060102_150405", name)
+		if err != nil {
+			continue
+		}
+		segEnd := t.Add(segDuration)
+		if segEnd.After(from) && t.Before(to) {
+			fullPath := filepath.Join(streamDir, f.Name())
+			am.recManager.ProtectSegment(fullPath)
+		}
+	}
+}
+
+// RefreshProtection re-protects segments for all "protecting" archives.
+// Called periodically so new segments written after the initial protect call are also protected.
+func (am *ArchiveManager) RefreshProtection() {
+	am.mu.RLock()
+	var protecting []ArchiveMetadata
+	for _, a := range am.archives {
+		if a.Status == "protecting" {
+			protecting = append(protecting, a)
+		}
+	}
+	am.mu.RUnlock()
+
+	for _, a := range protecting {
+		fromTime, _ := time.Parse(time.RFC3339, a.From)
+		if fromTime.IsZero() {
+			continue
+		}
+		// Protect from original start up to now (segments keep arriving)
+		am.protectSegmentsInRange(a.StreamKey, fromTime, time.Now().UTC())
+	}
+}
+
+// FinalizeIncidentArchives finalizes all "protecting" archives for an incident.
+// Merges segments from original From to resolvedAt + 30min into MP4.
+func (am *ArchiveManager) FinalizeIncidentArchives(incidentID string, resolvedAt time.Time) (int, error) {
+	am.mu.RLock()
+	var toFinalize []ArchiveMetadata
+	for _, a := range am.archives {
+		if a.IncidentID == incidentID && a.Status == "protecting" {
+			toFinalize = append(toFinalize, a)
+		}
+	}
+	am.mu.RUnlock()
+
+	if len(toFinalize) == 0 {
+		return 0, fmt.Errorf("no protecting archives found for incident: %s", incidentID)
+	}
+
+	finalizeTo := resolvedAt.Add(30 * time.Minute)
+
+	for _, a := range toFinalize {
+		fromTime, _ := time.Parse(time.RFC3339, a.From)
+		if fromTime.IsZero() {
+			continue
+		}
+
+		// Update the To time and status
+		am.mu.Lock()
+		for i, ar := range am.archives {
+			if ar.ID == a.ID {
+				am.archives[i].To = finalizeTo.UTC().Format(time.RFC3339)
+				am.archives[i].Status = "finalizing"
+				break
+			}
+		}
+		am.saveMetadata()
+		am.mu.Unlock()
+
+		// Process archive in background (same as CreateArchive but with updated range)
+		go am.processArchive(a.ID, a.StreamKey, fromTime, finalizeTo)
+	}
+
+	log.Printf("[archive] Finalizing %d archive(s) for incident %s (to=%s)", len(toFinalize), incidentID, finalizeTo.Format(time.RFC3339))
+	return len(toFinalize), nil
+}
+
+// AutoFinalizeExpired checks for "protecting" archives older than maxAge and auto-finalizes them.
+func (am *ArchiveManager) AutoFinalizeExpired(maxAge time.Duration) {
+	am.mu.RLock()
+	var expired []ArchiveMetadata
+	now := time.Now().UTC()
+	for _, a := range am.archives {
+		if a.Status != "protecting" {
+			continue
+		}
+		incidentTime, err := time.Parse(time.RFC3339, a.IncidentTime)
+		if err != nil {
+			continue
+		}
+		if now.Sub(incidentTime) > maxAge {
+			expired = append(expired, a)
+		}
+	}
+	am.mu.RUnlock()
+
+	// Group by incidentID to finalize once per incident
+	seen := map[string]bool{}
+	for _, a := range expired {
+		if seen[a.IncidentID] {
+			continue
+		}
+		seen[a.IncidentID] = true
+		log.Printf("[archive] Auto-finalizing expired incident %s (age > %v)", a.IncidentID, maxAge)
+		am.FinalizeIncidentArchives(a.IncidentID, now)
+	}
+}
+
 func (am *ArchiveManager) unprotectSegments(streamKey string, from, to time.Time) {
 	streamDir := filepath.Join(am.recordingsDir, streamKey)
 	files, _ := os.ReadDir(streamDir)
@@ -1047,6 +1221,18 @@ func main() {
 		defer ticker.Stop()
 		for range ticker.C {
 			manager.CleanupOldSegments(rollingWindow)
+		}
+	}()
+
+	// Start protection refresh + auto-finalize goroutine
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			// Re-protect new segments for active incidents
+			archiveManager.RefreshProtection()
+			// Auto-finalize incidents protecting for > 2 hours
+			archiveManager.AutoFinalizeExpired(2 * time.Hour)
 		}
 	}()
 
@@ -1236,6 +1422,91 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]any{
 			"status":   "accepted",
 			"archives": created,
+		})
+	})
+
+	// POST /api/archives/protect — Phase 1: protect segments for an incident
+	mux.HandleFunc("POST /api/archives/protect", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			IncidentID   string   `json:"incidentId"`
+			StreamKeys   []string `json:"streamKeys"`
+			IncidentTime string   `json:"incidentTime"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON"})
+			return
+		}
+		if req.IncidentID == "" || len(req.StreamKeys) == 0 || req.IncidentTime == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "incidentId, streamKeys, and incidentTime are required"})
+			return
+		}
+
+		incidentTime, err := time.Parse(time.RFC3339, req.IncidentTime)
+		if err != nil {
+			incidentTime, err = time.Parse("2006-01-02 15:04:05", req.IncidentTime)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid incidentTime format"})
+				return
+			}
+		}
+
+		created := archiveManager.ProtectIncidentSegments(req.IncidentID, req.StreamKeys, incidentTime)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":   "protecting",
+			"archives": created,
+		})
+	})
+
+	// POST /api/archives/finalize — Phase 2: finalize archives for an incident
+	mux.HandleFunc("POST /api/archives/finalize", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			IncidentID string `json:"incidentId"`
+			ResolvedAt string `json:"resolvedAt"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON"})
+			return
+		}
+		if req.IncidentID == "" || req.ResolvedAt == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "incidentId and resolvedAt are required"})
+			return
+		}
+
+		resolvedAt, err := time.Parse(time.RFC3339, req.ResolvedAt)
+		if err != nil {
+			resolvedAt, err = time.Parse("2006-01-02 15:04:05", req.ResolvedAt)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid resolvedAt format"})
+				return
+			}
+		}
+
+		count, err := archiveManager.FinalizeIncidentArchives(req.IncidentID, resolvedAt)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"status": "finalizing",
+			"count":  count,
 		})
 	})
 
