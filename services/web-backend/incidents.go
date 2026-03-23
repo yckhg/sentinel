@@ -147,7 +147,7 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Fetch page
-		dataQuery := "SELECT id, site_id, description, datetime(occurred_at), confirmed_at, confirmed_by, is_test FROM incidents " +
+		dataQuery := "SELECT id, site_id, description, datetime(occurred_at), confirmed_at, confirmed_by, is_test, status, resolved_at, resolved_by, resolution_notes FROM incidents " +
 			whereClause + " ORDER BY datetime(occurred_at) DESC LIMIT ? OFFSET ?"
 		dataArgs := append(args, limit, offset)
 		rows, err := db.QueryContext(ctx, dataQuery, dataArgs...)
@@ -159,20 +159,24 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 		defer rows.Close()
 
 		type incidentRow struct {
-			ID          int64   `json:"id"`
-			SiteID      string  `json:"siteId"`
-			Description string  `json:"description"`
-			OccurredAt  string  `json:"occurredAt"`
-			ConfirmedAt *string `json:"confirmedAt"`
-			ConfirmedBy *string `json:"confirmedBy"`
-			IsTest      bool    `json:"isTest"`
+			ID              int64   `json:"id"`
+			SiteID          string  `json:"siteId"`
+			Description     string  `json:"description"`
+			OccurredAt      string  `json:"occurredAt"`
+			ConfirmedAt     *string `json:"confirmedAt"`
+			ConfirmedBy     *string `json:"confirmedBy"`
+			IsTest          bool    `json:"isTest"`
+			Status          string  `json:"status"`
+			ResolvedAt      *string `json:"resolvedAt"`
+			ResolvedBy      *string `json:"resolvedBy"`
+			ResolutionNotes *string `json:"resolutionNotes"`
 		}
 
 		incidents := []incidentRow{}
 		for rows.Next() {
 			var inc incidentRow
 			var isTest int
-			if err := rows.Scan(&inc.ID, &inc.SiteID, &inc.Description, &inc.OccurredAt, &inc.ConfirmedAt, &inc.ConfirmedBy, &isTest); err != nil {
+			if err := rows.Scan(&inc.ID, &inc.SiteID, &inc.Description, &inc.OccurredAt, &inc.ConfirmedAt, &inc.ConfirmedBy, &isTest, &inc.Status, &inc.ResolvedAt, &inc.ResolvedBy, &inc.ResolutionNotes); err != nil {
 				log.Printf("scan incident error: %v", err)
 				continue
 			}

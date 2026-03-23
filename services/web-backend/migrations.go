@@ -143,6 +143,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS
 			INSERT OR IGNORE INTO system_settings (key, value) VALUES ('site_url', '');
 		`,
 	},
+	{
+		version: 11,
+		name:    "add_incident_resolution_fields",
+		sql: `
+			ALTER TABLE incidents ADD COLUMN status TEXT NOT NULL DEFAULT 'open';
+			ALTER TABLE incidents ADD COLUMN resolved_at DATETIME;
+			ALTER TABLE incidents ADD COLUMN resolved_by TEXT;
+			ALTER TABLE incidents ADD COLUMN resolution_notes TEXT;
+		`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {
