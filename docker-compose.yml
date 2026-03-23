@@ -118,6 +118,36 @@ services:
       - sentinel-net
     # ports: internal only
 
+  recording:
+    build: ./services/recording
+    container_name: sentinel-recording
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+    environment:
+      - STREAMING_RTMP_URL=rtmp://streaming:1935/live
+      - WEB_BACKEND_URL=http://web-backend:8080
+      - RECORDINGS_DIR=/recordings
+      - ROLLING_WINDOW_MINUTES=60
+      - FFMPEG_TIMEOUT=60
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - recordings-data:/recordings
+      - archives-data:/archives
+    depends_on:
+      - streaming
+      - web-backend
+    networks:
+      - sentinel-net
+    # ports: internal only
+
   web-backend:
     build: ./services/web-backend
     container_name: sentinel-web-backend
@@ -235,3 +265,5 @@ networks:
 
 volumes:
   db-data:
+  recordings-data:
+  archives-data:
