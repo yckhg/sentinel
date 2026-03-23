@@ -1049,6 +1049,21 @@ body {
   border-radius: 4px;
 }
 
+.incidents-card-badge.status-open {
+  background: #ffebee;
+  color: #c62828;
+}
+
+.incidents-card-badge.status-acknowledged {
+  background: #fff3e0;
+  color: #e65100;
+}
+
+.incidents-card-badge.status-resolved {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
 .incidents-card-badge.confirmed {
   background: #e8f5e9;
   color: #2e7d32;
@@ -1085,6 +1100,69 @@ body {
   display: flex;
   gap: 8px;
   margin-top: 6px;
+  font-size: 0.75rem;
+  color: #999;
+}
+
+.incidents-status-filter {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.incidents-status-btn {
+  flex: 1;
+  padding: 6px 0;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 0.8rem;
+  color: #666;
+  cursor: pointer;
+}
+
+.incidents-status-btn.active {
+  background: #1976d2;
+  color: #fff;
+  border-color: #1976d2;
+}
+
+.incidents-card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  justify-content: flex-end;
+}
+
+.incidents-action-btn {
+  font-size: 0.8rem !important;
+  padding: 4px 12px !important;
+}
+
+.incidents-card-resolution {
+  margin-top: 8px;
+  padding: 8px;
+  background: #f5f5f5;
+  border-radius: 6px;
+  font-size: 0.8rem;
+}
+
+.incidents-card-resolution-header {
+  font-weight: 600;
+  color: #2e7d32;
+  margin-bottom: 4px;
+}
+
+.incidents-card-resolution-notes {
+  color: #333;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.incidents-card-resolution-meta {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
   font-size: 0.75rem;
   color: #999;
 }

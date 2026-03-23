@@ -119,6 +119,7 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 		// Date filters
 		from := r.URL.Query().Get("from")
 		to := r.URL.Query().Get("to")
+		statusFilter := r.URL.Query().Get("status")
 
 		// Build query with optional date filters using parameterized builder
 		conditions := []string{"1=1"}
@@ -130,6 +131,10 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 		if to != "" {
 			conditions = append(conditions, "occurred_at <= ?")
 			args = append(args, to)
+		}
+		if statusFilter != "" {
+			conditions = append(conditions, "status = ?")
+			args = append(args, statusFilter)
 		}
 
 		whereClause := "WHERE " + strings.Join(conditions, " AND ")
