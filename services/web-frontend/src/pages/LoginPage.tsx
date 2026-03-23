@@ -19,6 +19,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
   const [mode, setMode] = useState<Mode>(inviteToken ? "register" : "login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -76,9 +77,13 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
       setError("비밀번호는 8자 이상이어야 합니다");
       return;
     }
+    if (password !== confirmPassword) {
+      setError("비밀번호가 일치하지 않습니다");
+      return;
+    }
     setLoading(true);
     try {
-      const registerBody: Record<string, string> = { username, password, name };
+      const registerBody: Record<string, string> = { username, password, confirmPassword, name };
       if (inviteToken) registerBody.inviteToken = inviteToken;
       const res = await fetchWithTimeout("/auth/register", {
         method: "POST",
@@ -105,6 +110,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
       }
       setUsername("");
       setPassword("");
+      setConfirmPassword("");
       setName("");
     } catch (err) {
       setError(isTimeoutError(err) ? timeoutMessage() : "서버에 연결할 수 없습니다");
@@ -174,6 +180,22 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           </div>
           {mode === "register" && (
             <div className="mgmt-form-field">
+              <label>비밀번호 확인</label>
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="비밀번호를 다시 입력하세요"
+                required
+                autoComplete="new-password"
+              />
+              {confirmPassword && password !== confirmPassword && (
+                <span className="login-field-error">비밀번호가 일치하지 않습니다</span>
+              )}
+            </div>
+          )}
+          {mode === "register" && (
+            <div className="mgmt-form-field">
               <label>이름</label>
               <input
                 type="text"
@@ -187,7 +209,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           <button
             type="submit"
             className="mgmt-btn mgmt-btn-primary login-submit"
-            disabled={loading}
+            disabled={loading || (mode === "register" && password !== confirmPassword)}
           >
             {loading
               ? "처리 중..."

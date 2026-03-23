@@ -80,10 +80,11 @@ type AuthUser struct {
 // --- Request/Response types ---
 
 type registerRequest struct {
-	Username    string `json:"username"`
-	Password    string `json:"password"`
-	Name        string `json:"name"`
-	InviteToken string `json:"inviteToken"`
+	Username        string `json:"username"`
+	Password        string `json:"password"`
+	ConfirmPassword string `json:"confirmPassword"`
+	Name            string `json:"name"`
+	InviteToken     string `json:"inviteToken"`
 }
 
 type registerResponse struct {
@@ -133,6 +134,10 @@ func handleRegister(db *sql.DB) http.HandlerFunc {
 		}
 		if len(req.Password) < 8 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "password must be at least 8 characters"})
+			return
+		}
+		if req.Password != req.ConfirmPassword {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "비밀번호가 일치하지 않습니다"})
 			return
 		}
 		if req.Name == "" {

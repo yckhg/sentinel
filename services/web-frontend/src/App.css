@@ -1100,6 +1100,13 @@ body {
   margin-bottom: 12px;
 }
 
+.login-field-error {
+  color: #d32f2f;
+  font-size: 0.75rem;
+  margin-top: 4px;
+  display: block;
+}
+
 .login-success {
   background: #e8f5e9;
   color: #2e7d32;
