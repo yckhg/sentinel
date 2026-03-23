@@ -234,6 +234,8 @@ export default function ManagementPage() {
   const [archivesLoading, setArchivesLoading] = useState(true);
   const [archiveDeleteTarget, setArchiveDeleteTarget] = useState<Archive | null>(null);
   const [archiveDeleteLoading, setArchiveDeleteLoading] = useState(false);
+  const [incidentDeleteTarget, setIncidentDeleteTarget] = useState<string | null>(null);
+  const [incidentDeleteLoading, setIncidentDeleteLoading] = useState(false);
 
   const fetchContacts = async () => {
     try {
@@ -523,6 +525,24 @@ export default function ManagementPage() {
       setArchiveDeleteTarget(null);
     } finally {
       setArchiveDeleteLoading(false);
+    }
+  };
+
+  const handleIncidentArchiveDelete = async () => {
+    if (!incidentDeleteTarget) return;
+    setIncidentDeleteLoading(true);
+    try {
+      const res = await fetchWithTimeout(`/api/archives/incident/${encodeURIComponent(incidentDeleteTarget)}`, {
+        method: "DELETE",
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`);
+      setIncidentDeleteTarget(null);
+      await Promise.all([fetchArchives(), fetchStorage()]);
+    } catch {
+      setIncidentDeleteTarget(null);
+    } finally {
+      setIncidentDeleteLoading(false);
     }
   };
 
@@ -1660,51 +1680,93 @@ export default function ManagementPage() {
             </div>
           )}
 
-          {/* Archive list */}
+          {/* Archive list — grouped by incident */}
           <h3 className="mgmt-sub-header">보관 영상 목록</h3>
           {archivesLoading ? (
             <p className="mgmt-loading">로딩 중...</p>
           ) : archives.length === 0 ? (
             <p className="mgmt-empty">보관된 영상이 없습니다</p>
-          ) : (
-            <div className="mgmt-list">
-              {archives.map((archive) => (
-                <div key={archive.id} className="mgmt-card">
-                  <div className="mgmt-card-info">
-                    <span className="mgmt-card-name">
-                      {archive.streamKey}
-                      <span className={`mgmt-badge-archive mgmt-badge-archive-${archive.status}`}>
-                        {archive.status === "completed" ? "완료" : archive.status === "processing" ? "처리중" : archive.status === "pending" ? "대기" : "실패"}
-                      </span>
-                    </span>
-                    <span className="mgmt-card-phone">
-                      {new Date(archive.from).toLocaleString("ko-KR")} ~ {new Date(archive.to).toLocaleString("ko-KR")}
-                    </span>
-                    <span className="mgmt-card-phone">
-                      {archive.sizeBytes > 0 ? formatBytes(archive.sizeBytes) : "-"} | {archive.incidentId}
-                    </span>
-                  </div>
-                  <div className="mgmt-card-actions">
-                    {archive.status === "completed" && (
-                      <a
-                        href={`/api/archives/${archive.id}/download`}
-                        className="mgmt-btn mgmt-btn-small"
-                        download
-                      >
-                        다운로드
-                      </a>
-                    )}
-                    <button
-                      className="mgmt-btn mgmt-btn-small mgmt-btn-danger"
-                      onClick={() => setArchiveDeleteTarget(archive)}
-                    >
-                      삭제
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+          ) : (() => {
+            // Group archives by incidentId
+            const grouped = archives.reduce<Record<string, Archive[]>>((acc, a) => {
+              const key = a.incidentId || "unknown";
+              if (!acc[key]) acc[key] = [];
+              acc[key].push(a);
+              return acc;
+            }, {});
+            const incidentIds = Object.keys(grouped).sort((a, b) => {
+              // Sort by earliest createdAt descending
+              const aTime = (grouped[a] ?? [])[0]?.createdAt ?? "";
+              const bTime = (grouped[b] ?? [])[0]?.createdAt ?? "";
+              return bTime.localeCompare(aTime);
+            });
+            return (
+              <div className="mgmt-list">
+                {incidentIds.map((incidentId) => {
+                  const group = grouped[incidentId] ?? [];
+                  const totalSize = group.reduce((sum, a) => sum + (a.sizeBytes || 0), 0);
+                  const allCompleted = group.every((a) => a.status === "completed");
+                  const anyProcessing = group.some((a) => a.status === "processing" || a.status === "pending");
+                  const firstArchive = group[0];
+                  return (
+                    <div key={incidentId} className="mgmt-card mgmt-card-incident-group">
+                      <div className="mgmt-card-info">
+                        <span className="mgmt-card-name">
+                          {incidentId}
+                          <span className={`mgmt-badge-archive mgmt-badge-archive-${allCompleted ? "completed" : anyProcessing ? "processing" : "failed"}`}>
+                            {allCompleted ? "완료" : anyProcessing ? "처리중" : "실패"}
+                          </span>
+                          <span className="mgmt-badge-archive-count">{group.length}개 카메라</span>
+                        </span>
+                        {firstArchive && (
+                          <span className="mgmt-card-phone">
+                            {new Date(firstArchive.from).toLocaleString("ko-KR")} ~ {new Date(firstArchive.to).toLocaleString("ko-KR")}
+                          </span>
+                        )}
+                        <span className="mgmt-card-phone">
+                          합계: {totalSize > 0 ? formatBytes(totalSize) : "-"}
+                        </span>
+                      </div>
+                      <div className="mgmt-card-actions">
+                        <button
+                          className="mgmt-btn mgmt-btn-small mgmt-btn-danger"
+                          onClick={() => setIncidentDeleteTarget(incidentId)}
+                        >
+                          전체 삭제
+                        </button>
+                      </div>
+                      {/* Individual camera archives within the group */}
+                      <div className="mgmt-incident-archives">
+                        {group.map((archive) => (
+                          <div key={archive.id} className="mgmt-incident-archive-item">
+                            <span className="mgmt-incident-archive-key">{archive.streamKey}</span>
+                            <span className={`mgmt-badge-archive mgmt-badge-archive-${archive.status}`}>
+                              {archive.status === "completed"
+                                ? formatBytes(archive.sizeBytes)
+                                : archive.status === "processing"
+                                  ? "처리중"
+                                  : archive.status === "pending"
+                                    ? "대기"
+                                    : "실패"}
+                            </span>
+                            {archive.status === "completed" && (
+                              <a
+                                href={`/api/archives/${archive.id}/download`}
+                                className="mgmt-btn mgmt-btn-small"
+                                download
+                              >
+                                다운로드
+                              </a>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </>
       )}
 
@@ -1797,6 +1859,33 @@ export default function ManagementPage() {
               <button
                 className="mgmt-btn mgmt-btn-secondary"
                 onClick={() => setArchiveDeleteTarget(null)}
+              >
+                취소
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Incident archive delete confirmation dialog */}
+      {incidentDeleteTarget && (
+        <div className="mgmt-modal-overlay" onClick={() => setIncidentDeleteTarget(null)}>
+          <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+            <p className="mgmt-modal-text">
+              <strong>{incidentDeleteTarget}</strong> 사건의 모든 보관 영상을 삭제하시겠습니까?<br />
+              <small>해당 사건의 모든 카메라 영상이 삭제됩니다.</small>
+            </p>
+            <div className="mgmt-form-actions">
+              <button
+                className="mgmt-btn mgmt-btn-danger"
+                onClick={handleIncidentArchiveDelete}
+                disabled={incidentDeleteLoading}
+              >
+                {incidentDeleteLoading ? "삭제 중..." : "전체 삭제"}
+              </button>
+              <button
+                className="mgmt-btn mgmt-btn-secondary"
+                onClick={() => setIncidentDeleteTarget(null)}
               >
                 취소
               </button>

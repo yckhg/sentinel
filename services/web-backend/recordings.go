@@ -123,6 +123,39 @@ func handleArchivesProxy() http.HandlerFunc {
 	}
 }
 
+// handleArchiveIncidentDeleteProxy proxies incident-level archive delete requests to the recording service.
+func handleArchiveIncidentDeleteProxy() http.HandlerFunc {
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		targetURL := recordingURL + r.URL.Path
+
+		req, err := http.NewRequest(http.MethodDelete, targetURL, nil)
+		if err != nil {
+			log.Printf("archive incident delete proxy error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("archive incident delete proxy error: %v", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to reach recording service"})
+			return
+		}
+		defer resp.Body.Close()
+
+		for key, values := range resp.Header {
+			for _, v := range values {
+				w.Header().Add(key, v)
+			}
+		}
+
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}
+}
+
 // handleArchiveDownloadProxy proxies archive download requests to the recording service.
 func handleArchiveDownloadProxy() http.HandlerFunc {
 	client := &http.Client{Timeout: 120 * time.Second}

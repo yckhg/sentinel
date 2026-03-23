@@ -1710,3 +1710,43 @@ body {
 .mgmt-badge-archive-failed {
   background: #f44336;
 }
+.mgmt-badge-archive-count {
+  display: inline-block;
+  font-size: 0.65rem;
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 4px;
+  color: #fff;
+  background: #607d8b;
+  vertical-align: middle;
+}
+.mgmt-card-incident-group {
+  flex-direction: column;
+  align-items: stretch;
+}
+.mgmt-card-incident-group > .mgmt-card-info {
+  margin-bottom: 4px;
+}
+.mgmt-card-incident-group > .mgmt-card-actions {
+  align-self: flex-end;
+  margin-bottom: 6px;
+}
+.mgmt-incident-archives {
+  width: 100%;
+  border-top: 1px solid #333;
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mgmt-incident-archive-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 0.85rem;
+}
+.mgmt-incident-archive-key {
+  color: #aaa;
+  min-width: 80px;
+}

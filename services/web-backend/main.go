@@ -132,6 +132,7 @@ func main() {
 	// Archives (proxy to recording service)
 	apiMux.HandleFunc("GET /api/archives", handleArchivesProxy())
 	apiMux.HandleFunc("POST /api/archives", handleArchivesProxy())
+	apiMux.HandleFunc("DELETE /api/archives/incident/{incidentId}", handleArchiveIncidentDeleteProxy())
 	apiMux.HandleFunc("DELETE /api/archives/{id}", handleArchivesProxy())
 	apiMux.HandleFunc("GET /api/archives/{id}/download", handleArchiveDownloadProxy())
 

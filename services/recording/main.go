@@ -847,6 +847,49 @@ func (am *ArchiveManager) DeleteArchive(archiveID string) error {
 	return nil
 }
 
+// DeleteIncidentArchives removes ALL archives for a given incident ID.
+func (am *ArchiveManager) DeleteIncidentArchives(incidentID string) (int, error) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	var toDelete []int
+	for i, a := range am.archives {
+		if a.IncidentID == incidentID {
+			toDelete = append(toDelete, i)
+		}
+	}
+
+	if len(toDelete) == 0 {
+		return 0, fmt.Errorf("no archives found for incident: %s", incidentID)
+	}
+
+	// Delete in reverse order to maintain indices
+	for i := len(toDelete) - 1; i >= 0; i-- {
+		idx := toDelete[i]
+		archive := am.archives[idx]
+
+		// Remove the archive directory
+		archiveDir := filepath.Join(am.archivesDir, archive.ID)
+		os.RemoveAll(archiveDir)
+
+		// Unprotect segments
+		if archive.StreamKey != "" {
+			fromTime, _ := time.Parse(time.RFC3339, archive.From)
+			toTime, _ := time.Parse(time.RFC3339, archive.To)
+			if !fromTime.IsZero() && !toTime.IsZero() {
+				am.unprotectSegments(archive.StreamKey, fromTime, toTime)
+			}
+		}
+
+		// Remove from list
+		am.archives = append(am.archives[:idx], am.archives[idx+1:]...)
+	}
+
+	am.saveMetadata()
+	log.Printf("[archive] Deleted %d archive(s) for incident %s", len(toDelete), incidentID)
+	return len(toDelete), nil
+}
+
 func (am *ArchiveManager) unprotectSegments(streamKey string, from, to time.Time) {
 	streamDir := filepath.Join(am.recordingsDir, streamKey)
 	files, _ := os.ReadDir(streamDir)
@@ -1222,6 +1265,28 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	})
+
+	// DELETE /api/archives/incident/{incidentId} — delete all archives for an incident
+	mux.HandleFunc("DELETE /api/archives/incident/{incidentId}", func(w http.ResponseWriter, r *http.Request) {
+		incidentID := r.PathValue("incidentId")
+		if incidentID == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "incidentId is required"})
+			return
+		}
+
+		count, err := archiveManager.DeleteIncidentArchives(incidentID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"status": "deleted", "count": count})
 	})
 
 	// GET /api/archives/{id}/download — serve archive MP4 file

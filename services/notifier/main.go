@@ -649,10 +649,8 @@ func handleNotify(cfg Config) http.HandlerFunc {
 			log.Printf("[notify] Dispatch complete: %d/%d contacts notified (kakao:%d sms:%d failed:%d)",
 				successCount, contactCount, channels["kakaotalk"], channels["sms"], contactCount-successCount)
 
-			// Request recording archive for this incident (non-test alerts only)
-			if !alert.Test {
-				requestArchive(cfg, alert)
-			}
+			// Request recording archive for this incident (all alerts including test)
+			requestArchive(cfg, alert)
 		}()
 
 		// Return immediately (accepted, processing async)
