@@ -502,9 +502,9 @@ func main() {
 		// Filter to enabled RTSP cameras only and convert to CameraConfig
 		var rtspCameras []CameraConfig
 		for _, c := range cameras {
-			if c.SourceType == "rtsp" && c.Enabled && c.SourceURL != "" {
+			if c.SourceType == "rtsp" && c.Enabled && c.SourceURL != "" && c.StreamKey != "" {
 				rtspCameras = append(rtspCameras, CameraConfig{
-					CameraID: c.Name,
+					CameraID: c.StreamKey,
 					Name:     c.Name,
 					RtspURL:  c.SourceURL,
 				})
