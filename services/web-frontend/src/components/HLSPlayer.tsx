@@ -9,6 +9,7 @@ interface HLSPlayerProps {
   expanded: boolean;
   onToggleExpand: () => void;
   onRestart?: () => void;
+  playbackUrl?: string | null;
 }
 
 export default function HLSPlayer({
@@ -19,10 +20,14 @@ export default function HLSPlayer({
   expanded,
   onToggleExpand,
   onRestart,
+  playbackUrl,
 }: HLSPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const [error, setError] = useState(false);
+
+  const activeUrl = playbackUrl || url;
+  const isPlayback = !!playbackUrl;
 
   useEffect(() => {
     const video = videoRef.current;
@@ -34,19 +39,22 @@ export default function HLSPlayer({
       hlsRef.current = null;
     }
 
-    if (status === "disconnected") return;
+    if (status === "disconnected" && !isPlayback) return;
 
     setError(false);
 
     if (Hls.isSupported()) {
-      const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: true,
-        liveSyncDurationCount: 2,
-        liveMaxLatencyDurationCount: 4,
-      });
+      const hlsConfig = isPlayback
+        ? { enableWorker: true }
+        : {
+            enableWorker: true,
+            lowLatencyMode: true,
+            liveSyncDurationCount: 2,
+            liveMaxLatencyDurationCount: 4,
+          };
+      const hls = new Hls(hlsConfig);
       hlsRef.current = hls;
-      hls.loadSource(url);
+      hls.loadSource(activeUrl);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         video.play().catch(() => {
@@ -66,7 +74,7 @@ export default function HLSPlayer({
         hlsRef.current = null;
       };
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = url;
+      video.src = activeUrl;
       video.addEventListener("loadedmetadata", () => {
         video.play().catch(() => {});
       });
@@ -77,7 +85,7 @@ export default function HLSPlayer({
         video.src = "";
       };
     }
-  }, [url, status]);
+  }, [activeUrl, status, isPlayback]);
 
   const disconnected = status === "disconnected" || error;
 
@@ -97,6 +105,9 @@ export default function HLSPlayer({
         <span className="camera-name">{cameraName}</span>
         <span className="camera-zone">{zone}</span>
       </div>
+      {isPlayback && (
+        <div className="camera-playback-badge">녹화 재생</div>
+      )}
       {expanded && onRestart && (
         <button
           className="camera-restart-btn"

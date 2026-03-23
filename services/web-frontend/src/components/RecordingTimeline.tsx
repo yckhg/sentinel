@@ -19,14 +19,32 @@ interface ArchiveInfo {
   error?: string;
 }
 
+interface IncidentMarker {
+  id: number;
+  occurredAt: string;
+  description: string;
+  isTest: boolean;
+}
+
 interface RecordingTimelineProps {
   streamKey: string;
+  onPlaybackRequest: (url: string | null) => void;
+  isPlaying: boolean;
 }
 
 function formatTime(date: Date): string {
   return date.toLocaleTimeString("ko-KR", {
     hour: "2-digit",
     minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function formatTimeWithSec(date: Date): string {
+  return date.toLocaleTimeString("ko-KR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
     hour12: false,
   });
 }
@@ -45,7 +63,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export default function RecordingTimeline({ streamKey }: RecordingTimelineProps) {
+export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlaying }: RecordingTimelineProps) {
   const [timeRanges, setTimeRanges] = useState<TimeRange[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -56,6 +74,9 @@ export default function RecordingTimeline({ streamKey }: RecordingTimelineProps)
   const [dragging, setDragging] = useState<"start" | "end" | "range" | null>(null);
   const dragStartX = useRef(0);
   const dragStartVal = useRef({ start: 0, end: 0 });
+
+  // Playback cursor position (fraction)
+  const [playbackPosition, setPlaybackPosition] = useState<number | null>(null);
 
   // Archive state
   const [archiving, setArchiving] = useState(false);
@@ -69,6 +90,9 @@ export default function RecordingTimeline({ streamKey }: RecordingTimelineProps)
   // Archives list
   const [archives, setArchives] = useState<ArchiveInfo[]>([]);
   const [showArchives, setShowArchives] = useState(false);
+
+  // Incident markers
+  const [incidents, setIncidents] = useState<IncidentMarker[]>([]);
 
   // Timeline window: last 1 hour
   const windowEnd = useRef(new Date());
@@ -107,7 +131,6 @@ export default function RecordingTimeline({ streamKey }: RecordingTimelineProps)
       });
       if (res.ok) {
         const data: ArchiveInfo[] = await res.json();
-        // Filter to this stream key
         setArchives(data.filter((a) => a.streamKey === streamKey));
       }
     } catch {
@@ -115,10 +138,27 @@ export default function RecordingTimeline({ streamKey }: RecordingTimelineProps)
     }
   }, [streamKey, token]);
 
+  const fetchIncidents = useCallback(async () => {
+    try {
+      const from = windowStart.current.toISOString();
+      const to = windowEnd.current.toISOString();
+      const res = await fetchWithTimeout(`/api/incidents?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&limit=100`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setIncidents(data.incidents || []);
+      }
+    } catch {
+      // silent — incidents are optional decoration
+    }
+  }, [token]);
+
   useEffect(() => {
     fetchTimeRanges();
     fetchArchives();
-  }, [fetchTimeRanges, fetchArchives]);
+    fetchIncidents();
+  }, [fetchTimeRanges, fetchArchives, fetchIncidents]);
 
   // Convert fraction to absolute time
   const fractionToTime = (frac: number): Date => {
@@ -178,6 +218,35 @@ export default function RecordingTimeline({ streamKey }: RecordingTimelineProps)
     setDragging(null);
   };
 
+  // Click on timeline bar to seek to that position for playback
+  const handleTimelineClick = (e: React.MouseEvent) => {
+    if (dragging) return; // Don't seek while dragging handles
+    if (!timelineRef.current) return;
+
+    const rect = timelineRef.current.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const clickTime = fractionToTime(frac);
+
+    // Play from clicked time to end of available window (5 min block or end of recording)
+    const playEnd = new Date(Math.min(
+      clickTime.getTime() + 5 * 60 * 1000, // 5 minutes from click point
+      windowEnd.current.getTime()
+    ));
+
+    setPlaybackPosition(frac);
+
+    const from = clickTime.toISOString();
+    const to = playEnd.toISOString();
+    const playUrl = `/api/recordings/${streamKey}/play?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+    onPlaybackRequest(playUrl);
+  };
+
+  // Return to live
+  const handleGoLive = () => {
+    setPlaybackPosition(null);
+    onPlaybackRequest(null);
+  };
+
   // Archive the selected range
   const handleArchive = async () => {
     setArchiving(true);
@@ -208,7 +277,6 @@ export default function RecordingTimeline({ streamKey }: RecordingTimelineProps)
           message: `보관 요청 완료: ${formatTime(from)} ~ ${formatTime(to)} (${formatDuration(from, to)})`,
           archiveId: archive?.id,
         });
-        // Refresh archives list after a delay to let processing complete
         setTimeout(() => fetchArchives(), 3000);
       } else {
         const data = await res.json().catch(() => ({}));
@@ -240,10 +308,23 @@ export default function RecordingTimeline({ streamKey }: RecordingTimelineProps)
 
   return (
     <div className="rec-timeline-container" onClick={(e) => e.stopPropagation()}>
-      {/* Time labels */}
+      {/* Header with title and live button */}
       <div className="rec-timeline-labels">
         <span>{formatTime(windowStart.current)}</span>
-        <span className="rec-timeline-title">녹화 타임라인</span>
+        <span className="rec-timeline-title">
+          {isPlaying ? (
+            <>
+              녹화 재생 중
+              {playbackPosition !== null && (
+                <span className="rec-timeline-playback-time">
+                  {" "}({formatTimeWithSec(fractionToTime(playbackPosition))})
+                </span>
+              )}
+            </>
+          ) : (
+            "녹화 타임라인"
+          )}
+        </span>
         <span>{formatTime(windowEnd.current)}</span>
       </div>
 
@@ -251,6 +332,7 @@ export default function RecordingTimeline({ streamKey }: RecordingTimelineProps)
       <div
         className="rec-timeline-bar"
         ref={timelineRef}
+        onClick={handleTimelineClick}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerUp}
@@ -290,6 +372,28 @@ export default function RecordingTimeline({ streamKey }: RecordingTimelineProps)
             );
           })}
 
+        {/* Incident markers */}
+        {incidents.map((inc) => {
+          const frac = timeToFraction(new Date(inc.occurredAt));
+          if (frac <= 0 || frac >= 1) return null;
+          return (
+            <div
+              key={inc.id}
+              className={`rec-timeline-incident${inc.isTest ? " test" : ""}`}
+              style={{ left: `${frac * 100}%` }}
+              title={`${inc.isTest ? "[테스트] " : ""}${inc.description} (${formatTimeWithSec(new Date(inc.occurredAt))})`}
+            />
+          );
+        })}
+
+        {/* Playback cursor */}
+        {isPlaying && playbackPosition !== null && (
+          <div
+            className="rec-timeline-cursor"
+            style={{ left: `${playbackPosition * 100}%` }}
+          />
+        )}
+
         {/* Selection range */}
         <div
           className={`rec-timeline-selection${dragging === "range" ? " dragging" : ""}`}
@@ -315,18 +419,25 @@ export default function RecordingTimeline({ streamKey }: RecordingTimelineProps)
         />
       </div>
 
-      {/* Selection info and archive button */}
+      {/* Playback controls / selection info */}
       <div className="rec-timeline-actions">
         <span className="rec-timeline-range-info">
           {formatTime(selFromTime)} ~ {formatTime(selToTime)} ({formatDuration(selFromTime, selToTime)})
         </span>
-        <button
-          className="rec-timeline-archive-btn"
-          onClick={handleArchive}
-          disabled={archiving}
-        >
-          {archiving ? "보관 중..." : "보관"}
-        </button>
+        <div className="rec-timeline-action-btns">
+          {isPlaying && (
+            <button className="rec-timeline-live-btn" onClick={handleGoLive}>
+              라이브
+            </button>
+          )}
+          <button
+            className="rec-timeline-archive-btn"
+            onClick={handleArchive}
+            disabled={archiving}
+          >
+            {archiving ? "보관 중..." : "보관"}
+          </button>
+        </div>
       </div>
 
       {/* Archive result */}

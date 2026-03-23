@@ -23,6 +23,7 @@ export default function CCTVPage() {
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [restartCamera, setRestartCamera] = useState<Camera | null>(null);
+  const [playbackUrl, setPlaybackUrl] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -62,7 +63,20 @@ export default function CCTVPage() {
   }, []);
 
   const handleToggleExpand = (id: number) => {
-    setExpandedId((prev) => (prev === id ? null : id));
+    setExpandedId((prev) => {
+      if (prev === id) {
+        // Collapsing — return to live
+        setPlaybackUrl(null);
+        return null;
+      }
+      // Expanding a different camera — reset playback
+      setPlaybackUrl(null);
+      return id;
+    });
+  };
+
+  const handlePlaybackRequest = (url: string | null) => {
+    setPlaybackUrl(url);
   };
 
   const handleRestartClick = (cam: Camera) => {
@@ -113,12 +127,19 @@ export default function CCTVPage() {
             expanded={expandedId === cam.id}
             onToggleExpand={() => handleToggleExpand(cam.id)}
             onRestart={() => handleRestartClick(cam)}
+            playbackUrl={expandedId === cam.id ? playbackUrl : null}
           />
         ))}
       </div>
       {expandedId !== null && (() => {
         const cam = cameras.find((c) => c.id === expandedId);
-        return cam ? <RecordingTimeline streamKey={cam.streamKey} /> : null;
+        return cam ? (
+          <RecordingTimeline
+            streamKey={cam.streamKey}
+            onPlaybackRequest={handlePlaybackRequest}
+            isPlaying={!!playbackUrl}
+          />
+        ) : null;
       })()}
       {restartCamera && (
         <RestartDialog
