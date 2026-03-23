@@ -901,16 +901,30 @@ func (am *ArchiveManager) isSegmentInOtherArchive(segPath, excludeArchiveID stri
 	return false
 }
 
-// GetStorageStats returns disk usage info for recordings and archives.
+// GetStorageStats returns disk usage info for recordings and archives, plus filesystem stats.
 func (am *ArchiveManager) GetStorageStats() map[string]any {
 	recordingsSize := dirSize(am.recordingsDir)
 	archivesSize := dirSize(am.archivesDir)
-	return map[string]any{
+
+	stats := map[string]any{
 		"recordingsBytes": recordingsSize,
 		"archivesBytes":   archivesSize,
-		"totalBytes":      recordingsSize + archivesSize,
+		"totalUsedBytes":  recordingsSize + archivesSize,
 		"archiveCount":    len(am.archives),
 	}
+
+	// Get filesystem-level disk stats
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(am.recordingsDir, &stat); err == nil {
+		totalDisk := stat.Blocks * uint64(stat.Bsize)
+		freeDisk := stat.Bavail * uint64(stat.Bsize)
+		usedDisk := totalDisk - (stat.Bfree * uint64(stat.Bsize))
+		stats["diskTotalBytes"] = totalDisk
+		stats["diskUsedBytes"] = usedDisk
+		stats["diskAvailableBytes"] = freeDisk
+	}
+
+	return stats
 }
 
 func dirSize(path string) int64 {

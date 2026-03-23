@@ -93,6 +93,14 @@ function getAuthHeaders(): HeadersInit {
     : { "Content-Type": "application/json" };
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  const val = bytes / Math.pow(1024, i);
+  return `${val < 10 ? val.toFixed(1) : Math.round(val)} ${units[i]}`;
+}
+
 export default function ManagementPage() {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
@@ -189,6 +197,35 @@ export default function ManagementPage() {
   const [testAlertLoading, setTestAlertLoading] = useState(false);
   const [testAlertError, setTestAlertError] = useState<string | null>(null);
   const [testAlertSuccess, setTestAlertSuccess] = useState<string | null>(null);
+
+  // Storage & archives state
+  interface StorageStats {
+    recordingsBytes: number;
+    archivesBytes: number;
+    totalUsedBytes: number;
+    archiveCount: number;
+    diskTotalBytes?: number;
+    diskUsedBytes?: number;
+    diskAvailableBytes?: number;
+  }
+  interface Archive {
+    id: string;
+    incidentId: string;
+    streamKey: string;
+    from: string;
+    to: string;
+    createdAt: string;
+    sizeBytes: number;
+    status: string;
+    error?: string;
+  }
+  const [storageStats, setStorageStats] = useState<StorageStats | null>(null);
+  const [storageLoading, setStorageLoading] = useState(true);
+  const [storageError, setStorageError] = useState<string | null>(null);
+  const [archives, setArchives] = useState<Archive[]>([]);
+  const [archivesLoading, setArchivesLoading] = useState(true);
+  const [archiveDeleteTarget, setArchiveDeleteTarget] = useState<Archive | null>(null);
+  const [archiveDeleteLoading, setArchiveDeleteLoading] = useState(false);
 
   const fetchContacts = async () => {
     try {
@@ -385,6 +422,53 @@ export default function ManagementPage() {
       );
     } finally {
       setTestAlertLoading(false);
+    }
+  };
+
+  const fetchStorage = async () => {
+    try {
+      const res = await fetchWithTimeout("/api/storage", { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: StorageStats = await res.json();
+      setStorageStats(data);
+      setStorageError(null);
+    } catch (err) {
+      setStorageError(
+        isTimeoutError(err) ? timeoutMessage() : err instanceof Error ? err.message : "저장소 정보를 불러올 수 없습니다"
+      );
+    } finally {
+      setStorageLoading(false);
+    }
+  };
+
+  const fetchArchives = async () => {
+    try {
+      const res = await fetchWithTimeout("/api/archives", { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: Archive[] = await res.json();
+      setArchives(data || []);
+    } catch {
+      // non-critical
+    } finally {
+      setArchivesLoading(false);
+    }
+  };
+
+  const handleArchiveDelete = async () => {
+    if (!archiveDeleteTarget) return;
+    setArchiveDeleteLoading(true);
+    try {
+      const res = await fetchWithTimeout(`/api/archives/${archiveDeleteTarget.id}`, {
+        method: "DELETE",
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`);
+      setArchiveDeleteTarget(null);
+      await Promise.all([fetchArchives(), fetchStorage()]);
+    } catch {
+      setArchiveDeleteTarget(null);
+    } finally {
+      setArchiveDeleteLoading(false);
     }
   };
 
@@ -590,6 +674,8 @@ export default function ManagementPage() {
       fetchAccounts();
       fetchCameras();
       fetchInvitations();
+      fetchStorage();
+      fetchArchives();
     }
   }, []);
 
@@ -1403,6 +1489,113 @@ export default function ManagementPage() {
         </>
       )}
 
+      {/* Storage & Archives section (admin only) */}
+      {showAccounts && (
+        <>
+          <div className="mgmt-section-divider" />
+          <div className="mgmt-header">
+            <h2>저장소 관리</h2>
+          </div>
+
+          {storageLoading ? (
+            <p className="mgmt-loading">로딩 중...</p>
+          ) : storageError ? (
+            <p className="mgmt-error">{storageError}</p>
+          ) : storageStats && (
+            <div className="mgmt-storage-section">
+              {/* Disk usage bar */}
+              {storageStats.diskTotalBytes != null && storageStats.diskTotalBytes > 0 && (() => {
+                const pct = Math.round((storageStats.diskUsedBytes! / storageStats.diskTotalBytes!) * 100);
+                const isWarning = pct >= 80;
+                return (
+                  <div className="mgmt-storage-disk">
+                    <div className="mgmt-storage-disk-header">
+                      <span>디스크 사용량</span>
+                      <span className={isWarning ? "mgmt-storage-warning" : ""}>
+                        {pct}%{isWarning ? " (경고)" : ""}
+                      </span>
+                    </div>
+                    <div className="mgmt-storage-bar">
+                      <div
+                        className={`mgmt-storage-bar-fill${isWarning ? " mgmt-storage-bar-warning" : ""}`}
+                        style={{ width: `${Math.min(pct, 100)}%` }}
+                      />
+                    </div>
+                    <div className="mgmt-storage-disk-detail">
+                      <span>전체: {formatBytes(storageStats.diskTotalBytes!)}</span>
+                      <span>사용: {formatBytes(storageStats.diskUsedBytes!)}</span>
+                      <span>가용: {formatBytes(storageStats.diskAvailableBytes!)}</span>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Recording/Archive breakdown */}
+              <div className="mgmt-storage-breakdown">
+                <div className="mgmt-storage-item">
+                  <span className="mgmt-storage-label">녹화 데이터</span>
+                  <span className="mgmt-storage-value">{formatBytes(storageStats.recordingsBytes)}</span>
+                </div>
+                <div className="mgmt-storage-item">
+                  <span className="mgmt-storage-label">보관 영상</span>
+                  <span className="mgmt-storage-value">{formatBytes(storageStats.archivesBytes)}</span>
+                </div>
+                <div className="mgmt-storage-item">
+                  <span className="mgmt-storage-label">합계</span>
+                  <span className="mgmt-storage-value">{formatBytes(storageStats.totalUsedBytes)}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Archive list */}
+          <h3 className="mgmt-sub-header">보관 영상 목록</h3>
+          {archivesLoading ? (
+            <p className="mgmt-loading">로딩 중...</p>
+          ) : archives.length === 0 ? (
+            <p className="mgmt-empty">보관된 영상이 없습니다</p>
+          ) : (
+            <div className="mgmt-list">
+              {archives.map((archive) => (
+                <div key={archive.id} className="mgmt-card">
+                  <div className="mgmt-card-info">
+                    <span className="mgmt-card-name">
+                      {archive.streamKey}
+                      <span className={`mgmt-badge-archive mgmt-badge-archive-${archive.status}`}>
+                        {archive.status === "completed" ? "완료" : archive.status === "processing" ? "처리중" : archive.status === "pending" ? "대기" : "실패"}
+                      </span>
+                    </span>
+                    <span className="mgmt-card-phone">
+                      {new Date(archive.from).toLocaleString("ko-KR")} ~ {new Date(archive.to).toLocaleString("ko-KR")}
+                    </span>
+                    <span className="mgmt-card-phone">
+                      {archive.sizeBytes > 0 ? formatBytes(archive.sizeBytes) : "-"} | {archive.incidentId}
+                    </span>
+                  </div>
+                  <div className="mgmt-card-actions">
+                    {archive.status === "completed" && (
+                      <a
+                        href={`/api/archives/${archive.id}/download`}
+                        className="mgmt-btn mgmt-btn-small"
+                        download
+                      >
+                        다운로드
+                      </a>
+                    )}
+                    <button
+                      className="mgmt-btn mgmt-btn-small mgmt-btn-danger"
+                      onClick={() => setArchiveDeleteTarget(archive)}
+                    >
+                      삭제
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
       {/* Cancel invitation confirmation dialog */}
       {cancelInviteTarget && (
         <div className="mgmt-modal-overlay" onClick={() => setCancelInviteTarget(null)}>
@@ -1468,6 +1661,33 @@ export default function ManagementPage() {
                 {camDeleteLoading ? "삭제 중..." : "삭제"}
               </button>
               <button className="mgmt-btn mgmt-btn-secondary" onClick={() => setCamDeleteTarget(null)}>취소</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Archive delete confirmation dialog */}
+      {archiveDeleteTarget && (
+        <div className="mgmt-modal-overlay" onClick={() => setArchiveDeleteTarget(null)}>
+          <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+            <p className="mgmt-modal-text">
+              <strong>{archiveDeleteTarget.streamKey}</strong> 보관 영상을 삭제하시겠습니까?<br />
+              <small>{archiveDeleteTarget.sizeBytes > 0 ? formatBytes(archiveDeleteTarget.sizeBytes) : ""} 디스크 공간이 확보됩니다.</small>
+            </p>
+            <div className="mgmt-form-actions">
+              <button
+                className="mgmt-btn mgmt-btn-danger"
+                onClick={handleArchiveDelete}
+                disabled={archiveDeleteLoading}
+              >
+                {archiveDeleteLoading ? "삭제 중..." : "삭제"}
+              </button>
+              <button
+                className="mgmt-btn mgmt-btn-secondary"
+                onClick={() => setArchiveDeleteTarget(null)}
+              >
+                취소
+              </button>
             </div>
           </div>
         </div>

@@ -1526,3 +1526,102 @@ body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.8; }
 }
+
+/* Storage management */
+.mgmt-storage-section {
+  margin-bottom: 16px;
+}
+
+.mgmt-storage-disk {
+  margin-bottom: 16px;
+}
+
+.mgmt-storage-disk-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.mgmt-storage-warning {
+  color: #e65100;
+  font-weight: 700;
+}
+
+.mgmt-storage-bar {
+  width: 100%;
+  height: 12px;
+  background: #e0e0e0;
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.mgmt-storage-bar-fill {
+  height: 100%;
+  background: #4caf50;
+  border-radius: 6px;
+  transition: width 0.3s;
+}
+
+.mgmt-storage-bar-warning {
+  background: #e65100;
+}
+
+.mgmt-storage-disk-detail {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: #666;
+}
+
+.mgmt-storage-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: #f8f9fa;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.mgmt-storage-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+}
+
+.mgmt-storage-label {
+  color: #555;
+}
+
+.mgmt-storage-value {
+  font-weight: 600;
+}
+
+.mgmt-badge-archive {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  color: white;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.mgmt-badge-archive-completed {
+  background: #4caf50;
+}
+
+.mgmt-badge-archive-processing {
+  background: #ff9800;
+}
+
+.mgmt-badge-archive-pending {
+  background: #2196f3;
+}
+
+.mgmt-badge-archive-failed {
+  background: #f44336;
+}
