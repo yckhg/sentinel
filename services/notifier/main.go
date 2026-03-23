@@ -28,9 +28,11 @@ type AlertPayload struct {
 }
 
 type Contact struct {
-	ID    int    `json:"id"`
-	Name  string `json:"name"`
-	Phone string `json:"phone"`
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Phone       string `json:"phone"`
+	Email       string `json:"email"`
+	NotifyEmail bool   `json:"notifyEmail"`
 }
 
 type TempLinkResponse struct {
@@ -282,6 +284,39 @@ func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) e
 	return nil
 }
 
+// --- Crisis Email ---
+
+func sendCrisisEmail(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
+	if cfg.SMTPHost == "" || cfg.SMTPFrom == "" {
+		log.Printf("[email] SMTP not configured, skipping email for %s (%s)", contact.Name, contact.Email)
+		return fmt.Errorf("SMTP not configured")
+	}
+
+	subject := fmt.Sprintf("[위기알림] %s — %s", alert.Type, alert.Description)
+
+	body := fmt.Sprintf(`<html><body>
+<h2>위기 알림</h2>
+<p><strong>유형:</strong> %s</p>
+<p><strong>설명:</strong> %s</p>
+<p><strong>현장:</strong> %s</p>
+<p><strong>장비:</strong> %s</p>
+<p><strong>심각도:</strong> %s</p>
+<p><strong>시각:</strong> %s</p>`,
+		alert.Type, alert.Description, alert.SiteID, alert.DeviceID, alert.Severity, alert.Timestamp)
+
+	if cctvLink != "" {
+		body += fmt.Sprintf(`<p><strong>CCTV:</strong> <a href="%s">실시간 보기</a></p>`, cctvLink)
+	}
+	body += `</body></html>`
+
+	if err := sendEmail(cfg, contact.Email, subject, body); err != nil {
+		return fmt.Errorf("crisis email to %s: %w", contact.Email, err)
+	}
+
+	log.Printf("[email] Crisis alert sent to %s (%s)", contact.Name, contact.Email)
+	return nil
+}
+
 // --- System Alarm ---
 
 func sendSystemAlarm(cfg Config, contact Contact, alert AlertPayload, kakaoErr, smsErr error) {
@@ -352,10 +387,25 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 	}
 
 	// 3. Send to all contacts in parallel with fallback chain: KakaoTalk → SMS → Web alarm
+	//    Email is an independent channel — sent in parallel for contacts with notifyEmail=true
 	var wg sync.WaitGroup
 	results := make([]NotifyResult, len(contacts))
 
 	for i, contact := range contacts {
+		// Send email in parallel (independent channel, does not affect KakaoTalk/SMS)
+		if contact.NotifyEmail && contact.Email != "" {
+			wg.Add(1)
+			go func(c Contact) {
+				defer wg.Done()
+				if err := sendCrisisEmail(cfg, c, alert, cctvLink); err != nil {
+					log.Printf("[notify] Email FAILED for %s (%s): %v", c.Name, c.Email, err)
+				} else {
+					log.Printf("[notify] Email SUCCESS for %s (%s)", c.Name, c.Email)
+				}
+			}(contact)
+		}
+
+		// KakaoTalk → SMS → System alarm fallback chain
 		wg.Add(1)
 		go func(idx int, c Contact) {
 			defer wg.Done()
@@ -396,6 +446,18 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 	}
 
 	wg.Wait()
+
+	// Log email dispatch summary
+	emailCount := 0
+	for _, c := range contacts {
+		if c.NotifyEmail && c.Email != "" {
+			emailCount++
+		}
+	}
+	if emailCount > 0 {
+		log.Printf("[notify] Email dispatched to %d contacts", emailCount)
+	}
+
 	return len(contacts), results
 }
 
