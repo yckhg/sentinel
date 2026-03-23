@@ -142,6 +142,37 @@ var httpClient = &http.Client{
 	},
 }
 
+// --- Settings Fetching ---
+
+// fetchSiteURL reads site_url from web-backend's internal settings API.
+// Falls back to cfg.FrontendURL if the setting is empty or the request fails.
+func fetchSiteURL(cfg Config) string {
+	resp, err := httpClient.Get(cfg.WebBackendURL + "/internal/settings/site_url")
+	if err != nil {
+		log.Printf("[settings] Failed to fetch site_url: %v", err)
+		return strings.TrimRight(cfg.FrontendURL, "/")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[settings] site_url returned status %d", resp.StatusCode)
+		return strings.TrimRight(cfg.FrontendURL, "/")
+	}
+
+	var result struct {
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Printf("[settings] Failed to decode site_url response: %v", err)
+		return strings.TrimRight(cfg.FrontendURL, "/")
+	}
+
+	if result.Value == "" {
+		return strings.TrimRight(cfg.FrontendURL, "/")
+	}
+	return strings.TrimRight(result.Value, "/")
+}
+
 // --- Contact/Link Fetching ---
 
 func fetchContacts(cfg Config) ([]Contact, error) {
@@ -484,8 +515,9 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 	if err != nil {
 		log.Printf("[notify] Failed to get temp link (degraded mode): %v", err)
 	} else {
-		// Construct full URL pointing to /view/{token} on web-frontend
-		cctvLink = fmt.Sprintf("%s/view/%s", cfg.FrontendURL, tempLink.Token)
+		// Construct full URL using site_url from settings (falls back to FRONTEND_URL)
+		siteURL := fetchSiteURL(cfg)
+		cctvLink = fmt.Sprintf("%s/view/%s", siteURL, tempLink.Token)
 		log.Printf("[notify] Temp CCTV link created: %s (expires %s)", cctvLink, tempLink.ExpiresAt)
 	}
 

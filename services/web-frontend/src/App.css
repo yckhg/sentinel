@@ -416,6 +416,13 @@ body {
   margin-bottom: 8px;
 }
 
+.mgmt-form-hint {
+  display: block;
+  font-size: 0.7rem;
+  color: #999;
+  margin-top: 4px;
+}
+
 .mgmt-test-alert-section {
   padding: 12px 0;
 }

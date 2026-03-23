@@ -104,7 +104,7 @@ func handleCreateInvitation(db *sql.DB) http.HandlerFunc {
 		log.Printf("invitation created: id=%d email=%s by user=%d", id, req.Email, user.UserID)
 
 		// Send invitation email via notifier (async)
-		go sendInvitationEmail(req.Email, token)
+		go sendInvitationEmail(db, req.Email, token)
 
 		writeJSON(w, http.StatusCreated, invitationResponse{
 			ID:        id,
@@ -117,9 +117,9 @@ func handleCreateInvitation(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func sendInvitationEmail(email, token string) {
-	frontendURL := getFrontendURL()
-	registerURL := fmt.Sprintf("%s/register?invite=%s", frontendURL, token)
+func sendInvitationEmail(db *sql.DB, email, token string) {
+	siteURL := getSiteURL(db)
+	registerURL := fmt.Sprintf("%s/register?invite=%s", siteURL, token)
 
 	body := fmt.Sprintf(`<html><body>
 <h2>Sentinel — 초대장</h2>

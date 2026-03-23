@@ -198,6 +198,14 @@ export default function ManagementPage() {
   const [testAlertError, setTestAlertError] = useState<string | null>(null);
   const [testAlertSuccess, setTestAlertSuccess] = useState<string | null>(null);
 
+  // System settings state
+  const [siteUrl, setSiteUrl] = useState("");
+  const [siteUrlOriginal, setSiteUrlOriginal] = useState("");
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsSuccess, setSettingsSuccess] = useState<string | null>(null);
+
   // Storage & archives state
   interface StorageStats {
     recordingsBytes: number;
@@ -454,6 +462,52 @@ export default function ManagementPage() {
     }
   };
 
+  const fetchSettings = async () => {
+    try {
+      const res = await fetchWithTimeout("/api/settings", { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: { key: string; value: string }[] = await res.json();
+      const siteUrlSetting = data.find((s) => s.key === "site_url");
+      const val = siteUrlSetting?.value || "";
+      setSiteUrl(val);
+      setSiteUrlOriginal(val);
+      setSettingsError(null);
+    } catch (err) {
+      setSettingsError(
+        isTimeoutError(err)
+          ? timeoutMessage()
+          : err instanceof Error ? err.message : "설정을 불러올 수 없습니다"
+      );
+    } finally {
+      setSettingsLoading(false);
+    }
+  };
+
+  const handleSaveSettings = async () => {
+    setSettingsSaving(true);
+    setSettingsError(null);
+    setSettingsSuccess(null);
+    try {
+      const res = await fetchWithTimeout("/api/settings/site_url", {
+        method: "PUT",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ value: siteUrl.trim() }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      setSiteUrlOriginal(siteUrl.trim());
+      setSiteUrl(siteUrl.trim());
+      setSettingsSuccess("저장되었습니다");
+      setTimeout(() => setSettingsSuccess(null), 3000);
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : "저장에 실패했습니다");
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
   const handleArchiveDelete = async () => {
     if (!archiveDeleteTarget) return;
     setArchiveDeleteLoading(true);
@@ -676,6 +730,7 @@ export default function ManagementPage() {
       fetchInvitations();
       fetchStorage();
       fetchArchives();
+      fetchSettings();
     }
   }, []);
 
@@ -936,6 +991,63 @@ export default function ManagementPage() {
       )}
 
       <div className="mgmt-section-divider" />
+
+      {/* System settings section (admin only) */}
+      {showAccounts && (
+        <>
+          <div className="mgmt-header">
+            <h2>시스템 설정</h2>
+          </div>
+          {settingsLoading ? (
+            <p className="mgmt-loading">로딩 중...</p>
+          ) : settingsError ? (
+            <p className="mgmt-error">{settingsError}</p>
+          ) : (
+            <div className="mgmt-form">
+              <div className="mgmt-form-field">
+                <label>외부 접속 URL (SITE_URL)</label>
+                <input
+                  type="url"
+                  value={siteUrl}
+                  onChange={(e) => {
+                    setSiteUrl(e.target.value);
+                    setSettingsSuccess(null);
+                  }}
+                  placeholder="https://example.com:20006"
+                />
+                <span className="mgmt-form-hint">
+                  알림 메시지의 CCTV 링크에 사용됩니다. 비워두면 기본값을 사용합니다.
+                </span>
+              </div>
+              {settingsSuccess && (
+                <p className="mgmt-form-success">{settingsSuccess}</p>
+              )}
+              <div className="mgmt-form-actions">
+                <button
+                  className="mgmt-btn mgmt-btn-primary"
+                  onClick={handleSaveSettings}
+                  disabled={settingsSaving || siteUrl === siteUrlOriginal}
+                >
+                  {settingsSaving ? "저장 중..." : "저장"}
+                </button>
+                {siteUrl !== siteUrlOriginal && (
+                  <button
+                    className="mgmt-btn mgmt-btn-secondary"
+                    onClick={() => {
+                      setSiteUrl(siteUrlOriginal);
+                      setSettingsSuccess(null);
+                      setSettingsError(null);
+                    }}
+                  >
+                    취소
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+          <div className="mgmt-section-divider" />
+        </>
+      )}
 
       {/* Temp links section */}
       <div className="mgmt-header">

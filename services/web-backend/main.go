@@ -63,11 +63,14 @@ func main() {
 
 	// Internal service routes (no auth — accessed by other services via Docker network)
 	mux.HandleFunc("GET /api/contacts", handleListContacts(db))
-	mux.HandleFunc("POST /api/links/temp", handleCreateTempLink())
+	mux.HandleFunc("POST /api/links/temp", handleCreateTempLink(db))
 	mux.HandleFunc("GET /api/links/verify/{token}", handleVerifyTempLink())
 
 	// Internal cameras list (no auth — for cctv-adapter reload)
 	mux.HandleFunc("GET /internal/cameras", handleInternalListCameras(db))
+
+	// Internal settings (no auth — for other services via Docker network)
+	mux.HandleFunc("GET /internal/settings/{key}", handleInternalGetSetting(db))
 
 	// Public invitation verification (no auth — for registration page)
 	mux.HandleFunc("GET /api/invitations/verify/{token}", handleVerifyInvitation(db))
@@ -132,6 +135,10 @@ func main() {
 
 	// Storage stats (proxy to recording service)
 	apiMux.HandleFunc("GET /api/storage", handleStorageProxy())
+
+	// System settings (admin only)
+	apiMux.HandleFunc("GET /api/settings", handleListSettings(db))
+	apiMux.HandleFunc("PUT /api/settings/{key}", handleUpdateSetting(db))
 
 	// Temporary links management (admin only)
 	apiMux.HandleFunc("GET /api/links", handleListTempLinks())

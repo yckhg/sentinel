@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -117,9 +118,20 @@ func getFrontendURL() string {
 	return strings.TrimRight(u, "/")
 }
 
+// getSiteURL returns the externally-accessible site URL.
+// Checks system_settings.site_url first, falls back to FRONTEND_URL env var.
+func getSiteURL(db *sql.DB) string {
+	if db != nil {
+		if siteURL := getSettingValue(db, "site_url"); siteURL != "" {
+			return strings.TrimRight(siteURL, "/")
+		}
+	}
+	return getFrontendURL()
+}
+
 // handleCreateTempLink handles POST /api/links/temp
 // Accepts admin JWT or internal service calls (no auth)
-func handleCreateTempLink() http.HandlerFunc {
+func handleCreateTempLink(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Check auth: if Authorization header present, must be valid admin
 		authHeader := r.Header.Get("Authorization")
@@ -173,8 +185,8 @@ func handleCreateTempLink() http.HandlerFunc {
 		linkStore.links[linkID] = link
 		linkStore.mu.Unlock()
 
-		frontendURL := getFrontendURL()
-		url := fmt.Sprintf("%s/view/%s", frontendURL, token)
+		siteURL := getSiteURL(db)
+		url := fmt.Sprintf("%s/view/%s", siteURL, token)
 
 		log.Printf("temp link created: id=%s label=%s expires=%s", linkID, req.Label, expiresAt.Format(time.RFC3339))
 

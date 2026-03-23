@@ -131,6 +131,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS
 		name:    "add_incidents_is_test",
 		sql:     `ALTER TABLE incidents ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0;`,
 	},
+	{
+		version: 10,
+		name:    "create_system_settings",
+		sql: `
+			CREATE TABLE IF NOT EXISTS system_settings (
+				key TEXT PRIMARY KEY,
+				value TEXT NOT NULL DEFAULT '',
+				updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+			);
+			INSERT OR IGNORE INTO system_settings (key, value) VALUES ('site_url', '');
+		`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {
