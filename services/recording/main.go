@@ -578,6 +578,353 @@ func (rm *RecordingManager) GeneratePlaylist(streamKey string, from, to time.Tim
 	return b.String(), nil
 }
 
+// --- Archive Management ---
+
+// ArchiveMetadata stores information about an archived clip.
+type ArchiveMetadata struct {
+	ID         string `json:"id"`
+	IncidentID string `json:"incidentId"`
+	StreamKey  string `json:"streamKey"`
+	From       string `json:"from"`
+	To         string `json:"to"`
+	CreatedAt  string `json:"createdAt"`
+	SizeBytes  int64  `json:"sizeBytes"`
+	FilePath   string `json:"filePath"`
+	Status     string `json:"status"` // pending, processing, completed, failed
+	Error      string `json:"error,omitempty"`
+}
+
+// ArchiveManager manages archive creation and metadata.
+type ArchiveManager struct {
+	mu            sync.RWMutex
+	archives      []ArchiveMetadata
+	archivesDir   string
+	recordingsDir string
+	recManager    *RecordingManager
+	metadataPath  string
+}
+
+func NewArchiveManager(archivesDir, recordingsDir string, recManager *RecordingManager) *ArchiveManager {
+	am := &ArchiveManager{
+		archivesDir:   archivesDir,
+		recordingsDir: recordingsDir,
+		recManager:    recManager,
+		metadataPath:  filepath.Join(archivesDir, "metadata.json"),
+	}
+	am.loadMetadata()
+	return am
+}
+
+func (am *ArchiveManager) loadMetadata() {
+	data, err := os.ReadFile(am.metadataPath)
+	if err != nil {
+		return
+	}
+	var archives []ArchiveMetadata
+	if err := json.Unmarshal(data, &archives); err != nil {
+		log.Printf("[archive] Failed to load metadata: %v", err)
+		return
+	}
+	am.archives = archives
+	log.Printf("[archive] Loaded %d archive(s) from metadata", len(archives))
+}
+
+func (am *ArchiveManager) saveMetadata() {
+	data, err := json.MarshalIndent(am.archives, "", "  ")
+	if err != nil {
+		log.Printf("[archive] Failed to marshal metadata: %v", err)
+		return
+	}
+	if err := os.WriteFile(am.metadataPath, data, 0644); err != nil {
+		log.Printf("[archive] Failed to save metadata: %v", err)
+	}
+}
+
+// ListArchives returns all archive metadata.
+func (am *ArchiveManager) ListArchives() []ArchiveMetadata {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	result := make([]ArchiveMetadata, len(am.archives))
+	copy(result, am.archives)
+	return result
+}
+
+// CreateArchive creates an archive for the given parameters.
+// It protects segments, merges them into MP4, and stores metadata.
+func (am *ArchiveManager) CreateArchive(incidentID, streamKey string, from, to time.Time) (*ArchiveMetadata, error) {
+	archiveID := fmt.Sprintf("%s_%s_%s", incidentID, streamKey, from.UTC().Format("20060102_150405"))
+
+	// Check for duplicate
+	am.mu.RLock()
+	for _, a := range am.archives {
+		if a.ID == archiveID {
+			am.mu.RUnlock()
+			return &a, nil // Already exists
+		}
+	}
+	am.mu.RUnlock()
+
+	meta := ArchiveMetadata{
+		ID:         archiveID,
+		IncidentID: incidentID,
+		StreamKey:  streamKey,
+		From:       from.UTC().Format(time.RFC3339),
+		To:         to.UTC().Format(time.RFC3339),
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		Status:     "pending",
+	}
+
+	am.mu.Lock()
+	am.archives = append(am.archives, meta)
+	am.saveMetadata()
+	am.mu.Unlock()
+
+	// Run archive creation in background
+	go am.processArchive(archiveID, streamKey, from, to)
+
+	return &meta, nil
+}
+
+func (am *ArchiveManager) processArchive(archiveID, streamKey string, from, to time.Time) {
+	am.updateStatus(archiveID, "processing", "")
+
+	streamDir := filepath.Join(am.recordingsDir, streamKey)
+	files, err := os.ReadDir(streamDir)
+	if err != nil {
+		am.updateStatus(archiveID, "failed", fmt.Sprintf("read dir: %v", err))
+		return
+	}
+
+	const segDuration = 10 * time.Second
+
+	// Collect segments in the time range
+	type segment struct {
+		t    time.Time
+		path string
+	}
+	var segments []segment
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".ts") {
+			continue
+		}
+		name := strings.TrimSuffix(f.Name(), ".ts")
+		t, err := time.Parse("20060102_150405", name)
+		if err != nil {
+			continue
+		}
+		segEnd := t.Add(segDuration)
+		if segEnd.After(from) && t.Before(to) {
+			fullPath := filepath.Join(streamDir, f.Name())
+			segments = append(segments, segment{t: t, path: fullPath})
+		}
+	}
+
+	if len(segments) == 0 {
+		am.updateStatus(archiveID, "failed", "no segments in requested range")
+		return
+	}
+
+	sort.Slice(segments, func(i, j int) bool { return segments[i].t.Before(segments[j].t) })
+
+	// Protect all segments from cleanup
+	for _, seg := range segments {
+		am.recManager.ProtectSegment(seg.path)
+	}
+
+	// Create archive output directory
+	outDir := filepath.Join(am.archivesDir, archiveID)
+	os.MkdirAll(outDir, 0755)
+	outFile := filepath.Join(outDir, streamKey+".mp4")
+
+	// Create concat list file for FFmpeg
+	concatFile := filepath.Join(outDir, "concat.txt")
+	var concatContent strings.Builder
+	for _, seg := range segments {
+		concatContent.WriteString(fmt.Sprintf("file '%s'\n", seg.path))
+	}
+	if err := os.WriteFile(concatFile, []byte(concatContent.String()), 0644); err != nil {
+		am.updateStatus(archiveID, "failed", fmt.Sprintf("write concat file: %v", err))
+		return
+	}
+
+	// Merge segments into MP4 using FFmpeg (copy, no transcoding)
+	cmd := exec.Command("ffmpeg",
+		"-hide_banner",
+		"-loglevel", "warning",
+		"-f", "concat",
+		"-safe", "0",
+		"-i", concatFile,
+		"-c", "copy",
+		"-movflags", "+faststart",
+		outFile,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	log.Printf("[archive] Merging %d segments into %s", len(segments), outFile)
+	if err := cmd.Run(); err != nil {
+		am.updateStatus(archiveID, "failed", fmt.Sprintf("ffmpeg merge: %v", err))
+		return
+	}
+
+	// Clean up concat file
+	os.Remove(concatFile)
+
+	// Get file size
+	info, err := os.Stat(outFile)
+	if err != nil {
+		am.updateStatus(archiveID, "failed", fmt.Sprintf("stat output: %v", err))
+		return
+	}
+
+	am.mu.Lock()
+	for i, a := range am.archives {
+		if a.ID == archiveID {
+			am.archives[i].Status = "completed"
+			am.archives[i].SizeBytes = info.Size()
+			am.archives[i].FilePath = outFile
+			break
+		}
+	}
+	am.saveMetadata()
+	am.mu.Unlock()
+
+	log.Printf("[archive] Completed: %s (%d bytes, %d segments)", archiveID, info.Size(), len(segments))
+}
+
+func (am *ArchiveManager) updateStatus(archiveID, status, errMsg string) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	for i, a := range am.archives {
+		if a.ID == archiveID {
+			am.archives[i].Status = status
+			am.archives[i].Error = errMsg
+			break
+		}
+	}
+	am.saveMetadata()
+	if errMsg != "" {
+		log.Printf("[archive] %s: status=%s error=%s", archiveID, status, errMsg)
+	}
+}
+
+// DeleteArchive removes an archive and unprotects its segments.
+func (am *ArchiveManager) DeleteArchive(archiveID string) error {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	idx := -1
+	for i, a := range am.archives {
+		if a.ID == archiveID {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return fmt.Errorf("archive not found: %s", archiveID)
+	}
+
+	archive := am.archives[idx]
+
+	// Remove the archive directory
+	archiveDir := filepath.Join(am.archivesDir, archiveID)
+	os.RemoveAll(archiveDir)
+
+	// Unprotect segments that were in this archive's range
+	if archive.StreamKey != "" {
+		fromTime, _ := time.Parse(time.RFC3339, archive.From)
+		toTime, _ := time.Parse(time.RFC3339, archive.To)
+		if !fromTime.IsZero() && !toTime.IsZero() {
+			am.unprotectSegments(archive.StreamKey, fromTime, toTime)
+		}
+	}
+
+	// Remove from list
+	am.archives = append(am.archives[:idx], am.archives[idx+1:]...)
+	am.saveMetadata()
+
+	log.Printf("[archive] Deleted: %s", archiveID)
+	return nil
+}
+
+func (am *ArchiveManager) unprotectSegments(streamKey string, from, to time.Time) {
+	streamDir := filepath.Join(am.recordingsDir, streamKey)
+	files, _ := os.ReadDir(streamDir)
+	const segDuration = 10 * time.Second
+
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".ts") {
+			continue
+		}
+		name := strings.TrimSuffix(f.Name(), ".ts")
+		t, err := time.Parse("20060102_150405", name)
+		if err != nil {
+			continue
+		}
+		segEnd := t.Add(segDuration)
+		if segEnd.After(from) && t.Before(to) {
+			fullPath := filepath.Join(streamDir, f.Name())
+			// Only unprotect if no other archive references this segment
+			if !am.isSegmentInOtherArchive(fullPath, "") {
+				am.recManager.UnprotectSegment(fullPath)
+			}
+		}
+	}
+}
+
+func (am *ArchiveManager) isSegmentInOtherArchive(segPath, excludeArchiveID string) bool {
+	for _, a := range am.archives {
+		if a.ID == excludeArchiveID || a.Status == "failed" {
+			continue
+		}
+		fromTime, _ := time.Parse(time.RFC3339, a.From)
+		toTime, _ := time.Parse(time.RFC3339, a.To)
+		if fromTime.IsZero() || toTime.IsZero() {
+			continue
+		}
+		// Check if this segment's time falls within archive range
+		dir := filepath.Dir(segPath)
+		streamKey := filepath.Base(dir)
+		if streamKey != a.StreamKey {
+			continue
+		}
+		name := strings.TrimSuffix(filepath.Base(segPath), ".ts")
+		t, err := time.Parse("20060102_150405", name)
+		if err != nil {
+			continue
+		}
+		segEnd := t.Add(10 * time.Second)
+		if segEnd.After(fromTime) && t.Before(toTime) {
+			return true
+		}
+	}
+	return false
+}
+
+// GetStorageStats returns disk usage info for recordings and archives.
+func (am *ArchiveManager) GetStorageStats() map[string]any {
+	recordingsSize := dirSize(am.recordingsDir)
+	archivesSize := dirSize(am.archivesDir)
+	return map[string]any{
+		"recordingsBytes": recordingsSize,
+		"archivesBytes":   archivesSize,
+		"totalBytes":      recordingsSize + archivesSize,
+		"archiveCount":    len(am.archives),
+	}
+}
+
+func dirSize(path string) int64 {
+	var size int64
+	filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		size += info.Size()
+		return nil
+	})
+	return size
+}
+
 func main() {
 	rtmpBaseURL := os.Getenv("STREAMING_RTMP_URL")
 	if rtmpBaseURL == "" {
@@ -609,9 +956,15 @@ func main() {
 		}
 	}
 
+	archivesDir := os.Getenv("ARCHIVES_DIR")
+	if archivesDir == "" {
+		archivesDir = "/archives"
+	}
+
 	log.Printf("Recording service starting (rolling window: %dm, ffmpeg timeout: %v)", rollingMinutes, ffmpegTimeout)
 
 	manager := NewRecordingManager(rtmpBaseURL, recordingsDir, ffmpegTimeout)
+	archiveManager := NewArchiveManager(archivesDir, recordingsDir, manager)
 
 	// Fetch initial camera list from web-backend
 	reloadClient := &http.Client{Timeout: 10 * time.Second}
@@ -759,6 +1112,124 @@ func main() {
 		w.Header().Set("Content-Type", "video/mp2t")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		http.ServeFile(w, r, filePath)
+	})
+
+	// POST /api/archives — create an archive
+	mux.HandleFunc("POST /api/archives", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			IncidentID string   `json:"incidentId"`
+			StreamKeys []string `json:"streamKeys"`
+			From       string   `json:"from"`
+			To         string   `json:"to"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON"})
+			return
+		}
+
+		if len(req.StreamKeys) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "streamKeys is required"})
+			return
+		}
+
+		from, err := time.Parse(time.RFC3339, req.From)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid from: must be ISO8601/RFC3339"})
+			return
+		}
+		to, err := time.Parse(time.RFC3339, req.To)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid to: must be ISO8601/RFC3339"})
+			return
+		}
+
+		incidentID := req.IncidentID
+		if incidentID == "" {
+			incidentID = fmt.Sprintf("manual_%s", time.Now().UTC().Format("20060102_150405"))
+		}
+
+		var created []ArchiveMetadata
+		for _, streamKey := range req.StreamKeys {
+			meta, err := archiveManager.CreateArchive(incidentID, streamKey, from, to)
+			if err != nil {
+				log.Printf("[archive] Failed to create archive for %s: %v", streamKey, err)
+				continue
+			}
+			created = append(created, *meta)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":   "accepted",
+			"archives": created,
+		})
+	})
+
+	// GET /api/archives — list all archives
+	mux.HandleFunc("GET /api/archives", func(w http.ResponseWriter, r *http.Request) {
+		archives := archiveManager.ListArchives()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(archives)
+	})
+
+	// DELETE /api/archives/{id} — delete an archive
+	mux.HandleFunc("DELETE /api/archives/{id}", func(w http.ResponseWriter, r *http.Request) {
+		archiveID := r.PathValue("id")
+		if archiveID == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "archive id is required"})
+			return
+		}
+
+		if err := archiveManager.DeleteArchive(archiveID); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	})
+
+	// GET /api/archives/{id}/download — serve archive MP4 file
+	mux.HandleFunc("GET /api/archives/{id}/download", func(w http.ResponseWriter, r *http.Request) {
+		archiveID := r.PathValue("id")
+		archives := archiveManager.ListArchives()
+		for _, a := range archives {
+			if a.ID == archiveID {
+				if a.Status != "completed" {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusConflict)
+					json.NewEncoder(w).Encode(map[string]string{"error": "archive not ready", "status": a.Status})
+					return
+				}
+				w.Header().Set("Content-Type", "video/mp4")
+				w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.mp4\"", archiveID))
+				http.ServeFile(w, r, a.FilePath)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "archive not found"})
+	})
+
+	// GET /api/storage — disk usage stats
+	mux.HandleFunc("GET /api/storage", func(w http.ResponseWriter, r *http.Request) {
+		stats := archiveManager.GetStorageStats()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(stats)
 	})
 
 	log.Println("recording service listening on :8080")

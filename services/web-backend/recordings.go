@@ -77,3 +77,100 @@ func handleRecordingSegmentProxy() http.HandlerFunc {
 		io.Copy(w, resp.Body)
 	}
 }
+
+// handleArchivesProxy proxies archive API requests to the recording service.
+// Supports GET /api/archives, POST /api/archives, DELETE /api/archives/{id}
+func handleArchivesProxy() http.HandlerFunc {
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		targetURL := recordingURL + r.URL.Path
+		if r.URL.RawQuery != "" {
+			targetURL += "?" + r.URL.RawQuery
+		}
+
+		var req *http.Request
+		var err error
+
+		if r.Method == http.MethodPost {
+			req, err = http.NewRequest(r.Method, targetURL, r.Body)
+		} else {
+			req, err = http.NewRequest(r.Method, targetURL, nil)
+		}
+		if err != nil {
+			log.Printf("archives proxy request error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("archives proxy error: %v", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to reach recording service"})
+			return
+		}
+		defer resp.Body.Close()
+
+		for key, values := range resp.Header {
+			for _, v := range values {
+				w.Header().Add(key, v)
+			}
+		}
+
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}
+}
+
+// handleArchiveDownloadProxy proxies archive download requests to the recording service.
+func handleArchiveDownloadProxy() http.HandlerFunc {
+	client := &http.Client{Timeout: 120 * time.Second}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		targetURL := recordingURL + r.URL.Path
+
+		resp, err := client.Get(targetURL)
+		if err != nil {
+			log.Printf("archive download proxy error: %v", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to reach recording service"})
+			return
+		}
+		defer resp.Body.Close()
+
+		for key, values := range resp.Header {
+			for _, v := range values {
+				w.Header().Add(key, v)
+			}
+		}
+
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}
+}
+
+// handleStorageProxy proxies storage stats requests to the recording service.
+func handleStorageProxy() http.HandlerFunc {
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		targetURL := recordingURL + "/api/storage"
+
+		resp, err := client.Get(targetURL)
+		if err != nil {
+			log.Printf("storage proxy error: %v", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to reach recording service"})
+			return
+		}
+		defer resp.Body.Close()
+
+		for key, values := range resp.Header {
+			for _, v := range values {
+				w.Header().Add(key, v)
+			}
+		}
+
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}
+}

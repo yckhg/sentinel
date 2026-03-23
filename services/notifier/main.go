@@ -91,6 +91,7 @@ type SendEmailRequest struct {
 type Config struct {
 	WebBackendURL     string
 	FrontendURL       string
+	RecordingURL      string
 	KakaoAPIURL       string
 	KakaoAPIKey       string
 	KakaoSenderKey    string
@@ -109,6 +110,7 @@ func loadConfig() Config {
 	return Config{
 		WebBackendURL:     getEnv("WEB_BACKEND_URL", "http://web-backend:8080"),
 		FrontendURL:       getEnv("FRONTEND_URL", "http://localhost:3080"),
+		RecordingURL:      getEnv("RECORDING_URL", "http://recording:8080"),
 		KakaoAPIURL:       getEnv("KAKAO_API_URL", ""),
 		KakaoAPIKey:       getEnv("KAKAO_API_KEY", ""),
 		KakaoSenderKey:    getEnv("KAKAO_SENDER_KEY", ""),
@@ -373,6 +375,91 @@ func sendSystemAlarm(cfg Config, contact Contact, alert AlertPayload, kakaoErr, 
 	log.Printf("[alarm] System alarm sent for contact %s (%s) — both KakaoTalk and SMS failed", contact.Name, contact.Phone)
 }
 
+// --- Recording Archive ---
+
+// requestArchive sends an archive request to the recording service for the given incident.
+// Archives from (incident_time - 1 hour) to (incident_time + 30 minutes).
+func requestArchive(cfg Config, alert AlertPayload) {
+	if cfg.RecordingURL == "" {
+		log.Printf("[archive] Recording URL not configured, skipping archive request")
+		return
+	}
+
+	// Parse incident timestamp
+	incidentTime, err := time.Parse(time.RFC3339, alert.Timestamp)
+	if err != nil {
+		// Try alternative format
+		incidentTime, err = time.Parse("2006-01-02 15:04:05", alert.Timestamp)
+		if err != nil {
+			log.Printf("[archive] Cannot parse incident timestamp %q: %v", alert.Timestamp, err)
+			return
+		}
+	}
+
+	archiveFrom := incidentTime.Add(-1 * time.Hour)
+	archiveTo := incidentTime.Add(30 * time.Minute)
+
+	// Fetch camera list to get all stream keys
+	resp, err := httpClient.Get(cfg.WebBackendURL + "/internal/cameras")
+	if err != nil {
+		log.Printf("[archive] Failed to fetch cameras: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var cameras []struct {
+		StreamKey string `json:"streamKey"`
+		Enabled   bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&cameras); err != nil {
+		log.Printf("[archive] Failed to decode cameras: %v", err)
+		return
+	}
+
+	var streamKeys []string
+	for _, c := range cameras {
+		if c.Enabled && c.StreamKey != "" {
+			streamKeys = append(streamKeys, c.StreamKey)
+		}
+	}
+
+	if len(streamKeys) == 0 {
+		log.Printf("[archive] No enabled cameras, skipping archive")
+		return
+	}
+
+	// Build incident ID from alert info
+	incidentID := fmt.Sprintf("incident_%s_%s", alert.SiteID, incidentTime.UTC().Format("20060102_150405"))
+
+	archiveReq := map[string]any{
+		"incidentId": incidentID,
+		"streamKeys": streamKeys,
+		"from":       archiveFrom.UTC().Format(time.RFC3339),
+		"to":         archiveTo.UTC().Format(time.RFC3339),
+	}
+
+	payload, err := json.Marshal(archiveReq)
+	if err != nil {
+		log.Printf("[archive] Failed to marshal archive request: %v", err)
+		return
+	}
+
+	archiveResp, err := httpClient.Post(cfg.RecordingURL+"/api/archives", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("[archive] Failed to send archive request: %v", err)
+		return
+	}
+	defer archiveResp.Body.Close()
+
+	if archiveResp.StatusCode >= 200 && archiveResp.StatusCode < 300 {
+		log.Printf("[archive] Archive request accepted for incident %s (%d cameras, %s to %s)",
+			incidentID, len(streamKeys), archiveFrom.Format(time.RFC3339), archiveTo.Format(time.RFC3339))
+	} else {
+		body, _ := io.ReadAll(archiveResp.Body)
+		log.Printf("[archive] Archive request failed: status %d, body: %s", archiveResp.StatusCode, string(body))
+	}
+}
+
 // --- Notification Dispatch ---
 
 func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult) {
@@ -529,6 +616,11 @@ func handleNotify(cfg Config) http.HandlerFunc {
 			}
 			log.Printf("[notify] Dispatch complete: %d/%d contacts notified (kakao:%d sms:%d failed:%d)",
 				successCount, contactCount, channels["kakaotalk"], channels["sms"], contactCount-successCount)
+
+			// Request recording archive for this incident (non-test alerts only)
+			if !alert.Test {
+				requestArchive(cfg, alert)
+			}
 		}()
 
 		// Return immediately (accepted, processing async)

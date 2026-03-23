@@ -95,6 +95,7 @@ services:
     environment:
       - WEB_BACKEND_URL=http://web-backend:8080
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3080}
+      - RECORDING_URL=http://recording:8080
       - KAKAO_API_URL=${KAKAO_API_URL:-}
       - KAKAO_API_KEY=${KAKAO_API_KEY:-}
       - KAKAO_SENDER_KEY=${KAKAO_SENDER_KEY:-}
@@ -131,6 +132,7 @@ services:
       - STREAMING_RTMP_URL=rtmp://streaming:1935/live
       - WEB_BACKEND_URL=http://web-backend:8080
       - RECORDINGS_DIR=/recordings
+      - ARCHIVES_DIR=/archives
       - ROLLING_WINDOW_MINUTES=60
       - FFMPEG_TIMEOUT=60
     healthcheck:

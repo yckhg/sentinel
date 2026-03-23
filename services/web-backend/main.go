@@ -124,6 +124,15 @@ func main() {
 	apiMux.HandleFunc("GET /api/recordings/{stream_key}/segments/{filename}", handleRecordingSegmentProxy())
 	apiMux.HandleFunc("GET /api/recordings/{stream_key}", handleRecordingsProxy())
 
+	// Archives (proxy to recording service)
+	apiMux.HandleFunc("GET /api/archives", handleArchivesProxy())
+	apiMux.HandleFunc("POST /api/archives", handleArchivesProxy())
+	apiMux.HandleFunc("DELETE /api/archives/{id}", handleArchivesProxy())
+	apiMux.HandleFunc("GET /api/archives/{id}/download", handleArchiveDownloadProxy())
+
+	// Storage stats (proxy to recording service)
+	apiMux.HandleFunc("GET /api/storage", handleStorageProxy())
+
 	// Temporary links management (admin only)
 	apiMux.HandleFunc("GET /api/links", handleListTempLinks())
 	apiMux.HandleFunc("DELETE /api/links/{id}", handleRevokeTempLink())
