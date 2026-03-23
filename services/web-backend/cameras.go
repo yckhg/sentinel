@@ -187,7 +187,7 @@ func handleListCameras(db *sql.DB) http.HandlerFunc {
 		}
 
 		for i := range cameras {
-			if s, ok := streamMap[cameras[i].Name]; ok && s.Active {
+			if s, ok := streamMap[cameras[i].StreamKey]; ok && s.Active {
 				cameras[i].HLSUrl = s.HLSUrl
 				cameras[i].Status = "connected"
 			} else {
