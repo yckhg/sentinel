@@ -162,6 +162,7 @@ services:
       - CCTV_ADAPTER_URL=http://cctv-adapter:8080
       - YOUTUBE_ADAPTER_URL=http://youtube-adapter:8080
       - NOTIFIER_URL=http://notifier:8080
+      - RECORDING_URL=http://recording:8080
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3080}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]

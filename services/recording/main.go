@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -453,6 +454,130 @@ func (rm *RecordingManager) CleanupOldSegments(rollingWindow time.Duration) {
 	}
 }
 
+// TimeRange represents a contiguous range of available recording segments.
+type TimeRange struct {
+	Start string `json:"start"` // ISO8601
+	End   string `json:"end"`   // ISO8601
+}
+
+// ListSegments returns available time ranges for a given stream key.
+// Adjacent segments (within 15s gap tolerance) are merged into contiguous ranges.
+func (rm *RecordingManager) ListSegments(streamKey string) ([]TimeRange, error) {
+	streamDir := filepath.Join(rm.recordingsDir, streamKey)
+	files, err := os.ReadDir(streamDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	// Parse all .ts segment timestamps and sort them
+	var segTimes []time.Time
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".ts") {
+			continue
+		}
+		name := strings.TrimSuffix(f.Name(), ".ts")
+		t, err := time.Parse("20060102_150405", name)
+		if err != nil {
+			continue
+		}
+		segTimes = append(segTimes, t)
+	}
+
+	if len(segTimes) == 0 {
+		return nil, nil
+	}
+
+	sort.Slice(segTimes, func(i, j int) bool { return segTimes[i].Before(segTimes[j]) })
+
+	// Merge adjacent segments (gap <= 15s = segment_time + tolerance)
+	const segDuration = 10 * time.Second
+	const gapTolerance = 15 * time.Second
+
+	var ranges []TimeRange
+	rangeStart := segTimes[0]
+	rangeEnd := segTimes[0].Add(segDuration)
+
+	for i := 1; i < len(segTimes); i++ {
+		if segTimes[i].Sub(rangeEnd) <= gapTolerance {
+			rangeEnd = segTimes[i].Add(segDuration)
+		} else {
+			ranges = append(ranges, TimeRange{
+				Start: rangeStart.UTC().Format(time.RFC3339),
+				End:   rangeEnd.UTC().Format(time.RFC3339),
+			})
+			rangeStart = segTimes[i]
+			rangeEnd = segTimes[i].Add(segDuration)
+		}
+	}
+	ranges = append(ranges, TimeRange{
+		Start: rangeStart.UTC().Format(time.RFC3339),
+		End:   rangeEnd.UTC().Format(time.RFC3339),
+	})
+
+	return ranges, nil
+}
+
+// GeneratePlaylist creates an HLS playlist (.m3u8) for segments within a time range.
+func (rm *RecordingManager) GeneratePlaylist(streamKey string, from, to time.Time) (string, error) {
+	streamDir := filepath.Join(rm.recordingsDir, streamKey)
+	files, err := os.ReadDir(streamDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("no recordings found")
+		}
+		return "", err
+	}
+
+	const segDuration = 10 // seconds
+
+	type segment struct {
+		t    time.Time
+		name string
+	}
+
+	var segments []segment
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".ts") {
+			continue
+		}
+		name := strings.TrimSuffix(f.Name(), ".ts")
+		t, err := time.Parse("20060102_150405", name)
+		if err != nil {
+			continue
+		}
+		segEnd := t.Add(segDuration * time.Second)
+		// Include segment if it overlaps with [from, to]
+		if segEnd.After(from) && t.Before(to) {
+			segments = append(segments, segment{t: t, name: f.Name()})
+		}
+	}
+
+	if len(segments) == 0 {
+		return "", fmt.Errorf("no segments in requested range")
+	}
+
+	sort.Slice(segments, func(i, j int) bool { return segments[i].t.Before(segments[j].t) })
+
+	// Build M3U8 playlist
+	var b strings.Builder
+	b.WriteString("#EXTM3U\n")
+	b.WriteString("#EXT-X-VERSION:3\n")
+	b.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", segDuration))
+	b.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
+	b.WriteString("#EXT-X-PLAYLIST-TYPE:VOD\n")
+
+	for _, seg := range segments {
+		b.WriteString(fmt.Sprintf("#EXTINF:%d.0,\n", segDuration))
+		b.WriteString(fmt.Sprintf("/api/recordings/%s/segments/%s\n", streamKey, seg.name))
+	}
+	b.WriteString("#EXT-X-ENDLIST\n")
+
+	return b.String(), nil
+}
+
 func main() {
 	rtmpBaseURL := os.Getenv("STREAMING_RTMP_URL")
 	if rtmpBaseURL == "" {
@@ -533,6 +658,107 @@ func main() {
 			"status":  "reloaded",
 			"cameras": len(cameras),
 		})
+	})
+
+	// GET /api/recordings/{stream_key} — list available time ranges
+	mux.HandleFunc("GET /api/recordings/{stream_key}", func(w http.ResponseWriter, r *http.Request) {
+		streamKey := r.PathValue("stream_key")
+		if streamKey == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "stream_key is required"})
+			return
+		}
+
+		ranges, err := manager.ListSegments(streamKey)
+		if err != nil {
+			log.Printf("[recordings] list segments error for %s: %v", streamKey, err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
+			return
+		}
+
+		if len(ranges) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "no recordings found"})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"streamKey":  streamKey,
+			"timeRanges": ranges,
+		})
+	})
+
+	// GET /api/recordings/{stream_key}/play?from=ISO8601&to=ISO8601 — HLS playlist
+	mux.HandleFunc("GET /api/recordings/{stream_key}/play", func(w http.ResponseWriter, r *http.Request) {
+		streamKey := r.PathValue("stream_key")
+		if streamKey == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "stream_key is required"})
+			return
+		}
+
+		fromStr := r.URL.Query().Get("from")
+		toStr := r.URL.Query().Get("to")
+		if fromStr == "" || toStr == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "from and to query parameters are required (ISO8601)"})
+			return
+		}
+
+		from, err := time.Parse(time.RFC3339, fromStr)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid from parameter: must be ISO8601/RFC3339"})
+			return
+		}
+		to, err := time.Parse(time.RFC3339, toStr)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid to parameter: must be ISO8601/RFC3339"})
+			return
+		}
+
+		playlist, err := manager.GeneratePlaylist(streamKey, from, to)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Write([]byte(playlist))
+	})
+
+	// GET /api/recordings/{stream_key}/segments/{filename} — serve .ts segment file
+	mux.HandleFunc("GET /api/recordings/{stream_key}/segments/{filename}", func(w http.ResponseWriter, r *http.Request) {
+		streamKey := r.PathValue("stream_key")
+		filename := r.PathValue("filename")
+
+		// Validate filename to prevent path traversal
+		if strings.Contains(filename, "/") || strings.Contains(filename, "\\") || strings.Contains(filename, "..") {
+			http.Error(w, "invalid filename", http.StatusBadRequest)
+			return
+		}
+		if !strings.HasSuffix(filename, ".ts") {
+			http.Error(w, "invalid file type", http.StatusBadRequest)
+			return
+		}
+
+		filePath := filepath.Join(recordingsDir, streamKey, filename)
+		w.Header().Set("Content-Type", "video/mp2t")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		http.ServeFile(w, r, filePath)
 	})
 
 	log.Println("recording service listening on :8080")

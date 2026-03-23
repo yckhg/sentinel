@@ -119,6 +119,11 @@ func main() {
 	// Test alert simulation (admin only)
 	apiMux.HandleFunc("POST /api/test-alert", handleTestAlertProxy())
 
+	// Recordings (proxy to recording service)
+	apiMux.HandleFunc("GET /api/recordings/{stream_key}/play", handleRecordingsProxy())
+	apiMux.HandleFunc("GET /api/recordings/{stream_key}/segments/{filename}", handleRecordingSegmentProxy())
+	apiMux.HandleFunc("GET /api/recordings/{stream_key}", handleRecordingsProxy())
+
 	// Temporary links management (admin only)
 	apiMux.HandleFunc("GET /api/links", handleListTempLinks())
 	apiMux.HandleFunc("DELETE /api/links/{id}", handleRevokeTempLink())

@@ -21,6 +21,7 @@ var (
 	streamingURL      string
 	cctvAdapterURL    string
 	youtubeAdapterURL string
+	recordingURL      string
 )
 
 func initServiceURLs() {
@@ -36,9 +37,14 @@ func initServiceURLs() {
 	if youtubeAdapterURL == "" {
 		youtubeAdapterURL = "http://youtube-adapter:8080"
 	}
+	recordingURL = os.Getenv("RECORDING_URL")
+	if recordingURL == "" {
+		recordingURL = "http://recording:8080"
+	}
 	log.Printf("streaming URL: %s", streamingURL)
 	log.Printf("cctv-adapter URL: %s", cctvAdapterURL)
 	log.Printf("youtube-adapter URL: %s", youtubeAdapterURL)
+	log.Printf("recording URL: %s", recordingURL)
 }
 
 // Cached responses from internal services
