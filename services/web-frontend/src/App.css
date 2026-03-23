@@ -1442,13 +1442,22 @@ body {
 
 .rec-timeline-download-link {
   color: #64b5f6;
-  text-decoration: none;
+  background: none;
+  border: none;
+  cursor: pointer;
   font-weight: 600;
+  font-size: inherit;
   white-space: nowrap;
+  padding: 0;
 }
 
 .rec-timeline-download-link:hover {
   text-decoration: underline;
+}
+
+.rec-timeline-download-link:disabled {
+  color: #888;
+  cursor: wait;
 }
 
 .rec-timeline-archives {
@@ -1517,13 +1526,30 @@ body {
 
 .rec-timeline-archive-download {
   color: #64b5f6;
-  text-decoration: none;
+  background: none;
+  border: none;
+  cursor: pointer;
   font-size: 0.7rem;
   font-weight: 600;
+  padding: 0;
 }
 
 .rec-timeline-archive-download:hover {
   text-decoration: underline;
+}
+
+.rec-timeline-archive-download:disabled {
+  color: #888;
+  cursor: wait;
+}
+
+.rec-timeline-archive-error {
+  color: #ef5350;
+  font-size: 0.6rem;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Playback badge on camera */

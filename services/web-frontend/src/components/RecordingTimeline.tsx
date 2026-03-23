@@ -90,6 +90,7 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
   // Archives list
   const [archives, setArchives] = useState<ArchiveInfo[]>([]);
   const [showArchives, setShowArchives] = useState(false);
+  const [downloading, setDownloading] = useState<string | null>(null);
 
   // Incident markers
   const [incidents, setIncidents] = useState<IncidentMarker[]>([]);
@@ -247,6 +248,34 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
     onPlaybackRequest(null);
   };
 
+  // Download archive with auth headers
+  const handleDownload = async (archiveId: string) => {
+    setDownloading(archiveId);
+    try {
+      const res = await fetchWithTimeout(`/api/archives/${archiveId}/download`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || `다운로드 실패 (${res.status})`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${archiveId}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      alert("다운로드 서비스에 연결할 수 없습니다");
+    } finally {
+      setDownloading(null);
+    }
+  };
+
   // Archive the selected range
   const handleArchive = async () => {
     setArchiving(true);
@@ -277,7 +306,33 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
           message: `보관 요청 완료: ${formatTime(from)} ~ ${formatTime(to)} (${formatDuration(from, to)})`,
           archiveId: archive?.id,
         });
-        setTimeout(() => fetchArchives(), 3000);
+        // Poll for archive completion
+        const pollInterval = setInterval(async () => {
+          try {
+            const pollRes = await fetchWithTimeout("/api/archives", {
+              headers: token ? { Authorization: `Bearer ${token}` } : {},
+            });
+            if (pollRes.ok) {
+              const data: ArchiveInfo[] = await pollRes.json();
+              const myArchives = data.filter((a) => a.streamKey === streamKey);
+              setArchives(myArchives);
+              const target = myArchives.find((a) => a.id === archive?.id);
+              if (!target || target.status === "completed" || target.status === "failed") {
+                clearInterval(pollInterval);
+                if (target?.status === "failed") {
+                  setArchiveResult({
+                    success: false,
+                    message: target.error || "보관 처리 중 오류가 발생했습니다",
+                  });
+                }
+              }
+            }
+          } catch {
+            clearInterval(pollInterval);
+          }
+        }, 3000);
+        // Safety: stop polling after 5 minutes
+        setTimeout(() => clearInterval(pollInterval), 5 * 60 * 1000);
       } else {
         const data = await res.json().catch(() => ({}));
         setArchiveResult({
@@ -445,14 +500,13 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
         <div className={`rec-timeline-result ${archiveResult.success ? "success" : "error"}`}>
           <span>{archiveResult.message}</span>
           {archiveResult.success && archiveResult.archiveId && (
-            <a
-              href={`/api/archives/${archiveResult.archiveId}/download`}
+            <button
               className="rec-timeline-download-link"
-              target="_blank"
-              rel="noopener noreferrer"
+              onClick={() => handleDownload(archiveResult.archiveId!)}
+              disabled={downloading === archiveResult.archiveId}
             >
-              다운로드
-            </a>
+              {downloading === archiveResult.archiveId ? "다운로드 중..." : "다운로드"}
+            </button>
           )}
         </div>
       )}
@@ -485,14 +539,18 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
                     </span>
                   </div>
                   {a.status === "completed" && (
-                    <a
-                      href={`/api/archives/${a.id}/download`}
+                    <button
                       className="rec-timeline-archive-download"
-                      target="_blank"
-                      rel="noopener noreferrer"
+                      onClick={() => handleDownload(a.id)}
+                      disabled={downloading === a.id}
                     >
-                      다운로드
-                    </a>
+                      {downloading === a.id ? "..." : "다운로드"}
+                    </button>
+                  )}
+                  {a.status === "failed" && a.error && (
+                    <span className="rec-timeline-archive-error" title={a.error}>
+                      {a.error}
+                    </span>
                   )}
                 </div>
               ))}

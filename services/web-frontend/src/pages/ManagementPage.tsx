@@ -236,6 +236,7 @@ export default function ManagementPage() {
   const [archiveDeleteLoading, setArchiveDeleteLoading] = useState(false);
   const [incidentDeleteTarget, setIncidentDeleteTarget] = useState<string | null>(null);
   const [incidentDeleteLoading, setIncidentDeleteLoading] = useState(false);
+  const [archiveDownloading, setArchiveDownloading] = useState<string | null>(null);
 
   const fetchContacts = async () => {
     try {
@@ -543,6 +544,33 @@ export default function ManagementPage() {
       setIncidentDeleteTarget(null);
     } finally {
       setIncidentDeleteLoading(false);
+    }
+  };
+
+  const handleArchiveDownload = async (archiveId: string) => {
+    setArchiveDownloading(archiveId);
+    try {
+      const res = await fetchWithTimeout(`/api/archives/${archiveId}/download`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || `다운로드 실패 (${res.status})`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${archiveId}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      alert("다운로드 서비스에 연결할 수 없습니다");
+    } finally {
+      setArchiveDownloading(null);
     }
   };
 
@@ -1750,13 +1778,18 @@ export default function ManagementPage() {
                                     : "실패"}
                             </span>
                             {archive.status === "completed" && (
-                              <a
-                                href={`/api/archives/${archive.id}/download`}
+                              <button
                                 className="mgmt-btn mgmt-btn-small"
-                                download
+                                onClick={() => handleArchiveDownload(archive.id)}
+                                disabled={archiveDownloading === archive.id}
                               >
-                                다운로드
-                              </a>
+                                {archiveDownloading === archive.id ? "..." : "다운로드"}
+                              </button>
+                            )}
+                            {archive.status === "failed" && archive.error && (
+                              <span className="mgmt-badge-archive mgmt-badge-archive-failed" title={archive.error}>
+                                {archive.error.length > 30 ? archive.error.substring(0, 30) + "..." : archive.error}
+                              </span>
                             )}
                           </div>
                         ))}
