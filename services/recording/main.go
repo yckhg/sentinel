@@ -980,14 +980,22 @@ func main() {
 	manager := NewRecordingManager(rtmpBaseURL, recordingsDir, ffmpegTimeout)
 	archiveManager := NewArchiveManager(archivesDir, recordingsDir, manager)
 
-	// Fetch initial camera list from web-backend
+	// Fetch initial camera list from web-backend (retry on failure)
 	reloadClient := &http.Client{Timeout: 10 * time.Second}
-	cameras := fetchCameras(reloadClient, webBackendURL)
+	var cameras []CameraInfo
+	for attempt := 1; attempt <= 10; attempt++ {
+		cameras = fetchCameras(reloadClient, webBackendURL)
+		if len(cameras) > 0 {
+			break
+		}
+		log.Printf("No cameras found (attempt %d/10), retrying in 3s...", attempt)
+		time.Sleep(3 * time.Second)
+	}
 	if len(cameras) > 0 {
 		log.Printf("Starting recording for %d camera(s)", len(cameras))
 		manager.Start(cameras)
 	} else {
-		log.Println("No cameras found. Waiting for reload.")
+		log.Println("No cameras found after retries. Waiting for reload.")
 	}
 
 	// Start cleanup goroutine

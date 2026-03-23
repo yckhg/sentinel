@@ -144,8 +144,10 @@ services:
       - recordings-data:/recordings
       - archives-data:/archives
     depends_on:
-      - streaming
-      - web-backend
+      streaming:
+        condition: service_started
+      web-backend:
+        condition: service_healthy
     networks:
       - sentinel-net
     # ports: internal only
