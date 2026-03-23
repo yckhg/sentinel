@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import HLSPlayer from "../components/HLSPlayer";
+import RecordingTimeline from "../components/RecordingTimeline";
 import RestartDialog from "../components/RestartDialog";
 import EmergencyCallButton from "../components/EmergencyCallButton";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
@@ -10,6 +11,7 @@ interface Camera {
   location: string;
   zone: string;
   hlsUrl: string;
+  streamKey: string;
   status: "connected" | "disconnected";
   siteId?: string;
   deviceId?: string;
@@ -114,6 +116,10 @@ export default function CCTVPage() {
           />
         ))}
       </div>
+      {expandedId !== null && (() => {
+        const cam = cameras.find((c) => c.id === expandedId);
+        return cam ? <RecordingTimeline streamKey={cam.streamKey} /> : null;
+      })()}
       {restartCamera && (
         <RestartDialog
           cameraName={restartCamera.name}

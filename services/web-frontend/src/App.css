@@ -1188,3 +1188,255 @@ body {
   padding: 12px;
   font-size: 0.95rem;
 }
+
+/* Recording Timeline */
+.rec-timeline-container {
+  background: #1a1a1a;
+  border-radius: 0 0 4px 4px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rec-timeline-loading,
+.rec-timeline-error {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.75rem;
+  text-align: center;
+  padding: 4px 0;
+}
+
+.rec-timeline-error {
+  color: #ff9800;
+}
+
+.rec-timeline-labels {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.65rem;
+}
+
+.rec-timeline-title {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.rec-timeline-bar {
+  position: relative;
+  height: 32px;
+  background: #333;
+  border-radius: 4px;
+  overflow: visible;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.rec-timeline-available {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(76, 175, 80, 0.3);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.rec-timeline-archived {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(33, 150, 243, 0.35);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.rec-timeline-selection {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(255, 193, 7, 0.25);
+  border-top: 2px solid #ffc107;
+  border-bottom: 2px solid #ffc107;
+  cursor: grab;
+  z-index: 2;
+}
+
+.rec-timeline-selection.dragging {
+  cursor: grabbing;
+  background: rgba(255, 193, 7, 0.35);
+}
+
+.rec-timeline-handle {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 14px;
+  background: #ffc107;
+  border-radius: 3px;
+  cursor: ew-resize;
+  z-index: 3;
+  touch-action: none;
+  transform: translateX(-50%);
+}
+
+.rec-timeline-handle::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 12px;
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 1px;
+}
+
+.rec-timeline-handle.dragging {
+  background: #ffca28;
+  box-shadow: 0 0 6px rgba(255, 193, 7, 0.6);
+}
+
+.rec-timeline-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.rec-timeline-range-info {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.rec-timeline-archive-btn {
+  background: #ffc107;
+  color: #1a1a1a;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 16px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.rec-timeline-archive-btn:hover {
+  background: #ffca28;
+}
+
+.rec-timeline-archive-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.rec-timeline-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+}
+
+.rec-timeline-result.success {
+  background: rgba(76, 175, 80, 0.15);
+  color: #81c784;
+}
+
+.rec-timeline-result.error {
+  background: rgba(244, 67, 54, 0.15);
+  color: #ef5350;
+}
+
+.rec-timeline-download-link {
+  color: #64b5f6;
+  text-decoration: none;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.rec-timeline-download-link:hover {
+  text-decoration: underline;
+}
+
+.rec-timeline-archives {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rec-timeline-archives-toggle {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.7rem;
+  cursor: pointer;
+  text-align: left;
+  padding: 4px 0;
+}
+
+.rec-timeline-archives-toggle:hover {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.rec-timeline-archives-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rec-timeline-archive-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  font-size: 0.7rem;
+}
+
+.rec-timeline-archive-info {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.rec-timeline-archive-time {
+  color: rgba(255, 255, 255, 0.8);
+  font-variant-numeric: tabular-nums;
+}
+
+.rec-timeline-archive-status {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.65rem;
+}
+
+.rec-timeline-archive-status.completed {
+  color: #81c784;
+}
+
+.rec-timeline-archive-status.processing {
+  color: #ffc107;
+}
+
+.rec-timeline-archive-status.failed {
+  color: #ef5350;
+}
+
+.rec-timeline-archive-download {
+  color: #64b5f6;
+  text-decoration: none;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.rec-timeline-archive-download:hover {
+  text-decoration: underline;
+}
