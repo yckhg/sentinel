@@ -39,6 +39,22 @@ type createInvitationRequest struct {
 	Email string `json:"email"`
 }
 
+// parseDateTime tries multiple date formats that SQLite may return.
+func parseDateTime(s string) (time.Time, error) {
+	formats := []string{
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unable to parse datetime: %s", s)
+}
+
 // --- Handlers ---
 
 func handleCreateInvitation(db *sql.DB) http.HandlerFunc {
@@ -170,7 +186,7 @@ func handleListInvitations(db *sql.DB) http.HandlerFunc {
 			}
 			// Auto-expire pending invitations
 			if inv.Status == "pending" {
-				if expTime, err := time.Parse("2006-01-02 15:04:05", inv.ExpiresAt); err == nil && now.After(expTime) {
+				if expTime, err := parseDateTime(inv.ExpiresAt); err == nil && now.After(expTime) {
 					inv.Status = "expired"
 				}
 			}
@@ -249,7 +265,7 @@ func handleVerifyInvitation(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Check expiry
-		expTime, err := time.Parse("2006-01-02 15:04:05", inv.ExpiresAt)
+		expTime, err := parseDateTime(inv.ExpiresAt)
 		if err == nil && time.Now().UTC().After(expTime) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invitation has expired"})
 			return
@@ -293,7 +309,7 @@ func isValidInviteToken(db *sql.DB, r *http.Request, token string) bool {
 		return false
 	}
 
-	expTime, err := time.Parse("2006-01-02 15:04:05", expiresAt)
+	expTime, err := parseDateTime(expiresAt)
 	if err != nil {
 		return false
 	}
