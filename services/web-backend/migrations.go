@@ -112,6 +112,11 @@ var migrations = []migration{
 		name:    "add_stream_key_unique_index",
 		sql:     `CREATE UNIQUE INDEX IF NOT EXISTS idx_cameras_stream_key ON cameras(stream_key);`,
 	},
+	{
+		version: 7,
+		name:    "add_users_email",
+		sql:     `ALTER TABLE users ADD COLUMN email TEXT UNIQUE;`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {

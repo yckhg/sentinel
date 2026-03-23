@@ -91,6 +91,7 @@ type registerResponse struct {
 	ID       int64  `json:"id"`
 	Username string `json:"username"`
 	Name     string `json:"name"`
+	Email    string `json:"email"`
 	Status   string `json:"status"`
 }
 
@@ -148,8 +149,12 @@ func handleRegister(db *sql.DB) http.HandlerFunc {
 		// Check if invite token is valid — auto-approve if so
 		autoApprove := inviteToken != "" && isValidInviteToken(db, r, inviteToken)
 		status := "pending"
+		var email *string
 		if autoApprove {
 			status = "active"
+			if e := getInvitationEmail(db, r, inviteToken); e != "" {
+				email = &e
+			}
 		}
 
 		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
@@ -163,10 +168,14 @@ func handleRegister(db *sql.DB) http.HandlerFunc {
 		defer cancel()
 
 		result, err := db.ExecContext(ctx,
-			"INSERT INTO users (username, password_hash, name, status) VALUES (?, ?, ?, ?)",
-			req.Username, string(hash), req.Name, status,
+			"INSERT INTO users (username, password_hash, name, status, email) VALUES (?, ?, ?, ?, ?)",
+			req.Username, string(hash), req.Name, status, email,
 		)
 		if err != nil {
+			if strings.Contains(err.Error(), "UNIQUE constraint failed: users.email") {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "email already registered"})
+				return
+			}
 			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": "username already exists"})
 				return
@@ -183,12 +192,17 @@ func handleRegister(db *sql.DB) http.HandlerFunc {
 			acceptInvitation(db, r, inviteToken)
 		}
 
-		log.Printf("user registered: id=%d username=%s name=%s status=%s", id, req.Username, req.Name, status)
+		var emailStr string
+		if email != nil {
+			emailStr = *email
+		}
+		log.Printf("user registered: id=%d username=%s name=%s status=%s email=%s", id, req.Username, req.Name, status, emailStr)
 
 		writeJSON(w, http.StatusCreated, registerResponse{
 			ID:       id,
 			Username: req.Username,
 			Name:     req.Name,
+			Email:    emailStr,
 			Status:   status,
 		})
 	}
@@ -398,6 +412,7 @@ type pendingUserResponse struct {
 	ID        int64  `json:"id"`
 	Username  string `json:"username"`
 	Name      string `json:"name"`
+	Email     string `json:"email"`
 	Status    string `json:"status"`
 	CreatedAt string `json:"createdAt"`
 }
@@ -446,7 +461,7 @@ func handlePendingUsers(db *sql.DB) http.HandlerFunc {
 		defer cancel()
 
 		rows, err := db.QueryContext(ctx,
-			"SELECT id, username, name, status, created_at FROM users WHERE status = 'pending' ORDER BY created_at ASC",
+			"SELECT id, username, name, COALESCE(email, '') AS email, status, created_at FROM users WHERE status = 'pending' ORDER BY created_at ASC",
 		)
 		if err != nil {
 			log.Printf("query pending users error: %v", err)
@@ -458,7 +473,7 @@ func handlePendingUsers(db *sql.DB) http.HandlerFunc {
 		users := []pendingUserResponse{}
 		for rows.Next() {
 			var u pendingUserResponse
-			if err := rows.Scan(&u.ID, &u.Username, &u.Name, &u.Status, &u.CreatedAt); err != nil {
+			if err := rows.Scan(&u.ID, &u.Username, &u.Name, &u.Email, &u.Status, &u.CreatedAt); err != nil {
 				log.Printf("scan pending user error: %v", err)
 				continue
 			}
@@ -565,7 +580,7 @@ func handleActiveUsers(db *sql.DB) http.HandlerFunc {
 		defer cancel()
 
 		rows, err := db.QueryContext(ctx,
-			"SELECT id, username, name, role, status, created_at FROM users WHERE status = 'active' ORDER BY created_at ASC",
+			"SELECT id, username, name, COALESCE(email, '') AS email, role, created_at FROM users WHERE status = 'active' ORDER BY created_at ASC",
 		)
 		if err != nil {
 			log.Printf("query active users error: %v", err)
@@ -578,14 +593,14 @@ func handleActiveUsers(db *sql.DB) http.HandlerFunc {
 			ID        int64  `json:"id"`
 			Username  string `json:"username"`
 			Name      string `json:"name"`
+			Email     string `json:"email"`
 			Role      string `json:"role"`
 			CreatedAt string `json:"createdAt"`
 		}
 		var users []activeUser
 		for rows.Next() {
 			var u activeUser
-			var status string
-			if err := rows.Scan(&u.ID, &u.Username, &u.Name, &u.Role, &status, &u.CreatedAt); err != nil {
+			if err := rows.Scan(&u.ID, &u.Username, &u.Name, &u.Email, &u.Role, &u.CreatedAt); err != nil {
 				log.Printf("scan active user error: %v", err)
 				continue
 			}

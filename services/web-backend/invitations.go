@@ -316,3 +316,18 @@ func isValidInviteToken(db *sql.DB, r *http.Request, token string) bool {
 
 	return time.Now().UTC().Before(expTime)
 }
+
+// getInvitationEmail returns the email associated with an invitation token.
+func getInvitationEmail(db *sql.DB, r *http.Request, token string) string {
+	ctx, cancel := dbCtx(r.Context())
+	defer cancel()
+
+	var email string
+	err := db.QueryRowContext(ctx,
+		"SELECT email FROM invitations WHERE token = ?", token,
+	).Scan(&email)
+	if err != nil {
+		return ""
+	}
+	return email
+}
