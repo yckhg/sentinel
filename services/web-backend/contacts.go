@@ -13,14 +13,18 @@ import (
 var phoneRegex = regexp.MustCompile(`^01[016789]-\d{3,4}-\d{4}$`)
 
 type contactRequest struct {
-	Name  string `json:"name"`
-	Phone string `json:"phone"`
+	Name        string `json:"name"`
+	Phone       string `json:"phone"`
+	Email       string `json:"email"`
+	NotifyEmail *bool  `json:"notifyEmail"`
 }
 
 type contactResponse struct {
-	ID    int64  `json:"id"`
-	Name  string `json:"name"`
-	Phone string `json:"phone"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Phone       string `json:"phone"`
+	Email       string `json:"email"`
+	NotifyEmail bool   `json:"notifyEmail"`
 }
 
 func validatePhone(phone string) bool {
@@ -32,7 +36,7 @@ func handleListContacts(db *sql.DB) http.HandlerFunc {
 		ctx, cancel := dbCtx(r.Context())
 		defer cancel()
 
-		rows, err := db.QueryContext(ctx, "SELECT id, name, phone FROM contacts ORDER BY id ASC")
+		rows, err := db.QueryContext(ctx, "SELECT id, name, phone, COALESCE(email, ''), notify_email FROM contacts ORDER BY id ASC")
 		if err != nil {
 			log.Printf("query contacts error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
@@ -43,7 +47,7 @@ func handleListContacts(db *sql.DB) http.HandlerFunc {
 		contacts := []contactResponse{}
 		for rows.Next() {
 			var c contactResponse
-			if err := rows.Scan(&c.ID, &c.Name, &c.Phone); err != nil {
+			if err := rows.Scan(&c.ID, &c.Name, &c.Phone, &c.Email, &c.NotifyEmail); err != nil {
 				log.Printf("scan contact error: %v", err)
 				continue
 			}
@@ -70,6 +74,7 @@ func handleCreateContact(db *sql.DB) http.HandlerFunc {
 
 		req.Name = strings.TrimSpace(req.Name)
 		req.Phone = strings.TrimSpace(req.Phone)
+		req.Email = strings.TrimSpace(req.Email)
 
 		if req.Name == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
@@ -84,12 +89,22 @@ func handleCreateContact(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		notifyEmail := false
+		if req.NotifyEmail != nil {
+			notifyEmail = *req.NotifyEmail
+		}
+
 		ctx, cancel := dbCtx(r.Context())
 		defer cancel()
 
+		var emailVal interface{}
+		if req.Email != "" {
+			emailVal = req.Email
+		}
+
 		result, err := db.ExecContext(ctx,
-			"INSERT INTO contacts (name, phone) VALUES (?, ?)",
-			req.Name, req.Phone,
+			"INSERT INTO contacts (name, phone, email, notify_email) VALUES (?, ?, ?, ?)",
+			req.Name, req.Phone, emailVal, notifyEmail,
 		)
 		if err != nil {
 			log.Printf("insert contact error: %v", err)
@@ -98,12 +113,14 @@ func handleCreateContact(db *sql.DB) http.HandlerFunc {
 		}
 
 		id, _ := result.LastInsertId()
-		log.Printf("contact created: id=%d name=%s phone=%s by user=%d", id, req.Name, req.Phone, user.UserID)
+		log.Printf("contact created: id=%d name=%s phone=%s email=%v by user=%d", id, req.Name, req.Phone, emailVal, user.UserID)
 
 		writeJSON(w, http.StatusCreated, contactResponse{
-			ID:    id,
-			Name:  req.Name,
-			Phone: req.Phone,
+			ID:          id,
+			Name:        req.Name,
+			Phone:       req.Phone,
+			Email:       req.Email,
+			NotifyEmail: notifyEmail,
 		})
 	}
 }
@@ -137,8 +154,8 @@ func handleUpdateContact(db *sql.DB) http.HandlerFunc {
 
 		// Load existing contact
 		var existing contactResponse
-		err := db.QueryRowContext(ctx, "SELECT id, name, phone FROM contacts WHERE id = ?", id).Scan(
-			&existing.ID, &existing.Name, &existing.Phone,
+		err := db.QueryRowContext(ctx, "SELECT id, name, phone, COALESCE(email, ''), notify_email FROM contacts WHERE id = ?", id).Scan(
+			&existing.ID, &existing.Name, &existing.Phone, &existing.Email, &existing.NotifyEmail,
 		)
 		if err == sql.ErrNoRows {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "contact not found"})
@@ -161,10 +178,20 @@ func handleUpdateContact(db *sql.DB) http.HandlerFunc {
 			}
 			existing.Phone = req.Phone
 		}
+		req.Email = strings.TrimSpace(req.Email)
+		existing.Email = req.Email
+		if req.NotifyEmail != nil {
+			existing.NotifyEmail = *req.NotifyEmail
+		}
+
+		var emailVal interface{}
+		if existing.Email != "" {
+			emailVal = existing.Email
+		}
 
 		_, err = db.ExecContext(ctx,
-			"UPDATE contacts SET name = ?, phone = ? WHERE id = ?",
-			existing.Name, existing.Phone, id,
+			"UPDATE contacts SET name = ?, phone = ?, email = ?, notify_email = ? WHERE id = ?",
+			existing.Name, existing.Phone, emailVal, existing.NotifyEmail, id,
 		)
 		if err != nil {
 			log.Printf("update contact error: %v", err)

@@ -117,6 +117,14 @@ var migrations = []migration{
 		name:    "add_users_email",
 		sql:     `ALTER TABLE users ADD COLUMN email TEXT UNIQUE;`,
 	},
+	{
+		version: 8,
+		name:    "add_contacts_email",
+		sql: `
+			ALTER TABLE contacts ADD COLUMN email TEXT;
+			ALTER TABLE contacts ADD COLUMN notify_email INTEGER NOT NULL DEFAULT 0;
+		`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {

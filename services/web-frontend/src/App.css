@@ -330,6 +330,40 @@ body {
   color: #666;
 }
 
+.mgmt-card-email {
+  font-size: 0.8rem;
+  color: #666;
+}
+
+.mgmt-card-badge {
+  display: inline-block;
+  font-size: 0.65rem;
+  background: #e3f2fd;
+  color: #1565c0;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: 600;
+}
+
+.mgmt-form-checkbox {
+  margin-bottom: 10px;
+}
+
+.mgmt-form-checkbox label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #333;
+  cursor: pointer;
+}
+
+.mgmt-form-checkbox input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
 .mgmt-card-actions {
   display: flex;
   gap: 6px;

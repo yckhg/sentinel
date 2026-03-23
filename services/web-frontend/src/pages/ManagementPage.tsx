@@ -5,6 +5,8 @@ interface Contact {
   id: number;
   name: string;
   phone: string;
+  email: string;
+  notifyEmail: boolean;
 }
 
 interface Site {
@@ -111,6 +113,8 @@ export default function ManagementPage() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [addName, setAddName] = useState("");
   const [addPhone, setAddPhone] = useState("");
+  const [addEmail, setAddEmail] = useState("");
+  const [addNotifyEmail, setAddNotifyEmail] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
   const [addLoading, setAddLoading] = useState(false);
 
@@ -118,6 +122,8 @@ export default function ManagementPage() {
   const [editId, setEditId] = useState<number | null>(null);
   const [editName, setEditName] = useState("");
   const [editPhone, setEditPhone] = useState("");
+  const [editEmail, setEditEmail] = useState("");
+  const [editNotifyEmail, setEditNotifyEmail] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   const [editLoading, setEditLoading] = useState(false);
 
@@ -625,7 +631,7 @@ export default function ManagementPage() {
       const res = await fetchWithTimeout("/api/contacts", {
         method: "POST",
         headers: getAuthHeaders(),
-        body: JSON.stringify({ name: addName.trim(), phone: addPhone }),
+        body: JSON.stringify({ name: addName.trim(), phone: addPhone, email: addEmail.trim(), notifyEmail: addNotifyEmail }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
@@ -633,6 +639,8 @@ export default function ManagementPage() {
       }
       setAddName("");
       setAddPhone("");
+      setAddEmail("");
+      setAddNotifyEmail(false);
       setShowAddForm(false);
       await fetchContacts();
     } catch (err) {
@@ -646,6 +654,8 @@ export default function ManagementPage() {
     setEditId(contact.id);
     setEditName(contact.name);
     setEditPhone(contact.phone);
+    setEditEmail(contact.email || "");
+    setEditNotifyEmail(contact.notifyEmail);
     setEditError(null);
   };
 
@@ -670,7 +680,7 @@ export default function ManagementPage() {
       const res = await fetchWithTimeout(`/api/contacts/${editId}`, {
         method: "PUT",
         headers: getAuthHeaders(),
-        body: JSON.stringify({ name: editName.trim(), phone: editPhone }),
+        body: JSON.stringify({ name: editName.trim(), phone: editPhone, email: editEmail.trim(), notifyEmail: editNotifyEmail }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
@@ -920,6 +930,25 @@ export default function ManagementPage() {
               maxLength={13}
             />
           </div>
+          <div className="mgmt-form-field">
+            <label>이메일</label>
+            <input
+              type="email"
+              value={addEmail}
+              onChange={(e) => setAddEmail(e.target.value)}
+              placeholder="example@email.com"
+            />
+          </div>
+          <div className="mgmt-form-field mgmt-form-checkbox">
+            <label>
+              <input
+                type="checkbox"
+                checked={addNotifyEmail}
+                onChange={(e) => setAddNotifyEmail(e.target.checked)}
+              />
+              이메일 알림 수신
+            </label>
+          </div>
           {addError && <p className="mgmt-form-error">{addError}</p>}
           <div className="mgmt-form-actions">
             <button
@@ -935,6 +964,8 @@ export default function ManagementPage() {
                 setShowAddForm(false);
                 setAddName("");
                 setAddPhone("");
+                setAddEmail("");
+                setAddNotifyEmail(false);
                 setAddError(null);
               }}
             >
@@ -972,6 +1003,25 @@ export default function ManagementPage() {
                     maxLength={13}
                   />
                 </div>
+                <div className="mgmt-form-field">
+                  <label>이메일</label>
+                  <input
+                    type="email"
+                    value={editEmail}
+                    onChange={(e) => setEditEmail(e.target.value)}
+                    placeholder="example@email.com"
+                  />
+                </div>
+                <div className="mgmt-form-field mgmt-form-checkbox">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={editNotifyEmail}
+                      onChange={(e) => setEditNotifyEmail(e.target.checked)}
+                    />
+                    이메일 알림 수신
+                  </label>
+                </div>
                 {editError && <p className="mgmt-form-error">{editError}</p>}
                 <div className="mgmt-form-actions">
                   <button
@@ -994,6 +1044,8 @@ export default function ManagementPage() {
                 <div className="mgmt-card-info">
                   <span className="mgmt-card-name">{contact.name}</span>
                   <span className="mgmt-card-phone">{contact.phone}</span>
+                  {contact.email && <span className="mgmt-card-email">{contact.email}</span>}
+                  {contact.notifyEmail && <span className="mgmt-card-badge">이메일 알림</span>}
                 </div>
                 <div className="mgmt-card-actions">
                   <button
