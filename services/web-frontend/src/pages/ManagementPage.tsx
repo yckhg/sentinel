@@ -185,6 +185,11 @@ export default function ManagementPage() {
   const [cancelInviteTarget, setCancelInviteTarget] = useState<Invitation | null>(null);
   const [cancelInviteLoading, setCancelInviteLoading] = useState(false);
 
+  // Test alert simulation
+  const [testAlertLoading, setTestAlertLoading] = useState(false);
+  const [testAlertError, setTestAlertError] = useState<string | null>(null);
+  const [testAlertSuccess, setTestAlertSuccess] = useState<string | null>(null);
+
   const fetchContacts = async () => {
     try {
       const res = await fetchWithTimeout("/api/contacts", { headers: getAuthHeaders() });
@@ -356,6 +361,30 @@ export default function ManagementPage() {
       setCancelInviteTarget(null);
     } finally {
       setCancelInviteLoading(false);
+    }
+  };
+
+  const handleTestAlert = async () => {
+    setTestAlertError(null);
+    setTestAlertSuccess(null);
+    setTestAlertLoading(true);
+    try {
+      const res = await fetchWithTimeout("/api/test-alert", {
+        method: "POST",
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      setTestAlertSuccess("테스트 비상 신호가 발송되었습니다. 사고 이력 탭에서 확인하세요.");
+      setTimeout(() => setTestAlertSuccess(null), 5000);
+    } catch (err) {
+      setTestAlertError(
+        isTimeoutError(err) ? timeoutMessage() : `테스트 발송 실패: ${err instanceof Error ? err.message : "알 수 없는 오류"}`
+      );
+    } finally {
+      setTestAlertLoading(false);
     }
   };
 
@@ -1344,6 +1373,33 @@ export default function ManagementPage() {
               ))}
             </div>
           )}
+        </>
+      )}
+
+      {/* Test alert simulation section (admin only) */}
+      {showAccounts && (
+        <>
+          <div className="mgmt-section-divider" />
+          <div className="mgmt-header">
+            <h2>비상 신호 시뮬레이션</h2>
+          </div>
+          <div className="mgmt-test-alert-section">
+            <p className="mgmt-test-alert-desc">
+              테스트 비상 신호를 발송하여 전체 알림 체인(MQTT → hw-gateway → notifier → KakaoTalk/SMS/이메일)을 검증합니다.
+              모든 메시지에 [테스트] 접두사가 포함됩니다.
+            </p>
+            {testAlertError && <p className="mgmt-form-error">{testAlertError}</p>}
+            {testAlertSuccess && <p className="mgmt-form-success">{testAlertSuccess}</p>}
+            <div className="mgmt-form-actions">
+              <button
+                className="mgmt-btn mgmt-btn-warning"
+                onClick={handleTestAlert}
+                disabled={testAlertLoading}
+              >
+                {testAlertLoading ? "발송 중..." : "비상 신호 시뮬레이션"}
+              </button>
+            </div>
+          </div>
         </>
       )}
 

@@ -125,6 +125,11 @@ var migrations = []migration{
 			ALTER TABLE contacts ADD COLUMN notify_email INTEGER NOT NULL DEFAULT 0;
 		`,
 	},
+	{
+		version: 9,
+		name:    "add_incidents_is_test",
+		sql:     `ALTER TABLE incidents ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0;`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {

@@ -416,6 +416,17 @@ body {
   margin-bottom: 8px;
 }
 
+.mgmt-test-alert-section {
+  padding: 12px 0;
+}
+
+.mgmt-test-alert-desc {
+  font-size: 0.8rem;
+  color: #666;
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+
 .mgmt-form-actions {
   display: flex;
   gap: 8px;
@@ -449,6 +460,11 @@ body {
 
 .mgmt-btn-danger {
   background: #d32f2f;
+  color: #fff;
+}
+
+.mgmt-btn-warning {
+  background: #ed6c02;
   color: #fff;
 }
 
@@ -1034,6 +1050,22 @@ body {
 .incidents-card-badge.unconfirmed {
   background: #fff3e0;
   color: #e65100;
+}
+
+.incidents-card-badge.test-badge {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+
+.incidents-card-badges {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.incidents-card-test {
+  border-left: 3px solid #1565c0;
+  background: #f8fbff;
 }
 
 .incidents-card-desc {

@@ -43,6 +43,7 @@ type AlertPayload struct {
 	Description string `json:"description"`
 	Severity    string `json:"severity"`
 	Timestamp   string `json:"timestamp"`
+	Test        bool   `json:"test,omitempty"`
 }
 
 // IncidentPayload forwarded to web-backend POST /api/incidents.
@@ -50,6 +51,13 @@ type IncidentPayload struct {
 	SiteID      string `json:"siteId"`
 	Description string `json:"description"`
 	OccurredAt  string `json:"occurredAt"`
+	IsTest      bool   `json:"isTest,omitempty"`
+}
+
+// TestAlertRequest received from web-backend POST /api/test-alert.
+type TestAlertRequest struct {
+	SiteID   string `json:"siteId"`
+	DeviceID string `json:"deviceId"`
 }
 
 // HeartbeatPayload received from MQTT safety/+/heartbeat topic.
@@ -142,6 +150,10 @@ func main() {
 
 	mux.HandleFunc("GET /api/equipment/status", handleEquipmentStatus)
 
+	mux.HandleFunc("POST /api/test-alert", func(w http.ResponseWriter, r *http.Request) {
+		handleTestAlert(w, r, mqttClient)
+	})
+
 	log.Println("hw-gateway listening on :8080")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatal(err)
@@ -215,7 +227,11 @@ func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
 		alert.SiteID = parts[1]
 	}
 
-	log.Printf("[ALERT] deviceId=%s siteId=%s type=%s severity=%s", alert.DeviceID, alert.SiteID, alert.Type, alert.Severity)
+	if alert.Test {
+		log.Printf("[ALERT][TEST] deviceId=%s siteId=%s type=%s severity=%s", alert.DeviceID, alert.SiteID, alert.Type, alert.Severity)
+	} else {
+		log.Printf("[ALERT] deviceId=%s siteId=%s type=%s severity=%s", alert.DeviceID, alert.SiteID, alert.Type, alert.Severity)
+	}
 
 	// Forward to notifier and web-backend in parallel
 	done := make(chan struct{}, 2)
@@ -273,6 +289,7 @@ func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
 		SiteID:      alert.SiteID,
 		Description: alert.Description,
 		OccurredAt:  alert.Timestamp,
+		IsTest:      alert.Test,
 	}
 	body, err := json.Marshal(incident)
 	if err != nil {
@@ -461,6 +478,69 @@ func handleRestart(w http.ResponseWriter, r *http.Request, mqttClient mqtt.Clien
 	}
 
 	log.Printf("[RESTART] Published restart command to %s: deviceId=%s requestedBy=%s", topic, req.DeviceID, req.RequestedBy)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "sent",
+		"topic":  topic,
+	})
+}
+
+func handleTestAlert(w http.ResponseWriter, r *http.Request, mqttClient mqtt.Client) {
+	var req TestAlertRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON payload"})
+		return
+	}
+
+	if req.SiteID == "" {
+		req.SiteID = "test"
+	}
+	if req.DeviceID == "" {
+		req.DeviceID = "TEST-DEVICE"
+	}
+
+	if !mqttClient.IsConnected() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "MQTT broker not connected"})
+		return
+	}
+
+	alert := AlertPayload{
+		DeviceID:    req.DeviceID,
+		SiteID:      req.SiteID,
+		Type:        "test",
+		Description: "[테스트] 비상 신호 시뮬레이션",
+		Severity:    "critical",
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Test:        true,
+	}
+
+	body, err := json.Marshal(alert)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "failed to marshal payload"})
+		return
+	}
+
+	topic := fmt.Sprintf("safety/%s/alert", req.SiteID)
+	token := mqttClient.Publish(topic, 2, false, body) // QoS 2 — same as real alerts
+	token.Wait()
+
+	if token.Error() != nil {
+		log.Printf("[TEST-ALERT] Failed to publish to %s: %v", topic, token.Error())
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "failed to publish test alert"})
+		return
+	}
+
+	log.Printf("[TEST-ALERT] Published test alert to %s: deviceId=%s", topic, req.DeviceID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

@@ -9,6 +9,7 @@ interface Incident {
   occurredAt: string;
   confirmedAt: string | null;
   confirmedBy: string | null;
+  isTest: boolean;
 }
 
 interface Pagination {
@@ -136,12 +137,17 @@ export default function IncidentsPage() {
       ) : (
         <div className="incidents-list">
           {incidents.map((inc) => (
-            <div key={inc.id} className="incidents-card">
+            <div key={inc.id} className={`incidents-card${inc.isTest ? " incidents-card-test" : ""}`}>
               <div className="incidents-card-header">
                 <span className="incidents-card-time">{formatDateTime(inc.occurredAt)}</span>
-                <span className={`incidents-card-badge ${inc.confirmedAt ? "confirmed" : "unconfirmed"}`}>
-                  {inc.confirmedAt ? "확인됨" : "미확인"}
-                </span>
+                <div className="incidents-card-badges">
+                  {inc.isTest && (
+                    <span className="incidents-card-badge test-badge">테스트</span>
+                  )}
+                  <span className={`incidents-card-badge ${inc.confirmedAt ? "confirmed" : "unconfirmed"}`}>
+                    {inc.confirmedAt ? "확인됨" : "미확인"}
+                  </span>
+                </div>
               </div>
               <div className="incidents-card-desc">{inc.description || "(설명 없음)"}</div>
               {inc.confirmedAt && (

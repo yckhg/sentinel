@@ -116,6 +116,9 @@ func main() {
 	// Equipment restart (any authenticated user)
 	apiMux.HandleFunc("POST /api/equipment/restart", handleEquipmentRestart())
 
+	// Test alert simulation (admin only)
+	apiMux.HandleFunc("POST /api/test-alert", handleTestAlertProxy())
+
 	// Temporary links management (admin only)
 	apiMux.HandleFunc("GET /api/links", handleListTempLinks())
 	apiMux.HandleFunc("DELETE /api/links/{id}", handleRevokeTempLink())

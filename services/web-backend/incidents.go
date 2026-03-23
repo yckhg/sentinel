@@ -13,6 +13,7 @@ type createIncidentRequest struct {
 	SiteID      string `json:"siteId"`
 	Description string `json:"description"`
 	OccurredAt  string `json:"occurredAt"`
+	IsTest      bool   `json:"isTest,omitempty"`
 }
 
 // handleCreateIncident handles POST /api/incidents from hw-gateway (internal)
@@ -34,17 +35,21 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 		defer cancel()
 
 		// Use provided occurredAt or default to now (handled by DB default)
+		isTest := 0
+		if req.IsTest {
+			isTest = 1
+		}
 		var result sql.Result
 		var err error
 		if req.OccurredAt != "" {
 			result, err = db.ExecContext(ctx,
-				"INSERT INTO incidents (site_id, description, occurred_at) VALUES (?, ?, ?)",
-				req.SiteID, req.Description, req.OccurredAt,
+				"INSERT INTO incidents (site_id, description, occurred_at, is_test) VALUES (?, ?, ?, ?)",
+				req.SiteID, req.Description, req.OccurredAt, isTest,
 			)
 		} else {
 			result, err = db.ExecContext(ctx,
-				"INSERT INTO incidents (site_id, description) VALUES (?, ?)",
-				req.SiteID, req.Description,
+				"INSERT INTO incidents (site_id, description, is_test) VALUES (?, ?, ?)",
+				req.SiteID, req.Description, isTest,
 			)
 		}
 		if err != nil {
@@ -77,6 +82,7 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 			"siteId":      req.SiteID,
 			"description": req.Description,
 			"occurredAt":  occurredAt,
+			"isTest":      req.IsTest,
 			"site": map[string]string{
 				"address":      address,
 				"managerName":  managerName,
@@ -141,7 +147,7 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Fetch page
-		dataQuery := "SELECT id, site_id, description, datetime(occurred_at), confirmed_at, confirmed_by FROM incidents " +
+		dataQuery := "SELECT id, site_id, description, datetime(occurred_at), confirmed_at, confirmed_by, is_test FROM incidents " +
 			whereClause + " ORDER BY datetime(occurred_at) DESC LIMIT ? OFFSET ?"
 		dataArgs := append(args, limit, offset)
 		rows, err := db.QueryContext(ctx, dataQuery, dataArgs...)
@@ -159,15 +165,18 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 			OccurredAt  string  `json:"occurredAt"`
 			ConfirmedAt *string `json:"confirmedAt"`
 			ConfirmedBy *string `json:"confirmedBy"`
+			IsTest      bool    `json:"isTest"`
 		}
 
 		incidents := []incidentRow{}
 		for rows.Next() {
 			var inc incidentRow
-			if err := rows.Scan(&inc.ID, &inc.SiteID, &inc.Description, &inc.OccurredAt, &inc.ConfirmedAt, &inc.ConfirmedBy); err != nil {
+			var isTest int
+			if err := rows.Scan(&inc.ID, &inc.SiteID, &inc.Description, &inc.OccurredAt, &inc.ConfirmedAt, &inc.ConfirmedBy, &isTest); err != nil {
 				log.Printf("scan incident error: %v", err)
 				continue
 			}
+			inc.IsTest = isTest == 1
 			incidents = append(incidents, inc)
 		}
 

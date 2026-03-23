@@ -81,3 +81,46 @@ func handleEquipmentRestart() http.HandlerFunc {
 		w.Write(respBody)
 	}
 }
+
+func handleTestAlertProxy() http.HandlerFunc {
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := getAuthUser(r)
+		if user.Role != "admin" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin only"})
+			return
+		}
+
+		log.Printf("test alert request from user %d (%s)", user.UserID, user.Role)
+
+		// Forward to hw-gateway test-alert endpoint
+		payload := map[string]string{
+			"siteId":   "test",
+			"deviceId": "TEST-DEVICE",
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+
+		resp, err := client.Post(hwGatewayURL+"/api/test-alert", "application/json", bytes.NewReader(body))
+		if err != nil {
+			log.Printf("failed to forward test alert to hw-gateway: %v", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to reach hw-gateway"})
+			return
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read hw-gateway response"})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
+	}
+}

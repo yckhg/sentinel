@@ -25,6 +25,7 @@ type AlertPayload struct {
 	Description string `json:"description"`
 	Severity    string `json:"severity"`
 	Timestamp   string `json:"timestamp"`
+	Test        bool   `json:"test,omitempty"`
 }
 
 type Contact struct {
@@ -191,8 +192,13 @@ func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink str
 		return fmt.Errorf("KakaoTalk API not configured")
 	}
 
+	description := alert.Description
+	if alert.Test {
+		description = "[테스트] " + description
+	}
+
 	variables := map[string]string{
-		"description": alert.Description,
+		"description": description,
 		"siteId":      alert.SiteID,
 		"deviceId":    alert.DeviceID,
 		"severity":    alert.Severity,
@@ -242,8 +248,12 @@ func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) e
 		return fmt.Errorf("NHN Cloud SMS not configured")
 	}
 
-	body := fmt.Sprintf("[위기알림] %s\n현장: %s\n장비: %s\n심각도: %s\n시각: %s",
-		alert.Description, alert.SiteID, alert.DeviceID, alert.Severity, alert.Timestamp)
+	prefix := "[위기알림]"
+	if alert.Test {
+		prefix = "[테스트][위기알림]"
+	}
+	body := fmt.Sprintf("%s %s\n현장: %s\n장비: %s\n심각도: %s\n시각: %s",
+		prefix, alert.Description, alert.SiteID, alert.DeviceID, alert.Severity, alert.Timestamp)
 	if cctvLink != "" {
 		body += fmt.Sprintf("\nCCTV: %s", cctvLink)
 	}
@@ -292,17 +302,23 @@ func sendCrisisEmail(cfg Config, contact Contact, alert AlertPayload, cctvLink s
 		return fmt.Errorf("SMTP not configured")
 	}
 
-	subject := fmt.Sprintf("[위기알림] %s — %s", alert.Type, alert.Description)
+	subjectPrefix := "[위기알림]"
+	heading := "위기 알림"
+	if alert.Test {
+		subjectPrefix = "[테스트][위기알림]"
+		heading = "[테스트] 위기 알림"
+	}
+	subject := fmt.Sprintf("%s %s — %s", subjectPrefix, alert.Type, alert.Description)
 
 	body := fmt.Sprintf(`<html><body>
-<h2>위기 알림</h2>
+<h2>%s</h2>
 <p><strong>유형:</strong> %s</p>
 <p><strong>설명:</strong> %s</p>
 <p><strong>현장:</strong> %s</p>
 <p><strong>장비:</strong> %s</p>
 <p><strong>심각도:</strong> %s</p>
 <p><strong>시각:</strong> %s</p>`,
-		alert.Type, alert.Description, alert.SiteID, alert.DeviceID, alert.Severity, alert.Timestamp)
+		heading, alert.Type, alert.Description, alert.SiteID, alert.DeviceID, alert.Severity, alert.Timestamp)
 
 	if cctvLink != "" {
 		body += fmt.Sprintf(`<p><strong>CCTV:</strong> <a href="%s">실시간 보기</a></p>`, cctvLink)
