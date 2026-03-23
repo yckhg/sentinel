@@ -107,6 +107,11 @@ var migrations = []migration{
 			WHERE stream_key = 'yt-cam-2' AND source_type = 'youtube' AND source_url = '';
 		`,
 	},
+	{
+		version: 6,
+		name:    "add_stream_key_unique_index",
+		sql:     `CREATE UNIQUE INDEX IF NOT EXISTS idx_cameras_stream_key ON cameras(stream_key);`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {

@@ -154,7 +154,6 @@ export default function ManagementPage() {
   const [camAddZone, setCamAddZone] = useState("");
   const [camAddSourceType, setCamAddSourceType] = useState("rtsp");
   const [camAddSourceUrl, setCamAddSourceUrl] = useState("");
-  const [camAddStreamKey, setCamAddStreamKey] = useState("");
   const [camAddError, setCamAddError] = useState<string | null>(null);
   const [camAddLoading, setCamAddLoading] = useState(false);
   const [camEditId, setCamEditId] = useState<number | null>(null);
@@ -163,7 +162,6 @@ export default function ManagementPage() {
   const [camEditZone, setCamEditZone] = useState("");
   const [camEditSourceType, setCamEditSourceType] = useState("rtsp");
   const [camEditSourceUrl, setCamEditSourceUrl] = useState("");
-  const [camEditStreamKey, setCamEditStreamKey] = useState("");
   const [camEditEnabled, setCamEditEnabled] = useState(true);
   const [camEditError, setCamEditError] = useState<string | null>(null);
   const [camEditLoading, setCamEditLoading] = useState(false);
@@ -358,7 +356,6 @@ export default function ManagementPage() {
   const handleCameraAdd = async () => {
     setCamAddError(null);
     if (!camAddName.trim()) { setCamAddError("이름을 입력하세요"); return; }
-    if (!camAddStreamKey.trim()) { setCamAddError("스트림 키를 입력하세요"); return; }
     setCamAddLoading(true);
     try {
       const res = await fetchWithTimeout("/api/cameras", {
@@ -370,7 +367,6 @@ export default function ManagementPage() {
           zone: camAddZone.trim(),
           sourceType: camAddSourceType,
           sourceUrl: camAddSourceUrl.trim(),
-          streamKey: camAddStreamKey.trim(),
         }),
       });
       if (!res.ok) {
@@ -378,7 +374,7 @@ export default function ManagementPage() {
         throw new Error(body?.error || `HTTP ${res.status}`);
       }
       setCamAddName(""); setCamAddLocation(""); setCamAddZone("");
-      setCamAddSourceType("rtsp"); setCamAddSourceUrl(""); setCamAddStreamKey("");
+      setCamAddSourceType("rtsp"); setCamAddSourceUrl("");
       setShowCameraAddForm(false);
       await fetchCameras();
     } catch (err) {
@@ -395,7 +391,6 @@ export default function ManagementPage() {
     setCamEditZone(cam.zone);
     setCamEditSourceType(cam.sourceType);
     setCamEditSourceUrl(cam.sourceUrl);
-    setCamEditStreamKey(cam.streamKey);
     setCamEditEnabled(cam.enabled);
     setCamEditError(null);
   };
@@ -409,7 +404,6 @@ export default function ManagementPage() {
     if (camEditId === null) return;
     setCamEditError(null);
     if (!camEditName.trim()) { setCamEditError("이름을 입력하세요"); return; }
-    if (!camEditStreamKey.trim()) { setCamEditError("스트림 키를 입력하세요"); return; }
     setCamEditLoading(true);
     try {
       const res = await fetchWithTimeout(`/api/cameras/${camEditId}`, {
@@ -421,7 +415,6 @@ export default function ManagementPage() {
           zone: camEditZone.trim(),
           sourceType: camEditSourceType,
           sourceUrl: camEditSourceUrl.trim(),
-          streamKey: camEditStreamKey.trim(),
           enabled: camEditEnabled,
         }),
       });
@@ -1064,10 +1057,6 @@ export default function ManagementPage() {
                 <label>소스 URL</label>
                 <input type="text" value={camAddSourceUrl} onChange={(e) => setCamAddSourceUrl(e.target.value)} placeholder={camAddSourceType === "rtsp" ? "rtsp://..." : "https://youtube.com/..."} />
               </div>
-              <div className="mgmt-form-field">
-                <label>스트림 키</label>
-                <input type="text" value={camAddStreamKey} onChange={(e) => setCamAddStreamKey(e.target.value)} placeholder="cam-1" />
-              </div>
               {camAddError && <p className="mgmt-form-error">{camAddError}</p>}
               <div className="mgmt-form-actions">
                 <button className="mgmt-btn mgmt-btn-primary" onClick={handleCameraAdd} disabled={camAddLoading}>
@@ -1075,7 +1064,7 @@ export default function ManagementPage() {
                 </button>
                 <button className="mgmt-btn mgmt-btn-secondary" onClick={() => {
                   setShowCameraAddForm(false); setCamAddName(""); setCamAddLocation(""); setCamAddZone("");
-                  setCamAddSourceType("rtsp"); setCamAddSourceUrl(""); setCamAddStreamKey(""); setCamAddError(null);
+                  setCamAddSourceType("rtsp"); setCamAddSourceUrl(""); setCamAddError(null);
                 }}>
                   취소
                 </button>
@@ -1117,10 +1106,6 @@ export default function ManagementPage() {
                     <div className="mgmt-form-field">
                       <label>소스 URL</label>
                       <input type="text" value={camEditSourceUrl} onChange={(e) => setCamEditSourceUrl(e.target.value)} />
-                    </div>
-                    <div className="mgmt-form-field">
-                      <label>스트림 키</label>
-                      <input type="text" value={camEditStreamKey} onChange={(e) => setCamEditStreamKey(e.target.value)} />
                     </div>
                     <div className="mgmt-form-field">
                       <label className="mgmt-checkbox-label">

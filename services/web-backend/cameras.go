@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -79,10 +81,20 @@ type cameraRequest struct {
 	Name       string `json:"name"`
 	Location   string `json:"location"`
 	Zone       string `json:"zone"`
-	StreamKey  string `json:"streamKey"`
 	SourceType string `json:"sourceType"`
 	SourceURL  string `json:"sourceUrl"`
 	Enabled    *bool  `json:"enabled"`
+}
+
+// generateStreamKey creates a unique stream key in the format cam-{8 hex chars}.
+func generateStreamKey() string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		log.Printf("crypto/rand failed: %v", err)
+		// fallback: should never happen
+		return fmt.Sprintf("cam-%08x", 0)
+	}
+	return "cam-" + hex.EncodeToString(b)
 }
 
 var cache = &streamCache{}
@@ -293,7 +305,6 @@ func handleCreateCamera(db *sql.DB) http.HandlerFunc {
 		req.Name = strings.TrimSpace(req.Name)
 		req.Location = strings.TrimSpace(req.Location)
 		req.Zone = strings.TrimSpace(req.Zone)
-		req.StreamKey = strings.TrimSpace(req.StreamKey)
 		req.SourceType = strings.TrimSpace(req.SourceType)
 		req.SourceURL = strings.TrimSpace(req.SourceURL)
 
@@ -301,10 +312,8 @@ func handleCreateCamera(db *sql.DB) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
 			return
 		}
-		if req.StreamKey == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "streamKey is required"})
-			return
-		}
+
+		streamKey := generateStreamKey()
 		if req.SourceType == "" {
 			req.SourceType = "rtsp"
 		}
@@ -327,7 +336,7 @@ func handleCreateCamera(db *sql.DB) http.HandlerFunc {
 
 		result, err := db.ExecContext(ctx,
 			"INSERT INTO cameras (name, location, zone, stream_key, source_type, source_url, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			req.Name, req.Location, req.Zone, req.StreamKey, req.SourceType, req.SourceURL, enabled,
+			req.Name, req.Location, req.Zone, streamKey, req.SourceType, req.SourceURL, enabled,
 		)
 		if err != nil {
 			log.Printf("insert camera error: %v", err)
@@ -336,7 +345,7 @@ func handleCreateCamera(db *sql.DB) http.HandlerFunc {
 		}
 
 		id, _ := result.LastInsertId()
-		log.Printf("camera created: id=%d name=%s streamKey=%s by user=%d", id, req.Name, req.StreamKey, user.UserID)
+		log.Printf("camera created: id=%d name=%s streamKey=%s by user=%d", id, req.Name, streamKey, user.UserID)
 		triggerCCTVReload()
 		triggerYouTubeReload()
 
@@ -345,7 +354,7 @@ func handleCreateCamera(db *sql.DB) http.HandlerFunc {
 			Name:       req.Name,
 			Location:   req.Location,
 			Zone:       req.Zone,
-			StreamKey:  req.StreamKey,
+			StreamKey:  streamKey,
 			SourceType: req.SourceType,
 			SourceURL:  req.SourceURL,
 			Enabled:    enabled != 0,
@@ -377,7 +386,6 @@ func handleUpdateCamera(db *sql.DB) http.HandlerFunc {
 		req.Name = strings.TrimSpace(req.Name)
 		req.Location = strings.TrimSpace(req.Location)
 		req.Zone = strings.TrimSpace(req.Zone)
-		req.StreamKey = strings.TrimSpace(req.StreamKey)
 		req.SourceType = strings.TrimSpace(req.SourceType)
 		req.SourceURL = strings.TrimSpace(req.SourceURL)
 
@@ -402,7 +410,7 @@ func handleUpdateCamera(db *sql.DB) http.HandlerFunc {
 		}
 		existing.Enabled = enabledInt != 0
 
-		// Apply partial updates
+		// Apply partial updates (stream_key is immutable — never changed after creation)
 		if req.Name != "" {
 			existing.Name = req.Name
 		}
@@ -411,9 +419,6 @@ func handleUpdateCamera(db *sql.DB) http.HandlerFunc {
 		}
 		if req.Zone != "" {
 			existing.Zone = req.Zone
-		}
-		if req.StreamKey != "" {
-			existing.StreamKey = req.StreamKey
 		}
 		if req.SourceType != "" {
 			if !validateSourceType(req.SourceType) {
