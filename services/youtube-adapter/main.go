@@ -219,7 +219,7 @@ func (m *StreamManager) manageStream(src YouTubeSource, state *streamState) {
 		state.loopCount++
 		state.Unlock()
 
-		ffErr := runFFmpeg(streamURL, rtmpDest, state.stopCh)
+		ffErr := runFFmpeg(streamURL, rtmpDest, src.LocalFile != "", state.stopCh)
 
 		select {
 		case <-state.stopCh:
@@ -285,11 +285,16 @@ func resolveStreamURL(youtubeURL string) (string, error) {
 // Video is re-encoded with libx264 (no B-frames) because nginx-rtmp module v1.2.2
 // drops connections when H.264 B-frame composition time offsets are present in FLV.
 // Audio is re-encoded to AAC 48k for consistent FLV compatibility.
-func runFFmpeg(sourceURL, rtmpDest string, stopCh chan struct{}) error {
-	cmd := exec.Command("ffmpeg",
+func runFFmpeg(sourceURL, rtmpDest string, isLocalFile bool, stopCh chan struct{}) error {
+	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
 		"-re",
+	}
+	if isLocalFile {
+		args = append(args, "-stream_loop", "-1")
+	}
+	args = append(args,
 		"-i", sourceURL,
 		"-c:v", "libx264",
 		"-preset", "ultrafast",
@@ -302,6 +307,7 @@ func runFFmpeg(sourceURL, rtmpDest string, stopCh chan struct{}) error {
 		"-flvflags", "no_duration_filesize",
 		rtmpDest,
 	)
+	cmd := exec.Command("ffmpeg", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
