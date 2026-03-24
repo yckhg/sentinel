@@ -134,6 +134,8 @@ func (rm *RecordingManager) manageRecording(cam CameraInfo, state *recorderState
 		log.Printf("[%s] Connecting to RTMP stream: %s", cam.StreamKey, srcURL)
 
 		// Record RTMP stream as segmented .ts files
+		// -fflags +genpts+discardcorrupt: regenerate PTS and discard corrupt frames
+		// -avoid_negative_ts make_zero: shift timestamps to start from zero
 		// -c copy: no transcoding (H.264 passthrough)
 		// -f segment: output as individual segment files
 		// -segment_time 10: 10-second segments
@@ -143,7 +145,9 @@ func (rm *RecordingManager) manageRecording(cam CameraInfo, state *recorderState
 		cmd := exec.Command("ffmpeg",
 			"-hide_banner",
 			"-loglevel", "warning",
+			"-fflags", "+genpts+discardcorrupt",
 			"-i", srcURL,
+			"-avoid_negative_ts", "make_zero",
 			"-c", "copy",
 			"-f", "segment",
 			"-segment_time", "10",
