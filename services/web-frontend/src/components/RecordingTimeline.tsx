@@ -74,6 +74,7 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
   const [dragging, setDragging] = useState<"start" | "end" | "range" | null>(null);
   const dragStartX = useRef(0);
   const dragStartVal = useRef({ start: 0, end: 0 });
+  const justDragged = useRef(false);
 
   // Playback cursor position (fraction)
   const [playbackPosition, setPlaybackPosition] = useState<number | null>(null);
@@ -216,12 +217,19 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
   };
 
   const handlePointerUp = () => {
+    if (dragging) {
+      justDragged.current = true;
+    }
     setDragging(null);
   };
 
   // Click on timeline bar to seek to that position for playback
   const handleTimelineClick = (e: React.MouseEvent) => {
     if (dragging) return; // Don't seek while dragging handles
+    if (justDragged.current) {
+      justDragged.current = false;
+      return;
+    }
     if (!timelineRef.current) return;
 
     const rect = timelineRef.current.getBoundingClientRect();
