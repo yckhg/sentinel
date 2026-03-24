@@ -429,6 +429,16 @@ func (rm *RecordingManager) CleanupOldSegments(rollingWindow time.Duration) {
 			}
 			fullPath := filepath.Join(streamDir, f.Name())
 
+			// Delete 0-byte segments unconditionally (even if protected)
+			info, infoErr := f.Info()
+			if infoErr == nil && info.Size() == 0 {
+				if err := os.Remove(fullPath); err == nil {
+					log.Printf("[cleanup] Deleted empty segment: %s", f.Name())
+					deleted++
+				}
+				continue
+			}
+
 			if rm.IsProtected(fullPath) {
 				continue
 			}
