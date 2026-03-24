@@ -252,8 +252,9 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
   const handleDownload = async (archiveId: string) => {
     setDownloading(archiveId);
     try {
+      const freshToken = localStorage.getItem("token");
       const res = await fetchWithTimeout(`/api/archives/${archiveId}/download`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        headers: freshToken ? { Authorization: `Bearer ${freshToken}` } : {},
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
