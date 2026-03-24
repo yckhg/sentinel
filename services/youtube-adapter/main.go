@@ -246,8 +246,9 @@ func (m *StreamManager) manageStream(src YouTubeSource, state *streamState) {
 			}
 		}
 
-		// FFmpeg exited cleanly (video ended) — loop by re-resolving URL
-		log.Printf("[%s] Stream ended, looping...", src.ID)
+		// FFmpeg exited cleanly — re-resolve URL and restart
+		// (local files with -stream_loop -1 won't reach here; only YouTube URLs)
+		log.Printf("[%s] Stream ended (URL source), re-resolving and restarting...", src.ID)
 		backoff = time.Second // reset backoff on clean exit
 	}
 }
