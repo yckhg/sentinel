@@ -2,7 +2,7 @@
 
 > **이 문서는 Sentinel MQTT 인터페이스의 단일 진실 원천(SSOT)입니다.**
 > H/W 펌웨어 개발자(또는 다른 AI 세션)에게 이 파일 하나만 전달하면 Sentinel에 메시지를 발행할 수 있도록 작성되었습니다.
-> 코드와 동기화 의무 — `services/hw-gateway/main.go` 변경 시 이 문서도 같이 수정해야 합니다 (`.claude/hooks/mqtt-spec-sync-check.sh`가 자동 체크).
+> 코드와 동기화 의무 — `services/hw-gateway/main.go` 변경 시 이 문서도 같이 수정해야 합니다 (`.claude/hooks/spec-sync-check.sh`가 자동 체크).
 
 ---
 
