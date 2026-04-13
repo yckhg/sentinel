@@ -87,6 +87,9 @@ func main() {
 	// Device seen (internal — from hw-gateway on heartbeat/alert)
 	mux.HandleFunc("POST /api/devices/seen", handleSeenDevice(db))
 
+	// Incident resolve from sensor (internal — from hw-gateway on MQTT alert/resolved with kind=sensor_button)
+	mux.HandleFunc("POST /api/incidents/{id}/resolve-from-sensor", handleResolveIncidentFromSensor(db))
+
 	// Protected API routes (JWT required)
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {

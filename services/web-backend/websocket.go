@@ -86,6 +86,15 @@ func BroadcastCrisisAlert(payload any) {
 	}, nil) // nil filter = all clients
 }
 
+// BroadcastIncidentResolved sends incident_resolved to all connected clients.
+func BroadcastIncidentResolved(payload any) {
+	hub.broadcast(WSMessage{
+		Type:      "incident_resolved",
+		Payload:   payload,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}, nil)
+}
+
 // BroadcastSystemAlarm sends system_alarm to admin clients only
 func BroadcastSystemAlarm(payload any) {
 	hub.broadcast(WSMessage{
