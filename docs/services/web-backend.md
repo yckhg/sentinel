@@ -31,7 +31,7 @@ Go 파일 분리: `services/web-backend/`
 - `ratelimit.go` — login/register limiter
 
 라우팅 구조:
-- **Public mux**: healthz, `/auth/*`, `/ws`, `/api/contacts`(GET only — notifier용), `/api/links/temp`, `/api/links/verify/{token}`, `/internal/*`(내부 서비스용), `/api/invitations/verify/{token}`, `POST /api/incidents`(hw-gateway용).
+- **Public mux**: healthz, `/auth/*`, `/ws`, `/api/contacts`(GET only — notifier용), `/api/links/temp`, `/api/links/verify/{token}`, `/internal/*`(내부 서비스용), `/api/invitations/verify/{token}`, `POST /api/incidents`(hw-gateway용), `POST /api/devices/seen`(hw-gateway용 — device 자동 영속).
 - **`apiMux` (authMiddleware 적용)**: 나머지 `/api/*` 모두 (contacts CRUD, sites, cameras CRUD, incidents list/ack/resolve, equipment restart, recordings/archives proxy, settings, links 관리).
 
 ## Environment Variables
@@ -76,7 +76,7 @@ docker compose logs -f web-backend
 | GET | `/internal/cameras`, `/internal/settings/{key}` | 내부 서비스용 (cctv/recording이 카메라 목록 fetch) |
 
 ### Auth 필요 (`/api/*`)
-contacts/sites/cameras CRUD, incidents list/ack/resolve, invitations, settings, links 관리, `POST /api/equipment/restart`(→ hw-gateway forward), `POST /api/test-alert`(→ notifier forward), recordings/archives/storage proxy(→ recording forward).
+contacts/sites/cameras CRUD, incidents list/ack/resolve, **devices list/alias/soft-delete/restore**, invitations, settings, links 관리, `POST /api/equipment/restart`(→ hw-gateway forward, devices 테이블 등록+미삭제 검증), `POST /api/test-alert`(→ notifier forward), recordings/archives/storage proxy(→ recording forward).
 
 ## Outbound Calls
 
@@ -107,5 +107,5 @@ contacts/sites/cameras CRUD, incidents list/ack/resolve, invitations, settings, 
 
 ## Storage / State
 
-- **SQLite** `/data/sentinel.db` — 테이블: users, contacts, sites, cameras, incidents, invitations, settings, temp_links 메타 등. 스키마는 `migrations.go` 참조 (SSOT).
+- **SQLite** `/data/sentinel.db` — 테이블: users, contacts, sites, cameras, incidents(+device_id), invitations, settings, temp_links 메타, devices(site_id+device_id UNIQUE, soft delete via deleted_at) 등. 스키마는 `migrations.go` 참조 (SSOT).
 - **In-memory**: temp link JWT blacklist, WebSocket client registry, rate limiter buckets.

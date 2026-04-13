@@ -16,6 +16,7 @@ H/W(MQTT)와 S/W(HTTP) 사이의 유일한 접점. MQTT에서 받은 crisis/hear
 | Inbound HTTP (web-backend → 본 서비스) | inbound | 본 문서 "HTTP API" |
 | Outbound HTTP (notifier `POST /api/notify`) | outbound | 본 문서 "Outbound Calls" |
 | Outbound HTTP (web-backend `POST /api/incidents`) | outbound | 본 문서 "Outbound Calls" |
+| Outbound HTTP (web-backend `POST /api/devices/seen`) | outbound | 본 문서 "Outbound Calls" |
 
 ## Code Structure
 
@@ -61,8 +62,12 @@ docker compose logs -f hw-gateway
    - 페이로드: crisis 이벤트 (siteId, deviceId, timestamp, description)
    - 타임아웃 10s, 실패 시 exponential backoff + jitter 재시도
 2. **web-backend** `POST http://web-backend:8080/api/incidents`
-   - 페이로드: 같은 crisis 이벤트 (incident 기록 + WebSocket push 트리거)
+   - 페이로드: 같은 crisis 이벤트 (incident 기록 + WebSocket push 트리거). `deviceId` 필드 포함 (사고 추적용).
    - notifier 호출과 **병렬** 실행 (goroutine)
+3. **web-backend** `POST http://web-backend:8080/api/devices/seen`
+   - 페이로드: `{siteId, deviceId}`
+   - 트리거: heartbeat 또는 alert 수신 시마다
+   - Best-effort: 5초 타임아웃, 재시도 없음, 실패는 로그만 (alert/heartbeat 처리는 계속)
 
 받는 쪽 내부 구현은 알 필요 없음. URL과 페이로드 형태만 맞추면 된다.
 

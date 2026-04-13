@@ -266,6 +266,46 @@ phone 포맷: `01[016789]-\d{3,4}-\d{4}`. DELETE 성공 `204`.
 
 ---
 
+## 6.5. Devices (센서/장비 영속)
+
+hw-gateway가 MQTT heartbeat/alert를 수신하면 `POST /api/devices/seen`을 호출하여 자동으로 등록·갱신한다. 삭제는 soft delete(`deleted_at`)이며, 이후 재등장 시 자동 복원된다.
+
+| Method | Path | Auth | 설명 |
+|--------|------|------|------|
+| GET | `/api/devices` | user | 삭제되지 않은 device 목록 |
+| GET | `/api/devices/all` | admin | 삭제 포함 전체 목록 |
+| PATCH | `/api/devices/{id}` | user | alias 수정 |
+| DELETE | `/api/devices/{id}` | user | soft delete |
+| POST | `/api/devices/{id}/restore` | user | 복원 |
+
+### Device object
+
+```json
+{
+  "id": 1,
+  "siteId": "site1",
+  "deviceId": "PRESS-01",
+  "alias": "1호 프레스",
+  "firstSeen": "2026-04-13 10:20:30",
+  "lastSeen": "2026-04-13 10:30:00",
+  "deletedAt": null
+}
+```
+
+### PATCH /api/devices/{id}
+
+Request: `{"alias": "string"}`. Response `200`: `{"id": 1, "alias": "..."}`. 없으면 `404`.
+
+### DELETE /api/devices/{id}
+
+Response `204`. 이미 삭제되었거나 없으면 `404`.
+
+### POST /api/devices/{id}/restore
+
+Response `200`: `{"id": 1, "status": "restored"}`.
+
+---
+
 ## 7. Equipment / Restart
 
 | Method | Path | Auth | 설명 |
@@ -280,6 +320,8 @@ Request:
 { "siteId": "site-001", "deviceId": "DEV-001", "reason": "optional" }
 ```
 Response: hw-gateway 응답을 그대로 중계 (상태코드 포함). 통신 실패 시 `502`.
+
+**검증**: `deviceId`가 `devices` 테이블에 등록되어 있고 `deleted_at IS NULL`이어야 함. 미등록이거나 삭제된 device면 `400`. hw-gateway 자동 등록은 heartbeat 수신 이후 수행되므로, 최초 한 번 heartbeat가 들어오기 전까지는 restart가 거부된다.
 
 ### POST /api/test-alert (admin)
 
@@ -417,6 +459,21 @@ Response `200`: `{"key", "value", "updatedAt"}`. 없는 key면 `404`.
 | GET | `/internal/settings/{key}` | 다른 서비스용 settings 조회 |
 | GET | `/healthz` | `{"status":"ok","service":"web-backend"}` |
 | GET | `/api/healthz` | 인증된 헬스체크 (user 정보 에코) |
+| POST | `/api/incidents` | hw-gateway가 crisis 이벤트 기록 (WS broadcast 트리거) |
+| POST | `/api/devices/seen` | hw-gateway가 heartbeat/alert 수신 시 호출 — device UPSERT, soft-deleted면 자동 복원 |
+
+### POST /api/devices/seen (internal)
+
+Request:
+```json
+{ "siteId": "site1", "deviceId": "PRESS-01" }
+```
+Response `200`: `{"status": "ok"}`.
+
+동작:
+- `devices(site_id, device_id)`가 없으면 INSERT (first_seen/last_seen = now).
+- 있으면 `last_seen = now`, `deleted_at = NULL` (soft-deleted였다면 복원).
+- 외부 노출 금지 — nginx/docker network 격리 전제.
 
 ---
 

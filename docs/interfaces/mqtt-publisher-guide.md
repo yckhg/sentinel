@@ -74,8 +74,9 @@ H/W가 위급 상황을 감지했을 때 발행. **반드시 QoS 2 (exactly-once
 2. 토픽의 `{siteId}`로 페이로드의 `siteId` 덮어쓰기 (일관성)
 3. **notifier**에 `POST /api/notify` (전체 페이로드 전달) — 알림 채널 발송
 4. **web-backend**에 `POST /api/incidents` — DB 기록 + WebSocket 푸시
-   - 전달 페이로드: `{siteId, description, occurredAt, isTest}` (alert.timestamp → occurredAt)
+   - 전달 페이로드: `{siteId, deviceId, description, occurredAt, isTest}` (alert.timestamp → occurredAt)
 5. 두 HTTP 호출은 병렬, 각 10초 타임아웃
+6. **web-backend** `POST /api/devices/seen` — device 영속 등록/복원 (best-effort, 5초 타임아웃)
 
 ---
 
@@ -108,8 +109,8 @@ H/W가 위급 상황을 감지했을 때 발행. **반드시 QoS 2 (exactly-once
 ### Sentinel 측 처리
 
 - in-memory에 `{deviceId, siteId, alive=true, lastHeartbeat}` 갱신
-- DB 저장 없음, HTTP 포워딩 없음
-- `HEARTBEAT_TIMEOUT_SEC`(기본 30초) 동안 미수신 시 `alive=false`로 마킹
+- web-backend `POST /api/devices/seen` 호출 (best-effort, 5초 타임아웃) — device 영속 등록/갱신/복원
+- `HEARTBEAT_TIMEOUT_SEC`(기본 30초) 동안 미수신 시 `alive=false`로 마킹 (DB의 `devices.deleted_at`은 건드리지 않음 — alive 상태와 삭제는 별개)
 
 ---
 
@@ -143,14 +144,18 @@ H/W는 페이로드의 `deviceId`가 자기 자신일 때만 재시작 동작을
 
 ---
 
-## 6. Device ID 정책
+## 6. Device ID 정책 / 자동 등록
 
-- **자동 수집 모델 (예정):** Sentinel은 처음 보는 `deviceId`를 자동으로 등록합니다. 사전 프로비저닝 불필요.
-- 운영자는 web UI에서 자동 등록된 디바이스에 **이름/별칭**만 부여합니다.
-- `deviceId`는 펌웨어에 하드코딩하거나 디바이스 시리얼/MAC 기반으로 안정적으로 생성하세요. 재부팅마다 바뀌면 안 됩니다.
+- **자동 등록 (구현됨, 2026-04):** hw-gateway는 `safety/+/heartbeat` 또는 `safety/+/alert` 수신 시 web-backend `POST /api/devices/seen`을 호출하여 처음 보는 `(siteId, deviceId)` 조합을 `devices` 테이블에 자동 등록합니다. 기존 row면 `last_seen`만 갱신. 사전 프로비저닝 불필요.
+- **영속 (Manual-only delete):** 한 번 등록된 device는 운영자가 명시적으로 삭제(soft delete)하지 않는 한 영속됩니다. 컨테이너 재시작·hw-gateway 메모리 초기화와 무관.
+- **복원:** soft-deleted(`deleted_at != NULL`) device가 다시 heartbeat/alert를 보내면 `deleted_at`이 자동으로 `NULL`로 초기화되어 복원됩니다.
+- **alert 기록:** alert 수신 시 web-backend `POST /api/incidents`에도 `deviceId`가 함께 전송되어 `incidents.device_id` 컬럼에 저장됩니다 (사고 추적용).
+- **Restart 검증:** web-backend `POST /api/equipment/restart`는 `devices` 테이블에 등록되고 미삭제 상태인 device에 대해서만 허용됩니다. 미등록이면 `400`. 최초 한 번 heartbeat가 들어오기 전까지는 restart 불가.
+- 운영자는 web UI에서 device에 **alias(별칭)**를 부여할 수 있습니다.
+- `deviceId`는 펌웨어에 하드코딩하거나 디바이스 시리얼/MAC 기반으로 안정적으로 생성하세요. 재부팅마다 바뀌면 새 row로 등록됩니다.
 - `siteId`도 동일 — 펌웨어 빌드 시 사이트별로 굽거나 설정 파일로 주입.
 
-> 자동 수집 기능은 현재 미구현 (2026-04 기준). 현재는 hw-gateway 메모리에만 추적되고 incidents 테이블에는 deviceId가 저장되지 않습니다.
+> `/api/devices/seen` 호출은 best-effort (5초 타임아웃, 재시도 없음). 실패해도 alert/heartbeat 처리 자체는 계속됩니다. 단, alert 경로에서는 `POST /api/incidents` 자체가 devices UPSERT를 보장합니다.
 
 ---
 
