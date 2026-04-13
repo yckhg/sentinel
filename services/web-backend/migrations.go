@@ -153,6 +153,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS
 			ALTER TABLE incidents ADD COLUMN resolution_notes TEXT;
 		`,
 	},
+	{
+		version: 12,
+		name:    "create_devices_table",
+		sql: `
+			CREATE TABLE IF NOT EXISTS devices (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				site_id TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				alias TEXT NOT NULL DEFAULT '',
+				first_seen DATETIME NOT NULL DEFAULT (datetime('now')),
+				last_seen DATETIME NOT NULL DEFAULT (datetime('now')),
+				deleted_at DATETIME,
+				UNIQUE(site_id, device_id)
+			);
+		`,
+	},
+	{
+		version: 13,
+		name:    "add_incidents_device_id",
+		sql:     `ALTER TABLE incidents ADD COLUMN device_id TEXT;`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {
