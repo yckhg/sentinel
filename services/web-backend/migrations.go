@@ -174,6 +174,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS
 		name:    "add_incidents_device_id",
 		sql:     `ALTER TABLE incidents ADD COLUMN device_id TEXT;`,
 	},
+	{
+		version: 14,
+		name:    "create_health_events_and_settings",
+		sql: `
+			CREATE TABLE IF NOT EXISTS health_events (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				entity_kind TEXT NOT NULL,
+				entity_id TEXT NOT NULL,
+				status TEXT NOT NULL,
+				detected_at DATETIME NOT NULL DEFAULT (datetime('now')),
+				detail TEXT NOT NULL DEFAULT ''
+			);
+			CREATE INDEX IF NOT EXISTS idx_health_events_entity ON health_events(entity_kind, entity_id, detected_at DESC);
+			INSERT OR IGNORE INTO system_settings (key, value) VALUES ('health.service_check_interval_sec', '30');
+			INSERT OR IGNORE INTO system_settings (key, value) VALUES ('health.service_down_threshold_sec', '90');
+			INSERT OR IGNORE INTO system_settings (key, value) VALUES ('health.sensor_alive_threshold_sec', '60');
+		`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {
