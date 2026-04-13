@@ -12,7 +12,7 @@
 
 | Boundary | Direction | Spec |
 |----------|-----------|------|
-| web-backend (REST) | outbound | 백엔드 공식 API 카탈로그 (`docs/interfaces/web-api.md` 예정). 현재는 web-backend 세션이 소유. |
+| web-backend (REST + WS) | outbound | [interfaces/web-api.md](../interfaces/web-api.md) — 본 한 장으로 호출 가능. backend 코드 직접 참조 금지 |
 | web-backend (`/ws` WebSocket) | inbound | crisis alert push (`useWebSocket` 훅) |
 | streaming (HLS `/live/*`) | inbound | [../interfaces/streaming-api.md](../interfaces/streaming-api.md) — HLS 규격. nginx proxy 경유 |
 | 브라우저 Geolocation API | outbound | 119 버튼 |
@@ -84,7 +84,7 @@ App 진입 후 탭은 **상태 기반**(`activeTab` state, URL 변경 없음):
 - **CrisisAlertBanner**: `useWebSocket` 훅이 `/ws`로 연결, crisis 메시지 수신 시 배너 렌더.
 - **ViewerPage**: `GET /api/links/verify/{token}` → 통과 시 해당 카메라 HLS 재생.
 
-백엔드 내부 구현은 모름. 응답 shape이 바뀌면 백엔드 세션이 `docs/interfaces/web-api.md`(또는 그 전 단계 `docs/api-rest.md`)를 통해 통보.
+백엔드 내부 구현은 모름. 응답 shape 변경은 `interfaces/web-api.md`에서 확인.
 
 ## Key UI Behaviors
 

@@ -47,8 +47,8 @@
 | `streaming` | RTMP 수신, HLS 서빙. 스트림 상태 SSOT | [interfaces/streaming-api.md](./interfaces/streaming-api.md) |
 | `recording` | streaming RTMP 풀 → FFmpeg 녹화 (롤링 윈도우 + 아카이브) | — |
 | `notifier` | KakaoTalk/SMS 발송. fallback 체인 | — |
-| `web-backend` | REST + WebSocket. SQLite 영속화. 임시 링크 발급 | — |
-| `web-frontend` | 모바일 우선 UI | — |
+| `web-backend` | REST + WebSocket. SQLite 영속화. 임시 링크 발급 | [interfaces/web-api.md](./interfaces/web-api.md) |
+| `web-frontend` | 모바일 우선 UI | [interfaces/web-api.md](./interfaces/web-api.md) (소비자) |
 
 외부 H/W 컴포넌트:
 - **센서 (음성 위험 감지)** — MQTT publish only. 스펙: [mqtt-publisher-guide.md](./mqtt-publisher-guide.md)
