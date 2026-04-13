@@ -49,6 +49,7 @@ type AlertPayload struct {
 // IncidentPayload forwarded to web-backend POST /api/incidents.
 type IncidentPayload struct {
 	SiteID      string `json:"siteId"`
+	DeviceID    string `json:"deviceId,omitempty"`
 	Description string `json:"description"`
 	OccurredAt  string `json:"occurredAt"`
 	IsTest      bool   `json:"isTest,omitempty"`
@@ -197,7 +198,7 @@ func subscribeTopics(client mqtt.Client, notifierURL, webBackendURL string) {
 
 	// Subscribe to heartbeat topic (QoS 0 — at most once)
 	hbToken := client.Subscribe("safety/+/heartbeat", 0, func(_ mqtt.Client, msg mqtt.Message) {
-		handleHeartbeat(msg)
+		handleHeartbeat(msg, webBackendURL)
 	})
 	hbToken.Wait()
 	if hbToken.Error() != nil {
@@ -246,6 +247,9 @@ func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
 		forwardToWebBackend(webBackendURL, &alert)
 	}()
 
+	// Best-effort: register device in web-backend (fire-and-forget)
+	go postDeviceSeen(webBackendURL, alert.SiteID, alert.DeviceID)
+
 	<-done
 	<-done
 }
@@ -287,6 +291,7 @@ func backoffWithJitter(base time.Duration, attempt int) time.Duration {
 func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
 	incident := IncidentPayload{
 		SiteID:      alert.SiteID,
+		DeviceID:    alert.DeviceID,
 		Description: alert.Description,
 		OccurredAt:  alert.Timestamp,
 		IsTest:      alert.Test,
@@ -331,7 +336,7 @@ func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
 	}
 }
 
-func handleHeartbeat(msg mqtt.Message) {
+func handleHeartbeat(msg mqtt.Message, webBackendURL string) {
 	log.Printf("[MQTT] Received heartbeat on topic: %s", msg.Topic())
 
 	var hb HeartbeatPayload
@@ -370,6 +375,46 @@ func handleHeartbeat(msg mqtt.Message) {
 	equipmentStore.Unlock()
 
 	log.Printf("[HEARTBEAT] deviceId=%s siteId=%s status=%s", hb.DeviceID, hb.SiteID, hb.Status)
+
+	// Best-effort: notify web-backend for persistent device registration
+	go postDeviceSeen(webBackendURL, hb.SiteID, hb.DeviceID)
+}
+
+// postDeviceSeen notifies web-backend that a device was seen.
+// Best-effort: failures are logged but never retried or propagated.
+func postDeviceSeen(webBackendURL, siteID, deviceID string) {
+	if webBackendURL == "" || siteID == "" || deviceID == "" {
+		return
+	}
+	body, err := json.Marshal(map[string]string{
+		"siteId":   siteID,
+		"deviceId": deviceID,
+	})
+	if err != nil {
+		log.Printf("[DEVICE-SEEN] Failed to marshal: %v", err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	url := fmt.Sprintf("%s/api/devices/seen", webBackendURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[DEVICE-SEEN] Failed to create request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		log.Printf("[DEVICE-SEEN] Failed to call web-backend: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		log.Printf("[DEVICE-SEEN] Non-2xx response: %d", resp.StatusCode)
+	}
 }
 
 // heartbeatChecker periodically marks devices as dead if no heartbeat within timeout.
