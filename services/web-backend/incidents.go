@@ -15,6 +15,7 @@ import (
 
 type createIncidentRequest struct {
 	SiteID      string `json:"siteId"`
+	DeviceID    string `json:"deviceId,omitempty"`
 	Description string `json:"description"`
 	OccurredAt  string `json:"occurredAt"`
 	IsTest      bool   `json:"isTest,omitempty"`
@@ -43,17 +44,23 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 		if req.IsTest {
 			isTest = 1
 		}
+		var deviceIDArg any
+		if strings.TrimSpace(req.DeviceID) != "" {
+			deviceIDArg = req.DeviceID
+		} else {
+			deviceIDArg = nil
+		}
 		var result sql.Result
 		var err error
 		if req.OccurredAt != "" {
 			result, err = db.ExecContext(ctx,
-				"INSERT INTO incidents (site_id, description, occurred_at, is_test) VALUES (?, ?, ?, ?)",
-				req.SiteID, req.Description, req.OccurredAt, isTest,
+				"INSERT INTO incidents (site_id, device_id, description, occurred_at, is_test) VALUES (?, ?, ?, ?, ?)",
+				req.SiteID, deviceIDArg, req.Description, req.OccurredAt, isTest,
 			)
 		} else {
 			result, err = db.ExecContext(ctx,
-				"INSERT INTO incidents (site_id, description, is_test) VALUES (?, ?, ?)",
-				req.SiteID, req.Description, isTest,
+				"INSERT INTO incidents (site_id, device_id, description, is_test) VALUES (?, ?, ?, ?)",
+				req.SiteID, deviceIDArg, req.Description, isTest,
 			)
 		}
 		if err != nil {
@@ -63,6 +70,19 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 		}
 
 		incidentID, _ := result.LastInsertId()
+
+		// Ensure device is registered/restored if deviceId provided (best-effort)
+		if req.SiteID != "" && strings.TrimSpace(req.DeviceID) != "" {
+			if _, upErr := db.ExecContext(ctx, `
+				INSERT INTO devices (site_id, device_id, last_seen)
+				VALUES (?, ?, datetime('now'))
+				ON CONFLICT(site_id, device_id) DO UPDATE SET
+					last_seen = datetime('now'),
+					deleted_at = NULL
+			`, req.SiteID, req.DeviceID); upErr != nil {
+				log.Printf("upsert device from incident error: %v", upErr)
+			}
+		}
 
 		// Fetch site info for the broadcast payload
 		var address, managerName, managerPhone string
