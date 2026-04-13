@@ -52,17 +52,24 @@ docker compose logs -f web-frontend
 
 ## Pages & Routes
 
-| Route | Page | Auth |
-|-------|------|------|
-| `/login` | LoginPage | None |
-| `/register` | (Login 내부 전환 또는 별도) | None |
-| `/` (tab: CCTV) | CCTVPage | JWT |
-| `/incidents` | IncidentsPage | JWT |
-| `/management` | ManagementPage | JWT (일부 admin) |
-| `/settings` | SettingsPage | JWT |
-| `/view/{token}` | ViewerPage | JWT temp link |
+URL 라우팅과 탭 전환이 혼합. **URL 라우팅(App.tsx 직접 분기)은 3가지뿐:**
 
-Bottom tab bar: CCTV / Incidents / Management / Settings.
+| Route | Renders | Auth |
+|-------|---------|------|
+| `/view/{token}` | ViewerPage (외부 임시 링크 진입) | JWT temp link |
+| `/register` | RegisterPage | None |
+| `/` (그 외 모든 경로) | App + 하단 탭바 (로그인 필요) | JWT |
+
+App 진입 후 탭은 **상태 기반**(`activeTab` state, URL 변경 없음):
+
+| Tab | Component |
+|-----|-----------|
+| `cctv` (기본) | CCTVPage |
+| `incidents` | IncidentsPage |
+| `management` | ManagementPage |
+| `settings` | SettingsPage |
+
+미인증 시 LoginPage 렌더(URL은 `/` 유지). 탭 전환에 URL 변경이 없으므로 새로고침 시 항상 기본 탭으로 시작 — 라우팅 추가 시 이 점 고려.
 
 ## Outbound Calls
 

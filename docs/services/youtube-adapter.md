@@ -70,6 +70,7 @@ ffmpeg -re -stream_loop -1 -i <file-or-yt-dlp-stdout> \
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/healthz` | 헬스 |
+| GET | `/api/streams/status` | 각 소스별 FFmpeg/yt-dlp 상태 |
 | POST | `/api/cameras/reload` | (필요 시) 소스 목록 재조회 |
 
 ## Outbound Calls

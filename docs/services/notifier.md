@@ -52,6 +52,7 @@ docker compose logs -f notifier
 | Method | Path | Body | Response |
 |--------|------|------|----------|
 | POST | `/api/notify` | crisis event `{siteId, deviceId, description, timestamp}` | `200 OK` 즉시 (async) |
+| POST | `/api/send-email` | 이메일 직접 발송 (제목/본문/수신자) | 발송 결과 |
 | GET | `/healthz` | — | `200` |
 
 ## Outbound Calls
