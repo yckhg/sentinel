@@ -30,7 +30,7 @@ services:
       - MQTT_BROKER_URL=tcp://mosquitto:1883
       - NOTIFIER_URL=http://notifier:8080
       - WEB_BACKEND_URL=http://web-backend:8080
-      - HEARTBEAT_TIMEOUT=30
+      - HEARTBEAT_TIMEOUT_SEC=30
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 30s
