@@ -78,7 +78,7 @@ App 진입 후 탭은 **상태 기반**(`activeTab` state, URL 변경 없음):
 모든 API 호출은 web-backend로. 대표 사용 지점:
 - **로그인/가입**: `POST /auth/login`, `POST /auth/register`
 - **CCTVPage**: `GET /api/cameras` (목록) → 각 카메라 `hlsUrl`은 상대 경로 그대로 `<HLSPlayer src=...>`
-- **IncidentsPage**: `GET /api/incidents`, `PATCH /api/incidents/{id}/acknowledge`, `/resolve`
+- **IncidentsPage**: `GET /api/incidents`, `PATCH /api/incidents/{id}/acknowledge`, `/resolve`. 해결된 incident 카드는 `resolvedByKind`/`resolvedByLabel`로 해제 주체 표시 (web=🖥, sensor_button=🔘).
 - **ManagementPage**: contacts/sites/cameras/invitations/links/devices CRUD
   - HealthPanel (상단): `GET /api/health` (15초 폴링), `GET /api/health/events?limit=20` (모달 진입 시) — `src/components/HealthPanel.tsx`
   - Devices 섹션: `GET /api/devices`, `GET /api/devices/all`, `PATCH /api/devices/{id}`, `DELETE /api/devices/{id}`, `POST /api/devices/{id}/restore` — 10초 폴링, 클라이언트에서 `now - lastSeen < 30s` 기준으로 alive 상태 계산 (`src/components/DevicesSection.tsx`)
@@ -95,7 +95,7 @@ App 진입 후 탭은 **상태 기반**(`activeTab` state, URL 변경 없음):
 - **Crisis alert**: 화면 상단 full-width persistent 배너. dismiss 전까지 유지. 다중 동시 crisis 시 누적 또는 최신 우선(구현 확인).
 - **CCTV multi-view**: 그리드 레이아웃, 탭으로 확대.
 - **119 버튼**: `navigator.geolocation.getCurrentPosition` 후 확인 다이얼로그.
-- **Restart**: 1차 "정말로?" → 2차 사유 입력 → `POST /api/equipment/restart`.
+- **Restart**: 1차 "정말로?" → 2차 사유 입력 → `POST /api/equipment/restart`. payload의 `siteId`/`deviceId`는 **해당 카메라 row의 `siteId`/`deviceId`를 그대로 사용**(하드코딩 fallback 없음). 카메라에 device 매핑이 없으면 버튼 클릭 시 안내 alert만 띄우고 dialog를 열지 않는다. 단일 사이트 가정은 `architecture-overview.md` 운영 정책 A 참조 — 멀티사이트 분기 도입 금지.
 - **Viewer page**: 네비게이션/관리 UI 없음. 토큰이 인증이다.
 
 ## Constraints / Known Issues

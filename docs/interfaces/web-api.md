@@ -146,12 +146,17 @@ Response `200`:
       "status": "open | acknowledged | resolved",
       "resolvedAt": null,
       "resolvedBy": null,
-      "resolutionNotes": null
+      "resolutionNotes": null,
+      "resolvedByKind": null,
+      "resolvedById": null,
+      "resolvedByLabel": null
     }
   ],
   "pagination": { "page": 1, "limit": 20, "total": 57 }
 }
 ```
+
+`resolvedByKind`/`resolvedById`/`resolvedByLabel`은 양방향 alert 해소 attribution(2026-04 구현). 기존 incident는 모두 NULL.
 
 ### POST /api/incidents (internal)
 
@@ -168,25 +173,32 @@ Body: 없음. Response `200`: `{"status": "acknowledged"}`. `resolved`면 `409`.
 ### PATCH /api/incidents/{id}/resolve (admin)
 
 Request: `{"resolutionNotes": "string (required, non-empty)"}`
-Response `200`: `{"status": "resolved"}`. 이미 해결되었으면 `409`. 성공 시 recording 서비스의 아카이브 finalize를 비동기 트리거.
+Response `200`:
+```json
+{
+  "status": "resolved",
+  "resolvedByKind": "web",
+  "resolvedById": "admin",
+  "resolvedByLabel": "관리자 김현기"
+}
+```
+이미 해결되었으면 `409`. 성공 시 (a) recording 서비스 아카이브 finalize 비동기 트리거, (b) hw-gateway `POST /api/alert/resolved` 호출로 MQTT `safety/{siteId}/alert/resolved` 발행, (c) WebSocket `incident_resolved` 브로드캐스트.
 
-> **🔒 Spec confirmed (2026-04). 구현 예정.** 본 endpoint 호출 시(웹 측 해제), 추후 구현에서 hw-gateway를 경유해 MQTT `safety/{siteId}/alert/resolved` 토픽이 발행됩니다 (양방향 alert 해소 정책). 응답 본문에도 `resolvedBy: {kind: "web", id, label}` 정보가 추가될 예정입니다. 펌웨어/액추에이터 측 contract는 [interfaces/mqtt-publisher-guide.md](./mqtt-publisher-guide.md#55-safetysiteidalertresolved--위급-해소-양방향) 참조.
+### Resolution Attribution (양방향)
 
-### Resolution Attribution (양방향, 구현 예정)
-
-위급 alert는 **두 경로**에서 해제될 수 있고, 어느 쪽이든 `incidents` 테이블에 누가 풀었는지가 기록됩니다:
+위급 alert는 **두 경로**에서 해제될 수 있고, 어느 쪽이든 `incidents` 테이블에 누가 풀었는지가 기록됩니다 (구현 2026-04):
 
 | 경로 | 트리거 | 기록될 `resolvedBy.kind` |
 |------|--------|--------------------------|
 | 웹 운영자 | `PATCH /api/incidents/{id}/resolve` (본 endpoint) | `"web"` |
-| 센서 물리 버튼 | 센서 펌웨어가 MQTT publish → hw-gateway 수신 → web-backend 호출 | `"sensor_button"` |
+| 센서 물리 버튼 | 센서 펌웨어가 MQTT publish → hw-gateway 수신 → web-backend `POST /api/incidents/{id}/resolve-from-sensor` | `"sensor_button"` |
 
-추후 incidents 응답에 추가될 필드:
+incidents 응답 필드:
 - `resolvedByKind`: `"web"` | `"sensor_button"` | `null`
-- `resolvedById`: 사용자명 또는 deviceId
+- `resolvedById`: 사용자명(web) 또는 deviceId(sensor_button)
 - `resolvedByLabel`: 표시용 한글명
 
-자세한 contract와 페이로드는 mqtt-publisher-guide.md 5.5절.
+자세한 MQTT contract는 [mqtt-publisher-guide.md §5.5](./mqtt-publisher-guide.md#55-safetysiteidalertresolved--위급-해소-양방향).
 
 ---
 
@@ -557,6 +569,48 @@ Response `200`:
 | GET | `/api/healthz` | 인증된 헬스체크 (user 정보 에코) |
 | POST | `/api/incidents` | hw-gateway가 crisis 이벤트 기록 (WS broadcast 트리거) |
 | POST | `/api/devices/seen` | hw-gateway가 heartbeat/alert 수신 시 호출 — device UPSERT, soft-deleted면 자동 복원 |
+| POST | `/api/incidents/{id}/resolve-from-sensor` | hw-gateway가 MQTT `safety/+/alert/resolved` 수신(kind=sensor_button) 시 호출 — incident attribution 기록 + WS `incident_resolved` 브로드캐스트 |
+
+### POST /api/incidents/{id}/resolve-from-sensor (internal)
+
+hw-gateway가 MQTT `safety/+/alert/resolved` 메시지를 받으면 호출. `kind == "web"` echo는 hw-gateway 쪽에서 차단되어 도달하지 않음.
+
+Path param `{id}`: incident ID. **`0` 허용** — body의 `incidentId`로 폴백, 그것도 0이면 `siteId`의 가장 최근 미해결 incident에 자동 매칭(센서가 incidentId를 모를 때).
+
+Request:
+```json
+{
+  "incidentId": 12345,
+  "siteId": "site1",
+  "resolvedAt": "2026-04-13T10:30:00Z",
+  "resolvedBy": {
+    "kind": "sensor_button",
+    "id": "VOICE-01",
+    "label": "VOICE-01 reset 버튼"
+  },
+  "originalAlert": { "type": "scream", "deviceId": "PRESS-01" }
+}
+```
+
+Response `200`:
+```json
+{
+  "status": "resolved",
+  "incidentId": 12345,
+  "resolvedByKind": "sensor_button",
+  "resolvedById": "VOICE-01",
+  "resolvedByLabel": "VOICE-01 reset 버튼"
+}
+```
+
+상태:
+- `404` — 매칭되는 미해결 incident 없음
+- `409` — 이미 resolved (센서 중복 버튼 누름 방어)
+- `400` — `siteId` 누락
+
+부작용: incident attribution 기록, WS `incident_resolved` 브로드캐스트, 아카이브 finalize 비동기 트리거.
+
+외부 노출 금지 — Docker network 격리 전제.
 
 ### POST /api/devices/seen (internal)
 
@@ -597,9 +651,10 @@ Response `200`: `{"status": "ok"}`.
 |------|----------|---------|
 | `connected` | 본인 | `{userId, role, connectedAt}` |
 | `crisis_alert` | 전체 (admin/user/temp) | `{incidentId, siteId, description, occurredAt, isTest, site:{address,managerName,managerPhone}}` |
+| `incident_resolved` | 전체 (admin/user/temp) | `{incidentId, siteId, resolvedAt, resolvedByKind, resolvedById, resolvedByLabel}` |
 | `system_alarm` | admin 전용 | 임의 payload (코드에 실제 송신 지점 없음 — TBD) |
 
-`crisis_alert`는 `POST /api/incidents` 생성 시 자동 발생.
+`crisis_alert`는 `POST /api/incidents` 생성 시 자동 발생. `incident_resolved`는 `PATCH /api/incidents/{id}/resolve` 또는 `POST /api/incidents/{id}/resolve-from-sensor` 성공 시 발생.
 
 ---
 

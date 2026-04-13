@@ -21,10 +21,11 @@ H/W(MQTT)와 S/W(HTTP) 사이의 유일한 접점. MQTT에서 받은 crisis/hear
 ## Code Structure
 
 단일 파일: `services/hw-gateway/main.go` (~550 lines).
-- MQTT 클라이언트 초기화 + `safety/+/alert`, `safety/+/heartbeat` 구독
+- MQTT 클라이언트 초기화 + `safety/+/alert`, `safety/+/heartbeat`, `safety/+/alert/resolved` 구독
 - crisis 수신 → notifier와 web-backend로 병렬 forward (goroutine + context timeout)
 - heartbeat → in-memory map 갱신
-- HTTP 서버 포트 8080 (healthz/equipment/restart)
+- alert/resolved 수신 → `resolvedBy.kind` 분기: `"web"`은 자기 echo로 무시, `"sensor_button"`은 web-backend `POST /api/incidents/{id}/resolve-from-sensor`로 forward
+- HTTP 서버 포트 8080 (healthz/equipment/restart/alert/resolved)
 - 주기 ticker가 `HEARTBEAT_TIMEOUT_SEC` 경과 장비를 dead로 마킹
 
 ## Environment Variables
@@ -55,6 +56,7 @@ docker compose logs -f hw-gateway
 | GET | `/healthz` | — | `200 OK` | 헬스체크 |
 | GET | `/api/equipment/status` | — | `[{deviceId, siteId, alive, lastHeartbeat}]` | in-memory 장비 상태 |
 | POST | `/api/restart` | `{deviceId}` | `202 Accepted` | restart 명령 수신 → MQTT publish |
+| POST | `/api/alert/resolved` | `{incidentId, siteId, resolvedAt, resolvedBy{kind,id,label}, originalAlert?}` | `200 OK` | web-backend 호출 → MQTT `safety/{siteId}/alert/resolved` publish (QoS 1, retain false). 본 endpoint가 발행한 메시지는 자기 echo로 다시 들어오지만 `resolvedBy.kind == "web"` 검사로 무시된다. |
 
 ## Outbound Calls
 
@@ -68,6 +70,10 @@ docker compose logs -f hw-gateway
    - 페이로드: `{siteId, deviceId}`
    - 트리거: heartbeat 또는 alert 수신 시마다
    - Best-effort: 5초 타임아웃, 재시도 없음, 실패는 로그만 (alert/heartbeat 처리는 계속)
+4. **web-backend** `POST http://web-backend:8080/api/incidents/{id}/resolve-from-sensor`
+   - 페이로드: MQTT alert/resolved payload 그대로 (incidentId, siteId, resolvedAt, resolvedBy, originalAlert?)
+   - 트리거: `safety/+/alert/resolved` 수신 + `resolvedBy.kind == "sensor_button"`
+   - 5초 타임아웃, 재시도 없음. `incidentId == 0`이면 web-backend가 siteId 기준 가장 최근 미해결 매칭.
 
 받는 쪽 내부 구현은 알 필요 없음. URL과 페이로드 형태만 맞추면 된다.
 

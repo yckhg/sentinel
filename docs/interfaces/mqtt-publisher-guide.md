@@ -32,7 +32,7 @@
 | `safety/{siteId}/alert` | H/W → Sentinel | 2 | false | 위급 상황 알림 |
 | `safety/{siteId}/heartbeat` | H/W → Sentinel | 0 | false | 장비 생존 신호 |
 | `safety/{siteId}/cmd/restart` | Sentinel → H/W | 1 | false | 원격 재시작 명령 |
-| `safety/{siteId}/alert/resolved` | **양방향** | 1 | false | 위급 해소 통지 (sensor 버튼 또는 web operator). **🔒 spec confirmed, 서버 측 구현 예정** |
+| `safety/{siteId}/alert/resolved` | **양방향** | 1 | false | 위급 해소 통지 (sensor 버튼 또는 web operator). **✅ 구현됨 (2026-04)** |
 
 `{siteId}`는 영숫자 식별자 (예: `site1`, `factory-a`). Sentinel은 `safety/+/alert`, `safety/+/heartbeat`로 와일드카드 구독합니다.
 
@@ -147,7 +147,7 @@ H/W는 페이로드의 `deviceId`가 자기 자신일 때만 재시작 동작을
 
 ## 5.5. `safety/{siteId}/alert/resolved` — 위급 해소 (양방향)
 
-> **🔒 Spec confirmed (2026-04). 구현 예정.** 이 토픽은 펌웨어(예: sentinel-voice)가 사전에 맞춰 구현할 수 있도록 contract만 먼저 잠근 상태입니다. Sentinel 서버 측 처리(web-backend, hw-gateway 변경)는 별도 phase에서 진행됩니다.
+> **✅ 구현됨 (2026-04).** Sentinel 서버 측 처리(web-backend + hw-gateway)와 web UI 표시까지 완료. 펌웨어는 본 contract에 맞춰 구현하면 즉시 동작합니다.
 
 위급 상황이 종료되었음을 시스템 전체에 알리는 토픽. **양방향 발행 + 구독** — 누가 풀든 같은 토픽이 발행되어 모든 subscriber가 동기화됩니다.
 
@@ -162,7 +162,7 @@ H/W는 페이로드의 `deviceId`가 자기 자신일 때만 재시작 동작을
 
 | 구독자 | 동작 |
 |--------|------|
-| hw-gateway | web-backend `PATCH /api/incidents/{id}/resolve` 호출 (센서 발행분 동기화) |
+| hw-gateway | `resolvedBy.kind == "web"`이면 자기 echo로 무시 / `"sensor_button"`이면 web-backend `POST /api/incidents/{id}/resolve-from-sensor` HTTP 호출 |
 | GPIO-connector | 경보등/사이렌 OFF, 자기 상태 reset, restart 명령 받을 준비 |
 | 센서 자체 | 자기 LED/디스플레이에 "해제됨" 표시, 다른 운영자가 해제했음을 알림 |
 
