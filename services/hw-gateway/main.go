@@ -77,6 +77,22 @@ type RestartRequest struct {
 	Reason      string `json:"reason"`
 }
 
+// AlertResolvedPayload — bidirectional MQTT message on safety/{siteId}/alert/resolved.
+// Spec: docs/interfaces/mqtt-publisher-guide.md §5.5.
+type AlertResolvedPayload struct {
+	IncidentID    int64                  `json:"incidentId"`
+	SiteID        string                 `json:"siteId"`
+	ResolvedAt    string                 `json:"resolvedAt"`
+	ResolvedBy    AlertResolvedBy        `json:"resolvedBy"`
+	OriginalAlert map[string]any         `json:"originalAlert,omitempty"`
+}
+
+type AlertResolvedBy struct {
+	Kind  string `json:"kind"`
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
 // RestartMQTTPayload published to MQTT safety/{siteId}/cmd/restart.
 type RestartMQTTPayload struct {
 	DeviceID    string `json:"deviceId"`
@@ -155,6 +171,10 @@ func main() {
 		handleTestAlert(w, r, mqttClient)
 	})
 
+	mux.HandleFunc("POST /api/alert/resolved", func(w http.ResponseWriter, r *http.Request) {
+		handleAlertResolvedPublish(w, r, mqttClient)
+	})
+
 	log.Println("hw-gateway listening on :8080")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatal(err)
@@ -205,6 +225,17 @@ func subscribeTopics(client mqtt.Client, notifierURL, webBackendURL string) {
 		log.Printf("[MQTT] Failed to subscribe to safety/+/heartbeat: %v", hbToken.Error())
 	} else {
 		log.Println("[MQTT] Subscribed to safety/+/heartbeat (QoS 0)")
+	}
+
+	// Subscribe to alert/resolved topic (QoS 1 — bidirectional sync, see mqtt-publisher-guide.md §5.5)
+	resolvedToken := client.Subscribe("safety/+/alert/resolved", 1, func(_ mqtt.Client, msg mqtt.Message) {
+		handleAlertResolvedSubscription(msg, webBackendURL)
+	})
+	resolvedToken.Wait()
+	if resolvedToken.Error() != nil {
+		log.Printf("[MQTT] Failed to subscribe to safety/+/alert/resolved: %v", resolvedToken.Error())
+	} else {
+		log.Println("[MQTT] Subscribed to safety/+/alert/resolved (QoS 1)")
 	}
 }
 
@@ -593,4 +624,119 @@ func handleTestAlert(w http.ResponseWriter, r *http.Request, mqttClient mqtt.Cli
 		"status": "sent",
 		"topic":  topic,
 	})
+}
+
+// handleAlertResolvedPublish publishes safety/{siteId}/alert/resolved on behalf of web-backend.
+// Spec: docs/interfaces/mqtt-publisher-guide.md §5.5 (web-initiated resolve).
+func handleAlertResolvedPublish(w http.ResponseWriter, r *http.Request, mqttClient mqtt.Client) {
+	var payload AlertResolvedPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON payload"})
+		return
+	}
+	if payload.SiteID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "siteId is required"})
+		return
+	}
+	if payload.ResolvedAt == "" {
+		payload.ResolvedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if payload.ResolvedBy.Kind == "" {
+		payload.ResolvedBy.Kind = "web"
+	}
+
+	if !mqttClient.IsConnected() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "MQTT broker not connected"})
+		return
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "failed to marshal payload"})
+		return
+	}
+
+	topic := fmt.Sprintf("safety/%s/alert/resolved", payload.SiteID)
+	token := mqttClient.Publish(topic, 1, false, body) // QoS 1, retain false
+	token.Wait()
+	if token.Error() != nil {
+		log.Printf("[ALERT-RESOLVED] Failed to publish to %s: %v", topic, token.Error())
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "failed to publish MQTT alert/resolved"})
+		return
+	}
+
+	log.Printf("[ALERT-RESOLVED] Published to %s: incident=%d kind=%s id=%s", topic, payload.IncidentID, payload.ResolvedBy.Kind, payload.ResolvedBy.ID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "sent", "topic": topic})
+}
+
+// handleAlertResolvedSubscription receives safety/+/alert/resolved messages.
+// - resolvedBy.kind == "web"  → ignore (echo of our own publish, no-op).
+// - resolvedBy.kind == "sensor_button" → forward to web-backend POST /api/incidents/{id}/resolve-from-sensor.
+func handleAlertResolvedSubscription(msg mqtt.Message, webBackendURL string) {
+	log.Printf("[MQTT] Received alert/resolved on topic: %s", msg.Topic())
+
+	var payload AlertResolvedPayload
+	if err := json.Unmarshal(msg.Payload(), &payload); err != nil {
+		log.Printf("[MQTT] Malformed alert/resolved payload on %s: %v", msg.Topic(), err)
+		return
+	}
+
+	// Override siteId from topic for consistency
+	parts := strings.Split(msg.Topic(), "/")
+	if len(parts) >= 2 {
+		payload.SiteID = parts[1]
+	}
+
+	// Echo guard: ignore web-originated messages (we published them ourselves).
+	if payload.ResolvedBy.Kind == "web" {
+		log.Printf("[ALERT-RESOLVED] Ignoring echo of web-originated resolve (incident=%d)", payload.IncidentID)
+		return
+	}
+
+	if payload.ResolvedBy.Kind != "sensor_button" {
+		log.Printf("[ALERT-RESOLVED] Unknown resolvedBy.kind=%q, ignoring", payload.ResolvedBy.Kind)
+		return
+	}
+
+	if payload.SiteID == "" {
+		log.Printf("[ALERT-RESOLVED] Missing siteId, ignoring")
+		return
+	}
+
+	// Forward to web-backend. Path-id == 0 lets backend match latest unresolved on siteId.
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[ALERT-RESOLVED] marshal forward error: %v", err)
+		return
+	}
+	url := fmt.Sprintf("%s/api/incidents/%d/resolve-from-sensor", webBackendURL, payload.IncidentID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[ALERT-RESOLVED] new request error: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		log.Printf("[ALERT-RESOLVED] forward to web-backend failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	log.Printf("[ALERT-RESOLVED] web-backend response: %d (incident=%d kind=%s)", resp.StatusCode, payload.IncidentID, payload.ResolvedBy.Kind)
 }
