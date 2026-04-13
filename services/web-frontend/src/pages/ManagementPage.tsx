@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 import DevicesSection from "../components/DevicesSection";
+import HealthPanel from "../components/HealthPanel";
 
 interface Contact {
   id: number;
@@ -952,6 +953,10 @@ export default function ManagementPage() {
 
   return (
     <div className="page">
+      {/* Unified system health (services + sensors) — top of management page */}
+      <HealthPanel />
+      <div className="mgmt-section-divider" />
+
       {/* Site info section */}
       <div className="mgmt-header">
         <h2>현장 정보</h2>
