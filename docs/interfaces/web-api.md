@@ -170,6 +170,24 @@ Body: 없음. Response `200`: `{"status": "acknowledged"}`. `resolved`면 `409`.
 Request: `{"resolutionNotes": "string (required, non-empty)"}`
 Response `200`: `{"status": "resolved"}`. 이미 해결되었으면 `409`. 성공 시 recording 서비스의 아카이브 finalize를 비동기 트리거.
 
+> **🔒 Spec confirmed (2026-04). 구현 예정.** 본 endpoint 호출 시(웹 측 해제), 추후 구현에서 hw-gateway를 경유해 MQTT `safety/{siteId}/alert/resolved` 토픽이 발행됩니다 (양방향 alert 해소 정책). 응답 본문에도 `resolvedBy: {kind: "web", id, label}` 정보가 추가될 예정입니다. 펌웨어/액추에이터 측 contract는 [interfaces/mqtt-publisher-guide.md](./mqtt-publisher-guide.md#55-safetysiteidalertresolved--위급-해소-양방향) 참조.
+
+### Resolution Attribution (양방향, 구현 예정)
+
+위급 alert는 **두 경로**에서 해제될 수 있고, 어느 쪽이든 `incidents` 테이블에 누가 풀었는지가 기록됩니다:
+
+| 경로 | 트리거 | 기록될 `resolvedBy.kind` |
+|------|--------|--------------------------|
+| 웹 운영자 | `PATCH /api/incidents/{id}/resolve` (본 endpoint) | `"web"` |
+| 센서 물리 버튼 | 센서 펌웨어가 MQTT publish → hw-gateway 수신 → web-backend 호출 | `"sensor_button"` |
+
+추후 incidents 응답에 추가될 필드:
+- `resolvedByKind`: `"web"` | `"sensor_button"` | `null`
+- `resolvedById`: 사용자명 또는 deviceId
+- `resolvedByLabel`: 표시용 한글명
+
+자세한 contract와 페이로드는 mqtt-publisher-guide.md 5.5절.
+
 ---
 
 ## 4. Cameras
