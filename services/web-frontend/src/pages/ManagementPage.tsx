@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
+import DevicesSection from "../components/DevicesSection";
 
 interface Contact {
   id: number;
@@ -1341,6 +1342,10 @@ export default function ManagementPage() {
           )}
         </div>
       )}
+
+      {/* Device management section */}
+      <div className="mgmt-section-divider" />
+      <DevicesSection />
 
       {/* Camera management section (admin only) */}
       {showAccounts && (
