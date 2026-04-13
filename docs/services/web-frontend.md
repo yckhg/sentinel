@@ -31,6 +31,7 @@
   - `EmergencyCallButton.tsx` — 119 + Geolocation
   - `RestartDialog.tsx` — 2-step 확인
   - `RecordingTimeline.tsx`, `DualCalendar.tsx` — 녹화 재생 UI
+  - `DevicesSection.tsx` — Management 탭 내 장비(센서) 목록/별칭 편집/soft delete/복원, 10초 폴링
 - `src/hooks/useWebSocket.ts` — WS 연결 + exponential backoff 재접속
 - `src/utils/fetchWithTimeout.ts`, `isTokenExpired.ts`
 
@@ -77,7 +78,8 @@ App 진입 후 탭은 **상태 기반**(`activeTab` state, URL 변경 없음):
 - **로그인/가입**: `POST /auth/login`, `POST /auth/register`
 - **CCTVPage**: `GET /api/cameras` (목록) → 각 카메라 `hlsUrl`은 상대 경로 그대로 `<HLSPlayer src=...>`
 - **IncidentsPage**: `GET /api/incidents`, `PATCH /api/incidents/{id}/acknowledge`, `/resolve`
-- **ManagementPage**: contacts/sites/cameras/invitations/links CRUD
+- **ManagementPage**: contacts/sites/cameras/invitations/links/devices CRUD
+  - Devices 섹션: `GET /api/devices`, `GET /api/devices/all`, `PATCH /api/devices/{id}`, `DELETE /api/devices/{id}`, `POST /api/devices/{id}/restore` — 10초 폴링, 클라이언트에서 `now - lastSeen < 30s` 기준으로 alive 상태 계산 (`src/components/DevicesSection.tsx`)
 - **SettingsPage**: `GET/PUT /api/settings/{key}`, `POST /api/auth/change-password`
 - **RestartDialog**: `POST /api/equipment/restart`
 - **RecordingTimeline**: `GET /api/recordings/{key}`, `GET /api/recordings/{key}/play?from=&to=`, `GET /api/archives`, `POST /api/archives`
