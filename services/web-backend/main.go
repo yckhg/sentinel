@@ -122,7 +122,7 @@ func main() {
 	apiMux.HandleFunc("PATCH /api/incidents/{id}/resolve", handleResolveIncident(db))
 
 	// Equipment restart (any authenticated user)
-	apiMux.HandleFunc("POST /api/equipment/restart", handleEquipmentRestart())
+	apiMux.HandleFunc("POST /api/equipment/restart", handleEquipmentRestart(db))
 
 	// Devices management
 	apiMux.HandleFunc("GET /api/devices", handleListDevices(db))

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,7 +28,7 @@ type restartRequest struct {
 	Reason   string `json:"reason"`
 }
 
-func handleEquipmentRestart() http.HandlerFunc {
+func handleEquipmentRestart(db *sql.DB) http.HandlerFunc {
 	client := &http.Client{Timeout: 10 * time.Second}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -41,6 +42,28 @@ func handleEquipmentRestart() http.HandlerFunc {
 
 		if req.SiteID == "" || req.DeviceID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "siteId and deviceId are required"})
+			return
+		}
+
+		// Validate device is registered and not soft-deleted
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+		var deletedAt sql.NullString
+		err := db.QueryRowContext(ctx,
+			"SELECT deleted_at FROM devices WHERE site_id = ? AND device_id = ?",
+			req.SiteID, req.DeviceID,
+		).Scan(&deletedAt)
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "device not registered"})
+			return
+		}
+		if err != nil {
+			log.Printf("device lookup error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+		if deletedAt.Valid {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "device has been deleted"})
 			return
 		}
 
