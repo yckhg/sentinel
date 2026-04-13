@@ -78,6 +78,9 @@ func main() {
 	// Incident creation (internal — from hw-gateway)
 	mux.HandleFunc("POST /api/incidents", handleCreateIncident(db))
 
+	// Device seen (internal — from hw-gateway on heartbeat/alert)
+	mux.HandleFunc("POST /api/devices/seen", handleSeenDevice(db))
+
 	// Protected API routes (JWT required)
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +123,13 @@ func main() {
 
 	// Equipment restart (any authenticated user)
 	apiMux.HandleFunc("POST /api/equipment/restart", handleEquipmentRestart())
+
+	// Devices management
+	apiMux.HandleFunc("GET /api/devices", handleListDevices(db))
+	apiMux.HandleFunc("GET /api/devices/all", handleListDevices(db))
+	apiMux.HandleFunc("PATCH /api/devices/{id}", handleUpdateDeviceAlias(db))
+	apiMux.HandleFunc("DELETE /api/devices/{id}", handleDeleteDevice(db))
+	apiMux.HandleFunc("POST /api/devices/{id}/restore", handleRestoreDevice(db))
 
 	// Test alert simulation (admin only)
 	apiMux.HandleFunc("POST /api/test-alert", handleTestAlertProxy())
