@@ -80,6 +80,16 @@ export default function CCTVPage() {
   };
 
   const handleRestartClick = (cam: Camera) => {
+    // 정책: device 액션은 해당 device row의 site_id를 그대로 사용한다
+    // (architecture-overview.md "운영 정책 A — Single-tenant" 참조).
+    // siteId/deviceId가 비어있으면 backend가 매핑할 수 없으므로 사용자에게 알린다.
+    if (!cam.siteId || !cam.deviceId) {
+      alert(
+        "이 카메라에는 device 매핑(siteId/deviceId)이 없어 재시작 명령을 보낼 수 없습니다.\n" +
+          "관리 탭에서 카메라-device 매핑을 확인하세요."
+      );
+      return;
+    }
     setRestartCamera(cam);
   };
 
@@ -144,8 +154,8 @@ export default function CCTVPage() {
       {restartCamera && (
         <RestartDialog
           cameraName={restartCamera.name}
-          siteId={restartCamera.siteId || "site1"}
-          deviceId={restartCamera.deviceId || String(restartCamera.id)}
+          siteId={restartCamera.siteId!}
+          deviceId={restartCamera.deviceId!}
           onClose={() => setRestartCamera(null)}
         />
       )}
