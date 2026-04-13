@@ -187,7 +187,7 @@ H/W devices communicate with Sentinel through `hw-gateway` via MQTT. No new cont
 ### Prerequisites
 
 - Read the **MQTT Input Specification** in `services/hw-gateway/AGENTS.md`
-- Read the full MQTT payload spec in `docs/api-mqtt.md`
+- Read the full MQTT payload spec in `docs/mqtt-publisher-guide.md` (SSOT)
 
 ### Case A: MQTT-native device (new device, existing signal types)
 
@@ -212,7 +212,7 @@ When you need a new type of signal that doesn't fit existing MQTT topics:
    - Parse the payload
    - Forward via HTTP to the appropriate S/W service (notifier, web-backend, etc.)
 3. **Update `services/hw-gateway/AGENTS.md`** with the new topic in the MQTT Input Specification table
-4. **Update `docs/api-mqtt.md`** with the full payload format
+4. **Update `docs/mqtt-publisher-guide.md`** with the full payload format (SSOT — code and this doc must stay in sync)
 5. **Update the target service** if it needs a new endpoint to receive the signal
 
 ### Case C: Protocol adapter (non-MQTT device)
@@ -253,4 +253,4 @@ When the H/W device doesn't speak MQTT (e.g., Modbus, serial, proprietary TCP):
 - `services/hw-gateway/AGENTS.md` — MQTT Input Specification (topic format, payload structure)
 - `services/cctv-adapter/AGENTS.md` — Reference implementation for stream adapters
 - `services/cctv-adapter/main.go` — Full working example with FFmpeg management, watchdog, reconnection
-- `docs/api-mqtt.md` — Full MQTT payload specifications
+- `docs/mqtt-publisher-guide.md` — Full MQTT payload specifications (SSOT)
