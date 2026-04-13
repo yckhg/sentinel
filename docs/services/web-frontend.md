@@ -83,7 +83,7 @@ App 진입 후 탭은 **상태 기반**(`activeTab` state, URL 변경 없음):
   - HealthPanel (상단): `GET /api/health` (15초 폴링), `GET /api/health/events?limit=20` (모달 진입 시) — `src/components/HealthPanel.tsx`
   - Devices 섹션: `GET /api/devices`, `GET /api/devices/all`, `PATCH /api/devices/{id}`, `DELETE /api/devices/{id}`, `POST /api/devices/{id}/restore` — 10초 폴링, 클라이언트에서 `now - lastSeen < 30s` 기준으로 alive 상태 계산 (`src/components/DevicesSection.tsx`)
 - **SettingsPage**: `GET/PUT /api/settings/{key}`, `POST /api/auth/change-password`, Health 임계값 3개(`health.service_check_interval_sec`, `health.service_down_threshold_sec`, `health.sensor_alive_threshold_sec`) 입력 — admin only
-- **RestartDialog**: `POST /api/equipment/restart`
+- **RestartDialog**: `POST /api/equipment/restart` — `siteId`/`deviceId`는 호출 측(`CCTVPage`)이 카메라 row에서 가져와 prop으로 전달. RestartDialog 내부에는 site/device fallback 없음.
 - **RecordingTimeline**: `GET /api/recordings/{key}`, `GET /api/recordings/{key}/play?from=&to=`, `GET /api/archives`, `POST /api/archives`
 - **CrisisAlertBanner**: `useWebSocket` 훅이 `/ws`로 연결, crisis 메시지 수신 시 배너 렌더.
 - **ViewerPage**: `GET /api/links/verify/{token}` → 통과 시 해당 카메라 HLS 재생.
