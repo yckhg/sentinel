@@ -14,6 +14,22 @@ interface Incident {
   resolvedAt: string | null;
   resolvedBy: string | null;
   resolutionNotes: string | null;
+  resolvedByKind: string | null;
+  resolvedById: string | null;
+  resolvedByLabel: string | null;
+}
+
+function resolverDisplay(inc: Incident): { icon: string; text: string } | null {
+  if (inc.status !== "resolved") return null;
+  const label = inc.resolvedByLabel || inc.resolvedById || inc.resolvedBy || "";
+  switch (inc.resolvedByKind) {
+    case "web":
+      return { icon: "🖥", text: label ? `웹 해제 — ${label}` : "웹 해제" };
+    case "sensor_button":
+      return { icon: "🔘", text: label ? `센서 버튼 — ${label}` : "센서 버튼 해제" };
+    default:
+      return label ? { icon: "👤", text: label } : null;
+  }
 }
 
 interface Pagination {
@@ -319,16 +335,23 @@ export default function IncidentsPage() {
                   <span>{formatDateTime(inc.confirmedAt)}</span>
                 </div>
               )}
-              {inc.status === "resolved" && inc.resolvedAt && (
-                <div className="incidents-card-resolution">
-                  <div className="incidents-card-resolution-header">조치 완료</div>
-                  <div className="incidents-card-resolution-notes">{inc.resolutionNotes}</div>
-                  <div className="incidents-card-resolution-meta">
-                    {inc.resolvedBy && <span>{inc.resolvedBy}</span>}
-                    <span>{formatDateTime(inc.resolvedAt)}</span>
+              {inc.status === "resolved" && inc.resolvedAt && (() => {
+                const resolver = resolverDisplay(inc);
+                return (
+                  <div className="incidents-card-resolution">
+                    <div className="incidents-card-resolution-header">조치 완료</div>
+                    <div className="incidents-card-resolution-notes">{inc.resolutionNotes}</div>
+                    <div className="incidents-card-resolution-meta">
+                      {resolver ? (
+                        <span>{resolver.icon} {resolver.text}</span>
+                      ) : (
+                        inc.resolvedBy && <span>{inc.resolvedBy}</span>
+                      )}
+                      <span>{formatDateTime(inc.resolvedAt)}</span>
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
               {admin && inc.status !== "resolved" && (
                 <div className="incidents-card-actions">
                   {inc.status === "open" && (
