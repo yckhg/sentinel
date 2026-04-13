@@ -36,6 +36,12 @@ func main() {
 		log.Fatalf("failed to seed admin user: %v", err)
 	}
 
+	// Start unified health monitor (services + sensors).
+	healthMonitor := newHealthMonitor(db)
+	monitorCtx, monitorCancel := context.WithCancel(context.Background())
+	defer monitorCancel()
+	healthMonitor.Start(monitorCtx)
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -152,6 +158,10 @@ func main() {
 	// System settings (admin only)
 	apiMux.HandleFunc("GET /api/settings", handleListSettings(db))
 	apiMux.HandleFunc("PUT /api/settings/{key}", handleUpdateSetting(db))
+
+	// Unified health monitoring (any authenticated user)
+	apiMux.HandleFunc("GET /api/health", handleGetHealth(healthMonitor))
+	apiMux.HandleFunc("GET /api/health/events", handleListHealthEvents(db))
 
 	// Temporary links management (admin only)
 	apiMux.HandleFunc("GET /api/links", handleListTempLinks())
