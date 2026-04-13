@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 
 interface Device {
@@ -21,12 +21,14 @@ function getAuthHeaders(): HeadersInit {
     : { "Content-Type": "application/json" };
 }
 
+// Parse SQLite datetime "YYYY-MM-DD HH:MM:SS" (UTC) or ISO to ms.
 function parseServerTimeMs(s: string | null | undefined): number {
   if (!s) return 0;
   if (s.includes("T")) {
     const t = Date.parse(s);
     return Number.isNaN(t) ? 0 : t;
   }
+  // SQLite "YYYY-MM-DD HH:MM:SS" is UTC — normalize to ISO with Z
   const iso = s.replace(" ", "T") + "Z";
   const t = Date.parse(iso);
   return Number.isNaN(t) ? 0 : t;
@@ -50,19 +52,27 @@ export default function DevicesSection() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showDeleted, setShowDeleted] = useState(false);
   const [nowMs, setNowMs] = useState(Date.now());
 
+  // Alias edit (inline)
   const [editId, setEditId] = useState<number | null>(null);
   const [editAlias, setEditAlias] = useState("");
   const [editLoading, setEditLoading] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
+  // Delete / restore
   const [deleteTarget, setDeleteTarget] = useState<Device | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [restoringId, setRestoringId] = useState<number | null>(null);
+
+  const showDeletedRef = useRef(showDeleted);
+  showDeletedRef.current = showDeleted;
 
   const fetchDevices = async () => {
     try {
-      const res = await fetchWithTimeout("/api/devices", { headers: getAuthHeaders() });
+      const url = showDeletedRef.current ? "/api/devices/all" : "/api/devices";
+      const res = await fetchWithTimeout(url, { headers: getAuthHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: Device[] = await res.json();
       setDevices(Array.isArray(data) ? data : []);
@@ -86,12 +96,14 @@ export default function DevicesSection() {
       fetchDevices();
       setNowMs(Date.now());
     }, POLL_INTERVAL_MS);
+    // separate fast tick for alive indicator so 30s threshold feels responsive
     const fastTick = setInterval(() => setNowMs(Date.now()), 5_000);
     return () => {
       clearInterval(tick);
       clearInterval(fastTick);
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showDeleted]);
 
   const startEdit = (d: Device) => {
     setEditId(d.id);
@@ -155,9 +167,32 @@ export default function DevicesSection() {
     }
   };
 
+  const handleRestore = async (d: Device) => {
+    setRestoringId(d.id);
+    try {
+      const res = await fetchWithTimeout(`/api/devices/${d.id}/restore`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      await fetchDevices();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "복원 실패");
+    } finally {
+      setRestoringId(null);
+    }
+  };
+
+  // Sort: alive first, then by last_seen desc. Deleted always go last.
   const sortedDevices = [...devices].sort((a, b) => {
-    const aAlive = isAlive(a.lastSeen, nowMs);
-    const bAlive = isAlive(b.lastSeen, nowMs);
+    const aDeleted = !!a.deletedAt;
+    const bDeleted = !!b.deletedAt;
+    if (aDeleted !== bDeleted) return aDeleted ? 1 : -1;
+    const aAlive = !aDeleted && isAlive(a.lastSeen, nowMs);
+    const bAlive = !bDeleted && isAlive(b.lastSeen, nowMs);
     if (aAlive !== bAlive) return aAlive ? -1 : 1;
     return parseServerTimeMs(b.lastSeen) - parseServerTimeMs(a.lastSeen);
   });
@@ -166,6 +201,14 @@ export default function DevicesSection() {
     <>
       <div className="mgmt-header">
         <h2>장비(센서) 관리</h2>
+        <label className="mgmt-form-checkbox" style={{ marginLeft: "auto" }}>
+          <input
+            type="checkbox"
+            checked={showDeleted}
+            onChange={(e) => setShowDeleted(e.target.checked)}
+          />
+          <span>삭제된 장비 표시</span>
+        </label>
       </div>
 
       {loading ? (
@@ -173,16 +216,20 @@ export default function DevicesSection() {
       ) : error ? (
         <p className="mgmt-error">{error}</p>
       ) : sortedDevices.length === 0 ? (
-        <p className="mgmt-empty">활성 장비가 없습니다</p>
+        <p className="mgmt-empty">
+          {showDeleted ? "등록된 장비가 없습니다" : "활성 장비가 없습니다"}
+        </p>
       ) : (
         <div className="mgmt-list">
           {sortedDevices.map((d) => {
-            const alive = isAlive(d.lastSeen, nowMs);
+            const deleted = !!d.deletedAt;
+            const alive = !deleted && isAlive(d.lastSeen, nowMs);
             const isEditing = editId === d.id;
             return (
               <div
                 key={d.id}
                 className={`mgmt-card${isEditing ? " mgmt-card-editing" : ""}`}
+                style={deleted ? { opacity: 0.55 } : undefined}
               >
                 {isEditing ? (
                   <>
@@ -224,7 +271,14 @@ export default function DevicesSection() {
                       <span className="mgmt-card-name">
                         {d.alias || d.deviceId}
                         {" "}
-                        {alive ? (
+                        {deleted ? (
+                          <span
+                            className="mgmt-card-badge"
+                            style={{ background: "#888", color: "#fff" }}
+                          >
+                            삭제됨
+                          </span>
+                        ) : alive ? (
                           <span
                             className="mgmt-card-badge"
                             style={{ background: "#2e7d32", color: "#fff" }}
@@ -248,18 +302,30 @@ export default function DevicesSection() {
                       </span>
                     </div>
                     <div className="mgmt-card-actions">
-                      <button
-                        className="mgmt-btn mgmt-btn-small"
-                        onClick={() => startEdit(d)}
-                      >
-                        별칭
-                      </button>
-                      <button
-                        className="mgmt-btn mgmt-btn-small mgmt-btn-danger"
-                        onClick={() => setDeleteTarget(d)}
-                      >
-                        삭제
-                      </button>
+                      {deleted ? (
+                        <button
+                          className="mgmt-btn mgmt-btn-small mgmt-btn-primary"
+                          onClick={() => handleRestore(d)}
+                          disabled={restoringId === d.id}
+                        >
+                          {restoringId === d.id ? "복원 중..." : "복원"}
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            className="mgmt-btn mgmt-btn-small"
+                            onClick={() => startEdit(d)}
+                          >
+                            별칭
+                          </button>
+                          <button
+                            className="mgmt-btn mgmt-btn-small mgmt-btn-danger"
+                            onClick={() => setDeleteTarget(d)}
+                          >
+                            삭제
+                          </button>
+                        </>
+                      )}
                     </div>
                   </>
                 )}
