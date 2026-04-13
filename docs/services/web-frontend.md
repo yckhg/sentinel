@@ -1,0 +1,101 @@
+# web-frontend
+
+> **Reader scope:** 이 서비스를 구현·수정하는 Claude 세션 전용.
+> 다른 서비스의 내부 구현을 읽지 마세요. 외부와의 계약은 아래 "Interfaces" 섹션의 링크만 참조.
+> 시스템 전체 그림은 orchestrator 세션 영역(`docs/architecture-overview.md`)이며 본 세션은 읽을 필요 없음.
+
+## Responsibility
+
+모바일 우선 React SPA. CCTV multi-view, incident 히스토리, 관리 기능, crisis 실시간 배너, 뷰어 전용 페이지(`/view/{token}`)를 제공한다. 정적 빌드 산출물은 nginx로 서빙되며, 같은 nginx가 `/live/`(HLS)와 `/api/`, `/ws`를 backend/streaming으로 proxy한다.
+
+## Interfaces
+
+| Boundary | Direction | Spec |
+|----------|-----------|------|
+| web-backend (REST) | outbound | 백엔드 공식 API 카탈로그 (`docs/interfaces/web-api.md` 예정). 현재는 web-backend 세션이 소유. |
+| web-backend (`/ws` WebSocket) | inbound | crisis alert push (`useWebSocket` 훅) |
+| streaming (HLS `/live/*`) | inbound | [../interfaces/streaming-api.md](../interfaces/streaming-api.md) — HLS 규격. nginx proxy 경유 |
+| 브라우저 Geolocation API | outbound | 119 버튼 |
+
+## Code Structure
+
+`services/web-frontend/`:
+- `index.html`, `vite.config.ts`, `package.json` — Vite + React + TypeScript.
+- `nginx.conf` — 정적 파일 + `/api/`, `/ws`, `/live/` proxy. 배포 시 런타임 라우팅 SSOT.
+- `src/main.tsx`, `src/App.tsx` — React 진입점, 라우팅.
+- `src/pages/`:
+  - `LoginPage.tsx`, `CCTVPage.tsx`, `IncidentsPage.tsx`, `ManagementPage.tsx`, `SettingsPage.tsx`, `ViewerPage.tsx`
+- `src/components/`:
+  - `HLSPlayer.tsx` — hls.js wrapper (Safari는 native)
+  - `CrisisAlertBanner.tsx` — 상단 persistent 배너
+  - `EmergencyCallButton.tsx` — 119 + Geolocation
+  - `RestartDialog.tsx` — 2-step 확인
+  - `RecordingTimeline.tsx`, `DualCalendar.tsx` — 녹화 재생 UI
+- `src/hooks/useWebSocket.ts` — WS 연결 + exponential backoff 재접속
+- `src/utils/fetchWithTimeout.ts`, `isTokenExpired.ts`
+
+## Environment Variables
+
+빌드 타임만 사용. 런타임은 nginx proxy에 의존 (절대 URL 하드코딩 금지).
+
+## Build & Run
+
+```bash
+docker compose build web-frontend
+docker compose up -d web-frontend
+docker compose logs -f web-frontend
+```
+
+- 포트: `3080:80` (유일한 외부 노출 포트). `yc-network`에도 조인되어 gateway proxy 대상이 될 수 있음.
+- 헬스: `GET /healthz` (nginx static)
+- 개발 시 로컬 iteration: compose로 빌드/재기동이 표준. 호스트에서 `npm` 직접 실행 금지(host protection 룰).
+
+## Pages & Routes
+
+| Route | Page | Auth |
+|-------|------|------|
+| `/login` | LoginPage | None |
+| `/register` | (Login 내부 전환 또는 별도) | None |
+| `/` (tab: CCTV) | CCTVPage | JWT |
+| `/incidents` | IncidentsPage | JWT |
+| `/management` | ManagementPage | JWT (일부 admin) |
+| `/settings` | SettingsPage | JWT |
+| `/view/{token}` | ViewerPage | JWT temp link |
+
+Bottom tab bar: CCTV / Incidents / Management / Settings.
+
+## Outbound Calls
+
+모든 API 호출은 web-backend로. 대표 사용 지점:
+- **로그인/가입**: `POST /auth/login`, `POST /auth/register`
+- **CCTVPage**: `GET /api/cameras` (목록) → 각 카메라 `hlsUrl`은 상대 경로 그대로 `<HLSPlayer src=...>`
+- **IncidentsPage**: `GET /api/incidents`, `PATCH /api/incidents/{id}/acknowledge`, `/resolve`
+- **ManagementPage**: contacts/sites/cameras/invitations/links CRUD
+- **SettingsPage**: `GET/PUT /api/settings/{key}`, `POST /api/auth/change-password`
+- **RestartDialog**: `POST /api/equipment/restart`
+- **RecordingTimeline**: `GET /api/recordings/{key}`, `GET /api/recordings/{key}/play?from=&to=`, `GET /api/archives`, `POST /api/archives`
+- **CrisisAlertBanner**: `useWebSocket` 훅이 `/ws`로 연결, crisis 메시지 수신 시 배너 렌더.
+- **ViewerPage**: `GET /api/links/verify/{token}` → 통과 시 해당 카메라 HLS 재생.
+
+백엔드 내부 구현은 모름. 응답 shape이 바뀌면 백엔드 세션이 `docs/interfaces/web-api.md`(또는 그 전 단계 `docs/api-rest.md`)를 통해 통보.
+
+## Key UI Behaviors
+
+- **Crisis alert**: 화면 상단 full-width persistent 배너. dismiss 전까지 유지. 다중 동시 crisis 시 누적 또는 최신 우선(구현 확인).
+- **CCTV multi-view**: 그리드 레이아웃, 탭으로 확대.
+- **119 버튼**: `navigator.geolocation.getCurrentPosition` 후 확인 다이얼로그.
+- **Restart**: 1차 "정말로?" → 2차 사유 입력 → `POST /api/equipment/restart`.
+- **Viewer page**: 네비게이션/관리 UI 없음. 토큰이 인증이다.
+
+## Constraints / Known Issues
+
+- 미니 PC 서빙 → 번들 크기 관리 필요. 큰 라이브러리(특히 hls.js 외) 도입 신중.
+- Safari는 HLS native 지원 (hls.js 불필요). HLSPlayer가 분기해야 함.
+- WS 재연결 backoff는 `useWebSocket.ts`에서 관리. 너무 짧으면 서버 부하, 너무 길면 crisis 놓칠 수 있음.
+- 절대 URL 하드코딩 금지 — 모두 상대 경로 (nginx가 proxy).
+- JWT 만료 처리: `isTokenExpired.ts` + 요청 실패 시 login 리다이렉트.
+
+## Storage / State
+
+- 런타임: `localStorage`에 JWT, 가벼운 UI 상태. Redux 등 전역 store 없음 (필요 시 컴포넌트 상태 + React Context).
+- 영구 저장 없음 (SPA).
