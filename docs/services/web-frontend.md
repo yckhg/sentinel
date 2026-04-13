@@ -32,6 +32,7 @@
   - `RestartDialog.tsx` — 2-step 확인
   - `RecordingTimeline.tsx`, `DualCalendar.tsx` — 녹화 재생 UI
   - `DevicesSection.tsx` — Management 탭 내 장비(센서) 목록/별칭 편집/soft delete/복원, 10초 폴링
+  - `HealthPanel.tsx` — Management 탭 상단 통합 health 패널 (services + sensors). `/api/health` 15초 폴링, status badge, 클릭 시 최근 health_events 모달
 - `src/hooks/useWebSocket.ts` — WS 연결 + exponential backoff 재접속
 - `src/utils/fetchWithTimeout.ts`, `isTokenExpired.ts`
 
@@ -79,8 +80,9 @@ App 진입 후 탭은 **상태 기반**(`activeTab` state, URL 변경 없음):
 - **CCTVPage**: `GET /api/cameras` (목록) → 각 카메라 `hlsUrl`은 상대 경로 그대로 `<HLSPlayer src=...>`
 - **IncidentsPage**: `GET /api/incidents`, `PATCH /api/incidents/{id}/acknowledge`, `/resolve`
 - **ManagementPage**: contacts/sites/cameras/invitations/links/devices CRUD
+  - HealthPanel (상단): `GET /api/health` (15초 폴링), `GET /api/health/events?limit=20` (모달 진입 시) — `src/components/HealthPanel.tsx`
   - Devices 섹션: `GET /api/devices`, `GET /api/devices/all`, `PATCH /api/devices/{id}`, `DELETE /api/devices/{id}`, `POST /api/devices/{id}/restore` — 10초 폴링, 클라이언트에서 `now - lastSeen < 30s` 기준으로 alive 상태 계산 (`src/components/DevicesSection.tsx`)
-- **SettingsPage**: `GET/PUT /api/settings/{key}`, `POST /api/auth/change-password`
+- **SettingsPage**: `GET/PUT /api/settings/{key}`, `POST /api/auth/change-password`, Health 임계값 3개(`health.service_check_interval_sec`, `health.service_down_threshold_sec`, `health.sensor_alive_threshold_sec`) 입력 — admin only
 - **RestartDialog**: `POST /api/equipment/restart`
 - **RecordingTimeline**: `GET /api/recordings/{key}`, `GET /api/recordings/{key}/play?from=&to=`, `GET /api/archives`, `POST /api/archives`
 - **CrisisAlertBanner**: `useWebSocket` 훅이 `/ws`로 연결, crisis 메시지 수신 시 배너 렌더.

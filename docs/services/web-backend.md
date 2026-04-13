@@ -26,13 +26,14 @@ Go 파일 분리: `services/web-backend/`
 - `main.go` — 라우팅, middleware wiring, startup (약 190 lines)
 - `auth.go` — login/register/approve/reject, JWT, password change
 - `migrations.go` — SQLite 스키마 자동 마이그레이션
-- `contacts.go` / `sites.go` / `cameras.go` / `incidents.go` / `invitations.go` / `settings.go` / `links.go` / `equipment.go` / `recordings.go` — 리소스별 핸들러
+- `contacts.go` / `sites.go` / `cameras.go` / `incidents.go` / `invitations.go` / `settings.go` / `links.go` / `equipment.go` / `recordings.go` / `devices.go` / `health.go` — 리소스별 핸들러
+- `health.go` — HealthMonitor goroutine: 서비스 `/healthz` 폴링 + sensor `last_seen` 평가. 상태 전이 시 `health_events` INSERT
 - `websocket.go` — `/ws` crisis broadcast
 - `ratelimit.go` — login/register limiter
 
 라우팅 구조:
 - **Public mux**: healthz, `/auth/*`, `/ws`, `/api/contacts`(GET only — notifier용), `/api/links/temp`, `/api/links/verify/{token}`, `/internal/*`(내부 서비스용), `/api/invitations/verify/{token}`, `POST /api/incidents`(hw-gateway용), `POST /api/devices/seen`(hw-gateway용 — device 자동 영속).
-- **`apiMux` (authMiddleware 적용)**: 나머지 `/api/*` 모두 (contacts CRUD, sites, cameras CRUD, incidents list/ack/resolve, equipment restart, recordings/archives proxy, settings, links 관리).
+- **`apiMux` (authMiddleware 적용)**: 나머지 `/api/*` 모두 (contacts CRUD, sites, cameras CRUD, incidents list/ack/resolve, equipment restart, recordings/archives proxy, settings, links 관리, devices 관리, `/api/health`, `/api/health/events`).
 
 ## Environment Variables
 
@@ -107,5 +108,6 @@ contacts/sites/cameras CRUD, incidents list/ack/resolve, **devices list/alias/so
 
 ## Storage / State
 
-- **SQLite** `/data/sentinel.db` — 테이블: users, contacts, sites, cameras, incidents(+device_id), invitations, settings, temp_links 메타, devices(site_id+device_id UNIQUE, soft delete via deleted_at) 등. 스키마는 `migrations.go` 참조 (SSOT).
+- **SQLite** `/data/sentinel.db` — 테이블: users, contacts, sites, cameras, incidents(+device_id), invitations, settings, temp_links 메타, devices(site_id+device_id UNIQUE, soft delete via deleted_at), `health_events`(상태 전이 이력, entity_kind+entity_id+detected_at 인덱스) 등. 스키마는 `migrations.go` 참조 (SSOT).
+- **In-memory (HealthMonitor)**: service registry당 entity 상태 캐시 (`status`, `lastCheck`, `since`, `consecutiveFailures`, `failingSince`, `lastDetail`). 컨테이너 재시작 시 휘발 (이력은 health_events에 영속).
 - **In-memory**: temp link JWT blacklist, WebSocket client registry, rate limiter buckets.

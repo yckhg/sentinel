@@ -436,7 +436,11 @@ Response `200`: `{"email": "...", "status": "valid"}`. 만료/상태 이상 시 
 | GET | `/api/settings` | admin | 시스템 설정 목록 |
 | PUT | `/api/settings/{key}` | admin | 설정 업데이트 (기존 키만) |
 
-현재 알려진 key: `site_url` (외부에서 보이는 사이트 URL. 임시 링크/초대 이메일에 사용).
+현재 알려진 key:
+- `site_url` — 외부에서 보이는 사이트 URL (임시 링크/초대 이메일에 사용)
+- `health.service_check_interval_sec` (default `30`) — 서비스 `/healthz` 폴링 주기
+- `health.service_down_threshold_sec` (default `90`) — 연속 실패가 이 시간 지속되면 service unhealthy로 확정
+- `health.sensor_alive_threshold_sec` (default `60`) — 마지막 heartbeat 이후 이 시간 지나면 sensor unhealthy로 확정
 
 ### GET /api/settings
 
@@ -446,6 +450,80 @@ Response `200`: `[{"key": "site_url", "value": "https://...", "updatedAt": "..."
 
 Request: `{"value": "string"}`
 Response `200`: `{"key", "value", "updatedAt"}`. 없는 key면 `404`.
+
+---
+
+## 11.5. Health (통합 시스템 상태)
+
+서비스(컨테이너 `/healthz` 폴링)와 센서(devices.last_seen 기반)를 단일 모델로 통합. 운영자가 한 화면에서 모든 구성요소의 healthy/unhealthy를 본다.
+
+| Method | Path | Auth | 설명 |
+|--------|------|------|------|
+| GET | `/api/health` | JWT | 모든 엔티티 현재 상태 (services + sensors) |
+| GET | `/api/health/events` | JWT | 상태 전이 이력 (limit/offset/entity_kind 필터) |
+
+### GET /api/health
+
+Response `200`:
+```json
+[
+  {
+    "kind": "service",
+    "id": "hw-gateway",
+    "name": "hw-gateway",
+    "status": "healthy",
+    "lastCheck": "2026-04-13T06:13:41Z",
+    "since": "2026-04-13T06:08:06Z",
+    "detail": "",
+    "source": "docker-healthcheck-poll"
+  },
+  {
+    "kind": "sensor",
+    "id": "site1:VOICE-01",
+    "name": "음성센서 1",
+    "status": "unhealthy",
+    "lastCheck": "2026-04-13T06:13:45Z",
+    "since": "2026-04-13T06:08:11Z",
+    "detail": "no heartbeat 95s",
+    "source": "mqtt-heartbeat"
+  }
+]
+```
+
+- `kind` — `service` | `sensor`
+- `id` — service: 컨테이너 이름 / sensor: `siteId:deviceId`
+- `name` — sensor는 alias 우선, 없으면 device_id; service는 컨테이너명
+- `status` — `healthy` | `unhealthy`
+- `lastCheck` — 마지막 측정 시각 (ISO 8601)
+- `since` — 현재 status로 진입한 시각
+- `detail` — unhealthy 사유 (HTTP 코드, 타임아웃, "no heartbeat Ns" 등)
+- `source` — `docker-healthcheck-poll` | `mqtt-heartbeat` (진단용 메타데이터)
+
+판정 로직:
+- service: 연속 실패가 `health.service_down_threshold_sec` 이상 지속되어야 unhealthy로 확정 (깜빡임 무시). 한 번이라도 성공하면 즉시 healthy.
+- sensor: `now - last_seen > health.sensor_alive_threshold_sec`이면 unhealthy.
+- web-backend 자기 자신은 모니터 대상 제외 (자기 진단 무의미).
+- mosquitto는 HTTP `/healthz`가 없어 현재 단계에서는 모니터 제외.
+
+### GET /api/health/events
+
+Query params: `limit` (default 50), `offset` (default 0), `entity_kind` (`service`|`sensor` 필터, optional)
+
+Response `200`:
+```json
+[
+  {
+    "id": 2,
+    "entityKind": "service",
+    "entityId": "notifier",
+    "status": "unhealthy",
+    "detectedAt": "2026-04-13 06:11:00",
+    "detail": "http error: ..."
+  }
+]
+```
+
+상태 전이(healthy↔unhealthy)가 발생한 시점에만 한 행이 기록됩니다 (무변화는 기록하지 않아 테이블 폭증 방지). frontend는 최근 N건을 표시하여 timeline 제공.
 
 ---
 
