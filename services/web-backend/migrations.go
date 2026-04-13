@@ -192,6 +192,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS
 			INSERT OR IGNORE INTO system_settings (key, value) VALUES ('health.sensor_alive_threshold_sec', '60');
 		`,
 	},
+	{
+		version: 15,
+		name:    "add_incidents_resolution_attribution",
+		sql: `
+			ALTER TABLE incidents ADD COLUMN resolved_by_kind TEXT;
+			ALTER TABLE incidents ADD COLUMN resolved_by_id TEXT;
+			ALTER TABLE incidents ADD COLUMN resolved_by_label TEXT;
+		`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {
