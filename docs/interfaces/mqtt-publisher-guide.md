@@ -240,15 +240,51 @@ H/W는 페이로드의 `deviceId`가 자기 자신일 때만 재시작 동작을
 
 ### 펌웨어 측 구현 가이드 (sentinel-voice 등 H/W 개발자용)
 
-1. **물리 버튼 발행 (publish):** 디바이스에 reset/해제 버튼이 있다면 누름 감지 시 위 페이로드로 `safety/{내siteId}/alert/resolved` 발행. `incidentId`를 모르면 `0`.
-2. **다른 곳의 해제 알림 수신 (subscribe):** `safety/{내siteId}/alert/resolved` 구독 → 자기 LED/부저 OFF, 디스플레이에 누가 풀었는지 표시.
-3. **idempotency:** 같은 incident에 대해 중복 resolved 메시지가 와도 안전해야 합니다. 자기 자신이 발행한 메시지가 broker echo로 다시 들어와도 무해.
-4. **자기 자신 반응 차단 옵션:** 발행자 `resolvedBy.id == 내 deviceId`면 무시 (선택). 보통은 처리해도 무해.
+#### 발행 (publish, optional)
+
+- 디바이스에 reset/해제 버튼이 있다면 누름 감지 시 위 페이로드로 `safety/{내siteId}/alert/resolved` 발행. `incidentId`를 모르면 `0`.
+- 발행은 optional. 발행하지 않는 디바이스도 아래 "수신 시 필수 동작"은 반드시 구현해야 합니다.
+
+#### 수신 시 필수 동작 (subscribe — **4단계 모두 필수**)
+
+`safety/{내siteId}/alert/resolved` 메시지 수신 시 **sensor 상태를 완전히 해제**해야 합니다. 서버는 publish만 담당하고, 실제 LED/flag/감지 루틴 상태는 펌웨어 책임입니다. 수신 시 다음 4단계를 **이 순서대로** 실행:
+
+1. **LED/부저 OFF (수신 100ms 이내)**
+   - 모든 경보 출력(LED, 부저, 진동 등)을 즉시 OFF.
+   - **Idempotency:** 이미 OFF 상태에서 재수신해도 안전(no-op). 중복 OFF 호출이 GPIO 드라이버 에러를 내지 않도록 구현.
+
+2. **내부 `alert`/`latched` 플래그 clear**
+   - 펌웨어 내부에 유지하던 "현재 alert 중" 플래그(예: `is_alerting`, `latched_scream`, `alert_state`) 를 모두 false/idle로 되돌림.
+   - **Idempotency:** 이미 clear 상태에서 재수신해도 안전. 상태 머신이 `IDLE → IDLE` 전이를 허용해야 함.
+
+3. **감지 루틴 resume**
+   - alert 중에 pause/mute 해두었던 감지 루틴(scream 분류기, gas 센서 polling 등)을 재개.
+   - **Idempotency:** 이미 감지 중인 상태에서 재수신해도 안전. 감지 루틴이 double-start 되지 않도록 "이미 running이면 skip" 가드 필요.
+
+4. **디스플레이/로그에 해제 주체 표시**
+   - `resolvedBy.label`을 그대로 디스플레이(OLED 등) 또는 시리얼 로그에 출력. 예: `"해제: 관리자 김현기"`, `"해제: PRESS-01 reset 버튼"`.
+   - **Idempotency:** 동일 `incidentId` + 동일 `resolvedBy`로 재수신 시 로그 중복 출력은 허용(무해). 디스플레이는 마지막 수신값으로 덮어쓰면 됨.
+
+> **요점:** 위 4단계 이후 디바이스는 alert 수신 전 상태와 **동등**해야 합니다. 다음 alert를 즉시 감지/발행할 수 있어야 하며, 별도 재시작/리셋 명령 없이 정상 운용으로 복귀합니다.
+
+#### Broker echo 처리 (자기 자신이 발행한 메시지의 되돌림)
+
+- MQTT broker는 QoS 1 설정에서 자기가 publish한 메시지를 구독자인 자신에게 echo 해줍니다(`no-local` 옵션 미사용 시).
+- **권장 정책: 무시.** `resolvedBy.kind == "sensor_button"` 이고 `resolvedBy.id == 내 deviceId` 이면 수신 핸들러 진입 직후 early-return.
+- echo를 처리해도 위 4단계가 idempotent하므로 동작상 무해하지만, 디스플레이/로그 중복 출력을 방지하려면 무시 권장.
+
+#### `originalAlert` 필드 활용 가이드
+
+- `originalAlert.type` (예: `"scream"`, `"gas_leak"`): 원래 어떤 종류의 alert이었는지 알 수 있음. 펌웨어는 이를 이용해 **선택적 동작** 가능:
+  - type별로 다른 LED 패턴을 썼다면 해당 패턴만 OFF.
+  - type에 맞는 "해제 완료" 음성/효과음 재생 (예: scream 해제 → "상황 종료되었습니다").
+- `originalAlert.deviceId`: 원래 alert를 발생시킨 device. 내 deviceId와 다르면 "다른 센서에서 발생한 alert를 누군가 해제했다"로 해석 가능 → 디스플레이 문구 차별화 (예: `"인근 PRESS-01 상황 해제됨"`).
+- `originalAlert`는 optional 필드입니다. 누락 시 type 추론 없이 4단계만 실행하면 됩니다.
 
 ### 정책 메모
 
 - **사람 게이트 원칙:** alert는 자동 해제되지 않습니다. 반드시 사람(운영자 클릭 또는 현장 버튼 누름)이 트리거해야 합니다.
-- **Auto-restart 분리:** 본 토픽은 "위기 종료 통지"이지 "장비 재가동 명령"이 아닙니다. 장비 재가동은 별도 `safety/{siteId}/cmd/restart` 명령이 필요합니다.
+- **Auto-restart와의 관계:** `alert/resolved` 수신 시 위 4단계에 **감지 루틴 resume이 포함되므로**, 일반적인 resolve 흐름에서 `safety/{siteId}/cmd/restart`는 **불필요**합니다. `cmd/restart`는 펌웨어 hang, 센서 자체 오작동, OS reboot 등 **비정상 복구** 용도로만 사용하세요 (정상 resolve 경로가 아님).
 - **다중 incident:** 같은 site에 동시에 여러 incident가 있을 수 있습니다. `incidentId`로 개별 매칭. `0`이면 가장 최근 미해결.
 
 ---
@@ -341,3 +377,7 @@ docker compose exec web-backend sqlite3 /data/sentinel.db \
 - `services/hw-gateway/AGENTS.md` — 요약만 유지, 상세는 이 문서로 링크
 
 스펙 변경 시 위 코드와 본 문서를 같은 커밋에 함께 수정하세요. `.claude/hooks/mqtt-spec-sync-check.sh`가 한쪽만 변경되면 경고합니다.
+
+### 변경 이력
+
+- **2026-04-14:** `alert/resolved` semantics expanded to full release (LED + alert flag clear + detection resume). §5.5 펌웨어 측 구현 가이드가 "선택적 표시" 수준에서 "4단계 필수 동작"으로 강화됨. payload struct는 불변(호환 유지). 기존 펌웨어(2026-04 이전)가 본 계약을 미구현한 상태에서는 서버가 publish만 수행할 뿐 실제 sensor 해제가 일어나지 않으므로, 펌웨어 업데이트 전까지는 운영자가 물리적으로 디바이스를 리셋해야 할 수 있음.
