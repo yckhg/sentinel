@@ -1,5 +1,7 @@
 # Operational Rules
 
+> 독자: 운영자 / orchestrator (정책 참조)
+
 Rules for naming, configuration, monitoring, and resource management in Sentinel.
 
 ## 1. Container Naming Convention

@@ -1,5 +1,7 @@
 # Adapter Extension Checklist
 
+> 독자: 서버 개발자 (새 adapter/video source 추가 시)
+
 Step-by-step guide for adding new adapters to Sentinel.
 
 ## Section 1: Stream Adapter (Video Source)
