@@ -1,8 +1,11 @@
 # MQTT Publisher Guide — Sentinel
 
-> **이 문서는 Sentinel MQTT 인터페이스의 단일 진실 원천(SSOT)입니다.**
-> H/W 펌웨어 개발자(또는 다른 AI 세션)에게 이 파일 하나만 전달하면 Sentinel에 메시지를 발행할 수 있도록 작성되었습니다.
-> 코드와 동기화 의무 — `services/hw-gateway/main.go` 변경 시 이 문서도 같이 수정해야 합니다 (`.claude/hooks/spec-sync-check.sh`가 자동 체크).
+> **이 파일 하나를 읽으면 Sentinel MQTT 계약의 모든 것을 알 수 있습니다.**
+> 펌웨어 개발자는 이 파일만 읽으면 됩니다 — 서버 내부 구현(`services/`)이나 아키텍처 문서는 불필요합니다.
+> 토픽 정의, 페이로드 스키마, QoS 정책, 펌웨어 측 구현 가이드, 변경 이력과 하위 호환 정보까지 모두 이 문서에 포함되어 있습니다.
+>
+> **SSOT (단일 진실 원천):** 이 문서가 Sentinel MQTT 인터페이스의 유일한 정의입니다.
+> **코드 동기화 의무:** `services/hw-gateway/main.go` 변경 시 이 문서도 같이 수정해야 합니다 (`.claude/hooks/spec-sync-check.sh`가 자동 체크).
 
 ---
 
@@ -380,4 +383,16 @@ docker compose exec web-backend sqlite3 /data/sentinel.db \
 
 ### 변경 이력
 
-- **2026-04-14:** `alert/resolved` semantics expanded to full release (LED + alert flag clear + detection resume). §5.5 펌웨어 측 구현 가이드가 "선택적 표시" 수준에서 "4단계 필수 동작"으로 강화됨. payload struct는 불변(호환 유지). 기존 펌웨어(2026-04 이전)가 본 계약을 미구현한 상태에서는 서버가 publish만 수행할 뿐 실제 sensor 해제가 일어나지 않으므로, 펌웨어 업데이트 전까지는 운영자가 물리적으로 디바이스를 리셋해야 할 수 있음.
+- **2026-04-14:** §5.5 `alert/resolved` 펌웨어 동작 계약 확장
+  - **무엇이 변경되었나:** §5.5 "펌웨어 측 구현 가이드"가 "선택적 표시" 수준에서 **4단계 필수 동작**(LED/부저 OFF → alert flag clear → 감지 resume → 해제 주체 표시)으로 강화됨. payload JSON 구조(필드명·타입)는 **불변** — 기존 파싱 코드 수정 불필요.
+  - **왜 변경되었나:** 기존 계약은 `alert/resolved` 수신 시 디스플레이 표시만 언급하여, LED/부저 OFF·감지 재개 등 sensor 상태 완전 해제가 명시되지 않았음. 이로 인해 펌웨어가 resolved를 수신해도 경보 출력이 남아 있거나 감지가 재개되지 않는 문제가 발생할 수 있었음.
+  - **기존 펌웨어 미구현 시 영향:** 아래 "기존 펌웨어 호환성" 단락 참조.
+
+### 기존 펌웨어 호환성 (2026-04 이전 버전)
+
+기존 펌웨어(2026-04 이전)가 위 4단계 필수 동작을 **미구현**한 상태에서의 동작:
+
+- **서버 측:** 정상 동작. 서버(hw-gateway)는 `alert/resolved` 메시지를 publish만 수행하며, 펌웨어의 구현 수준과 무관하게 incident 해소 처리(DB 갱신, WebSocket 알림)는 완료됩니다.
+- **펌웨어 측:** `alert/resolved`를 수신하더라도 LED/부저가 OFF되지 않고, 내부 alert flag가 clear되지 않으며, 감지 루틴이 재개되지 않습니다. sensor는 alert 상태에 머물러 있게 됩니다.
+- **운영 영향:** 펌웨어 업데이트 전까지 운영자가 물리적으로 디바이스를 리셋(전원 재시작 또는 `cmd/restart`)해야 sensor 상태가 초기화됩니다.
+- **업데이트 권장:** 본 계약(§5.5 4단계)을 구현한 펌웨어로 업데이트하면 `alert/resolved` 수신만으로 sensor 완전 해제가 자동화되어 물리 리셋이 불필요해집니다.
