@@ -613,17 +613,20 @@ func handleNotify(cfg Config) http.HandlerFunc {
 			http.Error(w, `{"error":"type is required"}`, http.StatusBadRequest)
 			return
 		}
-		if alert.Description == "" {
-			http.Error(w, `{"error":"description is required"}`, http.StatusBadRequest)
-			return
-		}
-		if alert.Severity == "" {
-			http.Error(w, `{"error":"severity is required"}`, http.StatusBadRequest)
-			return
-		}
 		if alert.Timestamp == "" {
 			http.Error(w, `{"error":"timestamp is required"}`, http.StatusBadRequest)
 			return
+		}
+
+		// Fallback: description/severity are optional in the MQTT contract.
+		// Inject sensible defaults so downstream template variables are never empty.
+		if alert.Description == "" {
+			alert.Description = alert.Type + " at " + alert.SiteID
+			log.Printf("[notify] description missing, using fallback: %q", alert.Description)
+		}
+		if alert.Severity == "" {
+			alert.Severity = "unknown"
+			log.Printf("[notify] severity missing, using fallback: %q", alert.Severity)
 		}
 
 		log.Printf("[notify] Received alert: site=%s device=%s type=%s severity=%s",
