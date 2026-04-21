@@ -104,13 +104,18 @@ RUN go mod download
 COPY *.go ./
 RUN go build -o <source-type>-adapter .
 
-FROM alpine:3.19
-RUN apk add --no-cache ffmpeg
+FROM sentinel-ffmpeg-base
 WORKDIR /app
 COPY --from=builder /app/<source-type>-adapter .
 RUN mkdir -p /config
 EXPOSE 8080
 CMD ["./<source-type>-adapter"]
+```
+
+**Note:** The base image must be pre-built before building the adapter:
+
+```bash
+docker build -f docker/ffmpeg-base.Dockerfile -t sentinel-ffmpeg-base .
 ```
 
 If your source requires additional tools (e.g., `yt-dlp` for YouTube), add them in the runtime stage.
