@@ -32,7 +32,7 @@ type apiCamera struct {
 
 // youtubeURLPattern matches valid YouTube video URLs.
 var youtubeURLPattern = regexp.MustCompile(
-	`^https://(www\.)?youtube\.com/watch\?v=[\w-]+|^https://youtu\.be/[\w-]+`,
+	`^https://(www\.)?youtube\.com/(watch\?v=|live/)[\w-]+|^https://youtu\.be/[\w-]+`,
 )
 
 const maxYouTubeURLLength = 200

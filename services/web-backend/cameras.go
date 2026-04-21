@@ -227,7 +227,7 @@ func validateSourceType(st string) bool {
 	return st == "rtsp" || st == "youtube"
 }
 
-var youtubeURLPattern = regexp.MustCompile(`^https://(www\.)?youtube\.com/watch\?v=[\w-]+|^https://youtu\.be/[\w-]+`)
+var youtubeURLPattern = regexp.MustCompile(`^https://(www\.)?youtube\.com/(watch\?v=|live/)[\w-]+|^https://youtu\.be/[\w-]+`)
 
 // validateSourceURL checks that the camera source URL is safe (no SSRF).
 // Returns an error message if invalid, or empty string if valid.
