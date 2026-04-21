@@ -52,7 +52,7 @@ docker compose logs -f streaming
 | Method | Path | Response |
 |--------|------|----------|
 | GET | `/healthz` | `200` |
-| GET | `/api/streams` | `[{cameraId, streamKey, hlsUrl, active}]` — active는 playlist mtime < 30s |
+| GET | `/api/streams` | `[{cameraId, hlsUrl, active, startedAt}]` — active는 playlist mtime < 30s |
 | GET | `/live/{streamKey}/index.m3u8` | HLS playlist |
 | GET | `/live/{streamKey}/*.ts` | HLS segment |
 
