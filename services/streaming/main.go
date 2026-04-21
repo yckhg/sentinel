@@ -23,6 +23,7 @@ var streamActiveTimeout = func() time.Duration {
 
 type StreamInfo struct {
 	CameraID  string `json:"cameraId"`
+	StreamKey string `json:"streamKey"`
 	HlsURL    string `json:"hlsUrl"`
 	Active    bool   `json:"active"`
 	StartedAt string `json:"startedAt"`
@@ -74,6 +75,7 @@ func handleStreams(w http.ResponseWriter, r *http.Request) {
 
 		streams = append(streams, StreamInfo{
 			CameraID:  cameraID,
+			StreamKey: cameraID,
 			HlsURL:    "/live/" + cameraID + "/index.m3u8",
 			Active:    active,
 			StartedAt: info.ModTime().UTC().Format(time.RFC3339),
