@@ -21,7 +21,7 @@ type WSMessage struct {
 type wsClient struct {
 	conn   *websocket.Conn
 	role   string // "admin", "user", or "temp"
-	userID int64  // 0 for temp viewers
+	userID int64  // 0 for temp link users
 	send   chan []byte
 }
 

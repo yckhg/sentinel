@@ -11,8 +11,8 @@
 - **베이스**: web-backend는 `:8080`에서 리스닝. 프록시 경유 시 `/api/...`, `/ws`, `/healthz`, `/view/...`, `/internal/...` 경로 사용.
 - **인증 스킴**: JWT Bearer — `Authorization: Bearer <token>`
 - **토큰 발급**: `POST /auth/login` (24시간 유효, HS256)
-- **임시 링크 토큰**: `POST /api/links/temp`로 발급 (24시간 유효, read-only viewer 권한)
-- **role 구분**: `admin`, `user`, `viewer`(=temp link). 일부 엔드포인트는 admin 전용
+- **임시 링크 토큰**: `POST /api/links/temp`로 발급 (24시간 유효, read-only temp 권한)
+- **role 구분**: `admin`, `user`, `temp`(=temp link, read-only). 일부 엔드포인트는 admin 전용
 - **WebSocket 인증**: `?token=<jwt>` 쿼리 파라미터 (일반 JWT 또는 temp link JWT 모두 수용)
 
 ### 응답 공통 규칙

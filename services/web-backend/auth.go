@@ -330,7 +330,7 @@ func authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Fallback: try temp link JWT for viewer access (read-only)
+		// Fallback: try temp link JWT for temp access (read-only)
 		tempClaims, tempErr := parseTempLinkJWT(parts[1])
 		if tempErr != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired token"})
@@ -348,7 +348,7 @@ func authMiddleware(next http.Handler) http.Handler {
 
 		ctx := context.WithValue(r.Context(), userContextKey, AuthUser{
 			UserID: 0,
-			Role:   "viewer",
+			Role:   "temp",
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
