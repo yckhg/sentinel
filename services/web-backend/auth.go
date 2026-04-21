@@ -348,7 +348,7 @@ func authMiddleware(next http.Handler) http.Handler {
 
 		ctx := context.WithValue(r.Context(), userContextKey, AuthUser{
 			UserID: 0,
-			Role:   "viewer",
+			Role:   "temp",
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
