@@ -50,3 +50,6 @@ CLAUDE.md
 .claude/
 .ralph/
 tasks/
+
+# Git worktrees
+.worktrees/
