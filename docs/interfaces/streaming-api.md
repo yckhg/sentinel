@@ -70,7 +70,7 @@ streaming이 자동 생성·서빙. 브라우저는 web-backend가 알려준 상
 
 | Endpoint | Method | 응답 |
 |----------|--------|------|
-| `/api/streams` | GET | 활성 스트림 목록: `[{cameraId, hlsUrl, active, startedAt}]` |
+| `/api/streams` | GET | 활성 스트림 목록: `[{cameraId, streamKey, hlsUrl, active, startedAt}]` |
 | `/healthz` | GET | 헬스체크 (200 OK) |
 
 ### `/api/streams` 응답 예시
@@ -79,6 +79,7 @@ streaming이 자동 생성·서빙. 브라우저는 web-backend가 알려준 상
 [
   {
     "cameraId": "cam-001",
+    "streamKey": "cam-001",
     "hlsUrl": "/live/cam-001/index.m3u8",
     "active": true,
     "startedAt": "2026-04-13T09:00:00Z"
@@ -86,7 +87,7 @@ streaming이 자동 생성·서빙. 브라우저는 web-backend가 알려준 상
 ]
 ```
 
-> `cameraId`는 RTMP 발행 시 사용한 `streamKey`와 동일합니다 (URL의 `{streamKey}`).
+> `streamKey`는 RTMP 발행 시 URL의 `{streamKey}` 값이며, `cameraId`와 동일합니다.
 
 web-backend는 이 API만 호출하면 스트림 상태/URL을 알 수 있습니다.
 
