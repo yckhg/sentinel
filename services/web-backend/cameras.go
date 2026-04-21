@@ -58,6 +58,7 @@ type streamCache struct {
 
 type streamInfo struct {
 	CameraID  string `json:"cameraId"`
+	StreamKey string `json:"streamKey"`
 	HLSUrl    string `json:"hlsUrl"`
 	Active    bool   `json:"active"`
 	StartedAt string `json:"startedAt"`
