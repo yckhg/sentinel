@@ -73,6 +73,11 @@ func handleStreams(w http.ResponseWriter, r *http.Request) {
 		// Consider stream active if playlist was modified within the detection window
 		active := time.Since(info.ModTime()) < streamActiveTimeout
 
+		// cameraID is the HLS subdirectory name, which equals the RTMP stream key
+		// (i.e. the value nginx-rtmp receives as the URL path segment after /live/).
+		// The adapter pushes to rtmp://streaming:1935/live/{streamKey}, where
+		// streamKey == cameras.stream_key in the DB (format: "cam-{8hex}").
+		// nginx-rtmp writes segments to /tmp/hls/{streamKey}/, so cameraID == streamKey.
 		streams = append(streams, StreamInfo{
 			CameraID:  cameraID,
 			StreamKey: cameraID,
