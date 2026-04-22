@@ -98,10 +98,12 @@ services:
       - WEB_BACKEND_URL=http://web-backend:8080
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3080}
       - RECORDING_URL=http://recording:8080
+      - KAKAO_ENABLED=${KAKAO_ENABLED:-false}
       - KAKAO_API_URL=${KAKAO_API_URL:-}
       - KAKAO_API_KEY=${KAKAO_API_KEY:-}
       - KAKAO_SENDER_KEY=${KAKAO_SENDER_KEY:-}
       - KAKAO_TEMPLATE_CODE=${KAKAO_TEMPLATE_CODE:-CRISIS_ALERT}
+      - SMS_ENABLED=${SMS_ENABLED:-false}
       - NHN_SMS_APP_KEY=${NHN_SMS_APP_KEY:-}
       - NHN_SMS_SECRET_KEY=${NHN_SMS_SECRET_KEY:-}
       - NHN_SMS_SENDER_NO=${NHN_SMS_SENDER_NO:-}
