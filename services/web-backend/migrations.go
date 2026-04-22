@@ -201,6 +201,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS
 			ALTER TABLE incidents ADD COLUMN resolved_by_label TEXT;
 		`,
 	},
+	{
+		version: 16,
+		name:    "remove_cam_a4184f17",
+		sql: `
+			DELETE FROM cameras WHERE stream_key = 'cam-a4184f17';
+		`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {
