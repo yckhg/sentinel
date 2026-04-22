@@ -319,12 +319,39 @@ func backoffWithJitter(base time.Duration, attempt int) time.Duration {
 	return delay + time.Duration(jitter)
 }
 
+// minValidTimestamp is the Unix timestamp threshold below which a device timestamp
+// is considered unset or invalid (2020-01-01 00:00:00 UTC).
+const minValidTimestamp = int64(1577836800)
+
+// sanitizeTimestamp returns the parsed timestamp if it is valid (>= 2020-01-01),
+// otherwise returns time.Now() and logs a warning.
+func sanitizeTimestamp(raw string, deviceID string) time.Time {
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		if t.Unix() >= minValidTimestamp {
+			return t
+		}
+		log.Printf("[TIMESTAMP] invalid timestamp from device %s (got: %s, unix=%d), using server time", deviceID, raw, t.Unix())
+		return time.Now().UTC()
+	}
+	// Try parsing as Unix integer string (some firmware sends epoch as integer)
+	if ts, err := strconv.ParseInt(raw, 10, 64); err == nil {
+		if ts >= minValidTimestamp {
+			return time.Unix(ts, 0).UTC()
+		}
+		log.Printf("[TIMESTAMP] invalid timestamp from device %s (got: %s, unix=%d), using server time", deviceID, raw, ts)
+		return time.Now().UTC()
+	}
+	log.Printf("[TIMESTAMP] unparseable timestamp from device %s (got: %q), using server time", deviceID, raw)
+	return time.Now().UTC()
+}
+
 func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
+	occurredAt := sanitizeTimestamp(alert.Timestamp, alert.DeviceID)
 	incident := IncidentPayload{
 		SiteID:      alert.SiteID,
 		DeviceID:    alert.DeviceID,
 		Description: alert.Description,
-		OccurredAt:  alert.Timestamp,
+		OccurredAt:  occurredAt.Format(time.RFC3339),
 		IsTest:      alert.Test,
 	}
 	body, err := json.Marshal(incident)
