@@ -715,6 +715,14 @@ func handleAlertResolvedSubscription(msg mqtt.Message, webBackendURL string) {
 		return
 	}
 
+	// Log originalAlert for operational visibility.
+	if len(payload.OriginalAlert) > 0 {
+		if orig, err := json.Marshal(payload.OriginalAlert); err == nil {
+			log.Printf("[ALERT-RESOLVED] originalAlert received (incident=%d siteId=%s): %s", payload.IncidentID, payload.SiteID, orig)
+		}
+	}
+	// omitempty: normal case — originalAlert 없음은 MQTT 스펙상 정상
+
 	// Forward to web-backend. Path-id == 0 lets backend match latest unresolved on siteId.
 	body, err := json.Marshal(payload)
 	if err != nil {
