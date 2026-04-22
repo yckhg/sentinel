@@ -68,7 +68,7 @@ func main() {
 	mux.HandleFunc("/ws", handleWebSocket())
 
 	// Internal service routes (no auth — accessed by other services via Docker network)
-	mux.HandleFunc("GET /api/contacts", handleListContacts(db))
+	mux.HandleFunc("GET /internal/contacts", handleListContacts(db))
 	mux.HandleFunc("POST /api/links/temp", handleCreateTempLink(db))
 	mux.HandleFunc("GET /api/links/verify/{token}", handleVerifyTempLink())
 
@@ -195,6 +195,7 @@ func initDB(path string) (*sql.DB, error) {
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA busy_timeout=5000",
 		"PRAGMA foreign_keys=ON",
+		"PRAGMA wal_autocheckpoint=100",
 	}
 	for _, p := range pragmas {
 		if _, err := db.ExecContext(ctx, p); err != nil {

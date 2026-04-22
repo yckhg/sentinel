@@ -176,7 +176,7 @@ func fetchSiteURL(cfg Config) string {
 // --- Contact/Link Fetching ---
 
 func fetchContacts(cfg Config) ([]Contact, error) {
-	resp, err := httpClient.Get(cfg.WebBackendURL + "/api/contacts")
+	resp, err := httpClient.Get(cfg.WebBackendURL + "/internal/contacts")
 	if err != nil {
 		return nil, fmt.Errorf("fetch contacts: %w", err)
 	}
@@ -517,6 +517,15 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 
 	// 3. Send to all contacts in parallel with fallback chain: KakaoTalk → SMS → Web alarm
 	//    Email is an independent channel — sent in parallel for contacts with notifyEmail=true
+	kakaoEnabled := os.Getenv("KAKAO_ENABLED") == "true"
+	smsEnabled := os.Getenv("SMS_ENABLED") == "true"
+	if !kakaoEnabled {
+		log.Printf("[notify] KakaoTalk disabled (KAKAO_ENABLED=false), skipping Kakao channel")
+	}
+	if !smsEnabled {
+		log.Printf("[notify] SMS disabled (SMS_ENABLED=false), skipping SMS channel")
+	}
+
 	var wg sync.WaitGroup
 	results := make([]NotifyResult, len(contacts))
 
@@ -543,29 +552,39 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 				ContactName: c.Name,
 			}
 
-			// Step 1: Try KakaoTalk
-			kakaoErr := sendKakaoTalk(cfg, c, alert, cctvLink)
-			if kakaoErr == nil {
-				result.Channel = "kakaotalk"
-				result.Success = true
-				log.Printf("[notify] KakaoTalk SUCCESS for %s (%s)", c.Name, c.Phone)
-				results[idx] = result
-				return
+			// Step 1: Try KakaoTalk (if enabled)
+			var kakaoErr error
+			if !kakaoEnabled {
+				kakaoErr = fmt.Errorf("KakaoTalk disabled (KAKAO_ENABLED=false)")
+			} else {
+				kakaoErr = sendKakaoTalk(cfg, c, alert, cctvLink)
+				if kakaoErr == nil {
+					result.Channel = "kakaotalk"
+					result.Success = true
+					log.Printf("[notify] KakaoTalk SUCCESS for %s (%s)", c.Name, c.Phone)
+					results[idx] = result
+					return
+				}
+				log.Printf("[notify] KakaoTalk FAILED for %s (%s): %v — falling back to SMS", c.Name, c.Phone, kakaoErr)
 			}
-			log.Printf("[notify] KakaoTalk FAILED for %s (%s): %v — falling back to SMS", c.Name, c.Phone, kakaoErr)
 
-			// Step 2: Fallback to SMS
-			smsErr := sendSMS(cfg, c, alert, cctvLink)
-			if smsErr == nil {
-				result.Channel = "sms"
-				result.Success = true
-				log.Printf("[notify] SMS SUCCESS for %s (%s)", c.Name, c.Phone)
-				results[idx] = result
-				return
+			// Step 2: Fallback to SMS (if enabled)
+			var smsErr error
+			if !smsEnabled {
+				smsErr = fmt.Errorf("SMS disabled (SMS_ENABLED=false)")
+			} else {
+				smsErr = sendSMS(cfg, c, alert, cctvLink)
+				if smsErr == nil {
+					result.Channel = "sms"
+					result.Success = true
+					log.Printf("[notify] SMS SUCCESS for %s (%s)", c.Name, c.Phone)
+					results[idx] = result
+					return
+				}
+				log.Printf("[notify] SMS FAILED for %s (%s): %v — sending system alarm", c.Name, c.Phone, smsErr)
 			}
-			log.Printf("[notify] SMS FAILED for %s (%s): %v — sending system alarm", c.Name, c.Phone, smsErr)
 
-			// Step 3: Both failed — send system alarm to web-backend
+			// Step 3: Both channels unavailable or failed — send system alarm to web-backend
 			sendSystemAlarm(cfg, c, alert, kakaoErr, smsErr)
 			result.Channel = "alarm"
 			result.Success = false
