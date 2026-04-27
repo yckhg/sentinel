@@ -33,11 +33,12 @@
 | 토픽 | 방향 | QoS | Retain | 용도 |
 |------|------|-----|--------|------|
 | `safety/{siteId}/alert` | H/W → Sentinel | 2 | false | 위급 상황 알림 |
-| `safety/{siteId}/heartbeat` | H/W → Sentinel | 0 | false | 장비 생존 신호 |
+| `safety/{siteId}/event/candidate` | H/W → Sentinel | 0 | false | threshold 미달 위기 키워드 탐지 (참고용) |
+| `safety/{siteId}/heartbeat` | H/W → Sentinel | 0 | false | 장비 생존 신호 + 현재 상태 |
 | `safety/{siteId}/cmd/restart` | Sentinel → H/W | 1 | false | 원격 재시작 명령 |
 | `safety/{siteId}/alert/resolved` | **양방향** | 1 | false | 위급 해소 통지 (sensor 버튼 또는 web operator). **✅ 구현됨 (2026-04)** |
 
-`{siteId}`는 영숫자 식별자 (예: `site1`, `factory-a`). Sentinel은 `safety/+/alert`, `safety/+/heartbeat`로 와일드카드 구독합니다.
+`{siteId}`는 영숫자 식별자 (예: `site1`, `factory-a`). Sentinel은 `safety/+/alert`, `safety/+/heartbeat`, `safety/+/event/candidate`로 와일드카드 구독합니다.
 
 ---
 
@@ -52,23 +53,27 @@ H/W가 위급 상황을 감지했을 때 발행. **반드시 QoS 2 (exactly-once
 | `deviceId` | string | ✅ | 디바이스 고유 ID (예: `PRESS-01`) |
 | `siteId` | string | ✅ | 사이트 ID — 토픽의 `{siteId}`와 일치해야 함 |
 | `type` | string | ✅ | 알림 유형 (예: `scream`, `help`, `auto_stop`, `gas_leak`) |
-| `timestamp` | string | ✅ | ISO 8601 UTC (예: `2026-04-13T09:15:30Z`) |
+| `timestamp` | string | ✅ | ISO 8601 UTC (예: `2026-04-13T09:15:30Z`) — **최초 감지 시각. 재전송 시 변경하지 않음** |
+| `alertId` | string | ✅ | alert 이벤트 고유 ID — 재전송 시 동일 값 유지. 형식: `{deviceId}-{최초감지_timestamp}` (예: `VOICE-01-20260424T024003Z`). 서버는 동일 `alertId`를 중복 incident로 처리하지 않음 |
 | `description` | string | optional | 사람이 읽을 설명 |
 | `severity` | string | optional | `critical` \| `warning` |
 | `test` | bool | optional | `true`이면 테스트 알림으로 표시 (실제 인시던트로 기록되되 로그/UI에 TEST 표식) |
 
-> **누락 시 동작:** 4개 필수 필드 중 하나라도 비어 있으면 hw-gateway가 메시지를 무시하고 경고 로그만 남깁니다. 알림은 발송되지 않습니다.
+> **누락 시 동작:** 4개 필수 필드(`deviceId`, `siteId`, `type`, `timestamp`) 중 하나라도 비어 있으면 hw-gateway가 메시지를 무시하고 경고 로그만 남깁니다. `alertId` 누락 시에는 incident를 생성하되 중복 방지 처리를 건너뜁니다.
+
+> **재전송 정책:** MQTT 연결이 끊겼다 재연결되면 펌웨어는 미확인 alert를 재전송해야 합니다. 이때 `alertId`와 `timestamp`는 최초 감지 시점의 값을 그대로 유지합니다. 서버는 `alertId`로 중복을 감지하고 추가 incident 생성 없이 PUBACK만 반환합니다.
 
 ### 예시
 
 ```json
 {
-  "deviceId": "PRESS-01",
+  "deviceId": "VOICE-01",
   "siteId": "site1",
-  "type": "scream",
-  "description": "Scream detected near press machine #1",
+  "type": "voice_alert",
+  "alertId": "VOICE-01-20260424T024003Z",
+  "description": "살려주세요 감지됨 (신뢰도: 0.923)",
   "severity": "critical",
-  "timestamp": "2026-04-13T09:15:30Z"
+  "timestamp": "2026-04-24T02:40:03Z"
 }
 ```
 
@@ -94,19 +99,35 @@ H/W가 위급 상황을 감지했을 때 발행. **반드시 QoS 2 (exactly-once
 |------|------|------|------|
 | `deviceId` | string | ✅ | 디바이스 고유 ID |
 | `siteId` | string | ✅ | 사이트 ID |
-| `timestamp` | string | optional | ISO 8601 UTC (권장 — 송신 시각 추적용) |
-| `status` | string | optional | `running` \| `stopped` \| `error` |
+| `timestamp` | string | ✅ | ISO 8601 UTC — 송신 시각 |
+| `status` | string | ✅ | `running` \| `stopped` \| `error` |
+| `alertState` | string | ✅ | `none` \| `active` — 현재 alert 발동 여부. 서버/웹은 이 필드로 장비의 경보 상태를 실시간 파악 |
+| `alertId` | string | optional | `alertState == "active"`일 때 현재 발동 중인 alert의 ID. `safety/{siteId}/alert`에서 발행한 `alertId`와 동일값 |
 
 권장 발행 주기: **10초**.
 
-### 예시
+### 예시 — 정상 동작 중
 
 ```json
 {
-  "deviceId": "PRESS-01",
+  "deviceId": "VOICE-01",
   "siteId": "site1",
   "status": "running",
-  "timestamp": "2026-04-13T09:15:40Z"
+  "alertState": "none",
+  "timestamp": "2026-04-24T02:40:10Z"
+}
+```
+
+### 예시 — alert 발동 중
+
+```json
+{
+  "deviceId": "VOICE-01",
+  "siteId": "site1",
+  "status": "running",
+  "alertState": "active",
+  "alertId": "VOICE-01-20260424T024003Z",
+  "timestamp": "2026-04-24T02:40:20Z"
 }
 ```
 
@@ -115,6 +136,51 @@ H/W가 위급 상황을 감지했을 때 발행. **반드시 QoS 2 (exactly-once
 - in-memory에 `{deviceId, siteId, alive=true, lastHeartbeat}` 갱신
 - web-backend `POST /api/devices/seen` 호출 (best-effort, 5초 타임아웃) — device 영속 등록/갱신/복원
 - `HEARTBEAT_TIMEOUT_SEC`(기본 30초) 동안 미수신 시 `alive=false`로 마킹 (DB의 `devices.deleted_at`은 건드리지 않음 — alive 상태와 삭제는 별개)
+
+---
+
+## 4.5. `safety/{siteId}/event/candidate` — threshold 미달 위기 키워드 탐지
+
+H/W가 위기 키워드를 탐지했지만 신뢰도가 threshold에 미달한 경우 발행. **QoS 0** (유실 허용 — 참고 정보).
+
+> 이 토픽은 alert가 아닙니다. GPIO 변화 없음. incident 생성 없음. 서버는 로그 기록 또는 통계 집계 용도로만 사용합니다.
+
+### Payload (JSON)
+
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|------|------|
+| `deviceId` | string | ✅ | 디바이스 고유 ID |
+| `siteId` | string | ✅ | 사이트 ID |
+| `type` | string | ✅ | `voice_candidate` 고정 |
+| `class` | string | ✅ | 모델이 예측한 클래스 (예: `save_me`, `call_119`) |
+| `confidence` | number | ✅ | 예측 신뢰도 (0.0 ~ 1.0) |
+| `threshold` | number | ✅ | 현재 alert 발동 기준 threshold |
+| `timestamp` | string | ✅ | ISO 8601 UTC |
+
+### 예시
+
+```json
+{
+  "deviceId": "VOICE-01",
+  "siteId": "site1",
+  "type": "voice_candidate",
+  "class": "save_me",
+  "confidence": 0.609,
+  "threshold": 0.80,
+  "timestamp": "2026-04-24T02:40:03Z"
+}
+```
+
+### Sentinel 측 처리
+
+- incident 생성 **안 함**, notifier 호출 **안 함**
+- hw-gateway 로그 기록 (참고용)
+- 향후: 통계 집계 또는 모델 개선 데이터 수집 경로로 활용 가능
+
+### 펌웨어 구현 조건
+
+- `0.40 ≤ confidence < threshold` 구간에서만 발행. `confidence < 0.40`은 무시.
+- MQTT 오프라인 중 발생한 candidate는 재연결 후 재전송 **불필요** (QoS 0, best-effort).
 
 ---
 
@@ -376,12 +442,23 @@ docker compose exec web-backend sqlite3 /data/sentinel.db \
 
 이 문서가 SSOT입니다. 다음 코드 영역과 짝을 이룹니다:
 
-- `services/hw-gateway/main.go` — `AlertPayload`, `HeartbeatPayload`, `RestartMQTTPayload`, `subscribeTopics()`, `handleAlert()`, `handleHeartbeat()`
+- `services/hw-gateway/main.go` — `AlertPayload`, `HeartbeatPayload`, `CandidatePayload`, `RestartMQTTPayload`, `subscribeTopics()`, `handleAlert()`, `handleHeartbeat()`, `handleCandidate()`
 - `services/hw-gateway/AGENTS.md` — 요약만 유지, 상세는 이 문서로 링크
+- `sentinel-voice/main/sentinel_mqtt.c` — `mqtt_publish_alert()`, `mqtt_publish_candidate()`, `heartbeat_timer_cb()`
 
 스펙 변경 시 위 코드와 본 문서를 같은 커밋에 함께 수정하세요. `.claude/hooks/mqtt-spec-sync-check.sh`가 한쪽만 변경되면 경고합니다.
 
 ### 변경 이력
+
+- **2026-04-27:** §3 `alert` `alertId` 필드 추가, §4 `heartbeat` 페이로드 확장, §4.5 `event/candidate` 토픽 신설
+  - **무엇이 변경되었나:**
+    - `alert` 페이로드에 `alertId` 필드 추가 (필수). MQTT 재연결 시 재전송된 동일 alert를 서버가 중복 incident로 처리하지 않도록 하는 dedup key.
+    - `heartbeat` 페이로드에 `alertState`(`none`|`active`), `alertId`(optional) 필드 추가. 서버/웹이 heartbeat만으로 장비의 현재 경보 상태 파악 가능.
+    - `event/candidate` 토픽 신설. threshold 미달이지만 위기 키워드로 분류된 탐지를 참고용으로 발행 (QoS 0, incident 생성 없음).
+  - **왜 변경되었나:** MQTT 재연결 시 alert 재전송이 중복 incident를 생성하는 문제 및 장비 경보 상태를 외부에서 확인할 방법이 없는 문제 해결. sentinel-voice #73(sub-threshold 탐지 전략) 구현을 위한 토픽 계약 선행 정의.
+  - **펌웨어 영향:** `sentinel-voice` 구현 필요 — sentinel-voice #73, #74 참조.
+  - **서버 영향:** `hw-gateway` 구현 필요 — `alertId` 중복 처리, `event/candidate` 구독 추가.
+  - **기존 호환성:** `alertId` 누락 시 incident 생성은 계속됨 (중복 방지 건너뜀). `heartbeat`의 신규 필드는 optional 처리 권장.
 
 - **2026-04-14:** §5.5 `alert/resolved` 펌웨어 동작 계약 확장
   - **무엇이 변경되었나:** §5.5 "펌웨어 측 구현 가이드"가 "선택적 표시" 수준에서 **4단계 필수 동작**(LED/부저 OFF → alert flag clear → 감지 resume → 해제 주체 표시)으로 강화됨. payload JSON 구조(필드명·타입)는 **불변** — 기존 파싱 코드 수정 불필요.
