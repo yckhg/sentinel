@@ -9,6 +9,7 @@ interface Device {
   firstSeen: string;
   lastSeen: string;
   deletedAt: string | null;
+  alertState?: "none" | "active";
 }
 
 const POLL_INTERVAL_MS = 10_000;
@@ -186,11 +187,14 @@ export default function DevicesSection() {
     }
   };
 
-  // Sort: alive first, then by last_seen desc. Deleted always go last.
+  // Sort: deleted last → alerting first → alive next → lastSeen desc.
   const sortedDevices = [...devices].sort((a, b) => {
     const aDeleted = !!a.deletedAt;
     const bDeleted = !!b.deletedAt;
     if (aDeleted !== bDeleted) return aDeleted ? 1 : -1;
+    const aAlerting = !aDeleted && a.alertState === "active";
+    const bAlerting = !bDeleted && b.alertState === "active";
+    if (aAlerting !== bAlerting) return aAlerting ? -1 : 1;
     const aAlive = !aDeleted && isAlive(a.lastSeen, nowMs);
     const bAlive = !bDeleted && isAlive(b.lastSeen, nowMs);
     if (aAlive !== bAlive) return aAlive ? -1 : 1;
@@ -277,6 +281,13 @@ export default function DevicesSection() {
                             style={{ background: "#888", color: "#fff" }}
                           >
                             삭제됨
+                          </span>
+                        ) : d.alertState === "active" ? (
+                          <span
+                            className="mgmt-card-badge"
+                            style={{ background: "#e65100", color: "#fff" }}
+                          >
+                            경보 중
                           </span>
                         ) : alive ? (
                           <span
