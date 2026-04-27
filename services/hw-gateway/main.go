@@ -24,6 +24,7 @@ type DeviceStatus struct {
 	SiteID        string `json:"siteId"`
 	Alive         bool   `json:"alive"`
 	LastHeartbeat string `json:"lastHeartbeat"`
+	AlertState    string `json:"alertState"` // "none" | "active"
 	lastSeen      time.Time
 }
 
@@ -102,10 +103,12 @@ type CandidatePayload struct {
 
 // HeartbeatPayload received from MQTT safety/+/heartbeat topic.
 type HeartbeatPayload struct {
-	DeviceID  string `json:"deviceId"`
-	SiteID    string `json:"siteId"`
-	Status    string `json:"status"`
-	Timestamp string `json:"timestamp"`
+	DeviceID   string `json:"deviceId"`
+	SiteID     string `json:"siteId"`
+	Status     string `json:"status"`
+	Timestamp  string `json:"timestamp"`
+	AlertState string `json:"alertState"` // "none" | "active"
+	AlertID    string `json:"alertId,omitempty"`
 }
 
 // RestartRequest received from web-backend POST /api/restart.
@@ -344,7 +347,7 @@ func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
 	}()
 
 	// Best-effort: register device in web-backend (fire-and-forget)
-	go postDeviceSeen(webBackendURL, alert.SiteID, alert.DeviceID)
+	go postDeviceSeen(webBackendURL, alert.SiteID, alert.DeviceID, "none")
 
 	<-done
 	<-done
@@ -479,6 +482,11 @@ func handleHeartbeat(msg mqtt.Message, webBackendURL string) {
 		hb.SiteID = parts[1]
 	}
 
+	// Default alertState to "none" if not provided
+	if hb.AlertState == "" {
+		hb.AlertState = "none"
+	}
+
 	now := time.Now().UTC()
 	key := hb.SiteID + ":" + hb.DeviceID
 
@@ -494,13 +502,14 @@ func handleHeartbeat(msg mqtt.Message, webBackendURL string) {
 	}
 	ds.Alive = true
 	ds.LastHeartbeat = now.Format(time.RFC3339)
+	ds.AlertState = hb.AlertState
 	ds.lastSeen = now
 	equipmentStore.Unlock()
 
-	log.Printf("[HEARTBEAT] deviceId=%s siteId=%s status=%s", hb.DeviceID, hb.SiteID, hb.Status)
+	log.Printf("[HEARTBEAT] deviceId=%s siteId=%s status=%s alertState=%s", hb.DeviceID, hb.SiteID, hb.Status, hb.AlertState)
 
 	// Best-effort: notify web-backend for persistent device registration
-	go postDeviceSeen(webBackendURL, hb.SiteID, hb.DeviceID)
+	go postDeviceSeen(webBackendURL, hb.SiteID, hb.DeviceID, hb.AlertState)
 }
 
 // handleCandidate processes safety/+/event/candidate messages.
@@ -526,18 +535,20 @@ func handleCandidate(msg mqtt.Message, webBackendURL string) {
 	log.Printf("[CANDIDATE] deviceId=%s class=%s conf=%.3f threshold=%.2f", candidate.DeviceID, candidate.Class, candidate.Confidence, candidate.Threshold)
 
 	// Best-effort: register device in web-backend (fire-and-forget)
-	go postDeviceSeen(webBackendURL, candidate.SiteID, candidate.DeviceID)
+	go postDeviceSeen(webBackendURL, candidate.SiteID, candidate.DeviceID, "none")
 }
 
 // postDeviceSeen notifies web-backend that a device was seen.
+// alertState should be "none" or "active"; empty string is treated as "none" by the receiver.
 // Best-effort: failures are logged but never retried or propagated.
-func postDeviceSeen(webBackendURL, siteID, deviceID string) {
+func postDeviceSeen(webBackendURL, siteID, deviceID, alertState string) {
 	if webBackendURL == "" || siteID == "" || deviceID == "" {
 		return
 	}
 	body, err := json.Marshal(map[string]string{
-		"siteId":   siteID,
-		"deviceId": deviceID,
+		"siteId":     siteID,
+		"deviceId":   deviceID,
+		"alertState": alertState,
 	})
 	if err != nil {
 		log.Printf("[DEVICE-SEEN] Failed to marshal: %v", err)
@@ -610,6 +621,7 @@ func handleEquipmentStatus(w http.ResponseWriter, r *http.Request) {
 			SiteID:        ds.SiteID,
 			Alive:         ds.Alive,
 			LastHeartbeat: ds.LastHeartbeat,
+			AlertState:    ds.AlertState,
 		})
 	}
 	equipmentStore.RUnlock()
