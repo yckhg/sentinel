@@ -10,13 +10,14 @@ import (
 )
 
 type deviceResponse struct {
-	ID        int64   `json:"id"`
-	SiteID    string  `json:"siteId"`
-	DeviceID  string  `json:"deviceId"`
-	Alias     string  `json:"alias"`
-	FirstSeen string  `json:"firstSeen"`
-	LastSeen  string  `json:"lastSeen"`
-	DeletedAt *string `json:"deletedAt"`
+	ID         int64   `json:"id"`
+	SiteID     string  `json:"siteId"`
+	DeviceID   string  `json:"deviceId"`
+	Alias      string  `json:"alias"`
+	FirstSeen  string  `json:"firstSeen"`
+	LastSeen   string  `json:"lastSeen"`
+	DeletedAt  *string `json:"deletedAt"`
+	AlertState string  `json:"alertState"`
 }
 
 // handleListDevices handles GET /api/devices — returns non-deleted devices.
@@ -35,7 +36,7 @@ func handleListDevices(db *sql.DB) http.HandlerFunc {
 		ctx, cancel := dbCtx(r.Context())
 		defer cancel()
 
-		query := `SELECT id, site_id, device_id, alias, datetime(first_seen), datetime(last_seen), datetime(deleted_at) FROM devices`
+		query := `SELECT id, site_id, device_id, alias, datetime(first_seen), datetime(last_seen), datetime(deleted_at), alert_state FROM devices`
 		if !includeDeleted {
 			query += ` WHERE deleted_at IS NULL`
 		}
@@ -52,7 +53,7 @@ func handleListDevices(db *sql.DB) http.HandlerFunc {
 		devices := []deviceResponse{}
 		for rows.Next() {
 			var d deviceResponse
-			if err := rows.Scan(&d.ID, &d.SiteID, &d.DeviceID, &d.Alias, &d.FirstSeen, &d.LastSeen, &d.DeletedAt); err != nil {
+			if err := rows.Scan(&d.ID, &d.SiteID, &d.DeviceID, &d.Alias, &d.FirstSeen, &d.LastSeen, &d.DeletedAt, &d.AlertState); err != nil {
 				log.Printf("scan device error: %v", err)
 				continue
 			}
@@ -64,12 +65,13 @@ func handleListDevices(db *sql.DB) http.HandlerFunc {
 }
 
 // handleSeenDevice handles POST /api/devices/seen from hw-gateway (internal, no auth).
-// Body: {"siteId": "...", "deviceId": "..."}
+// Body: {"siteId": "...", "deviceId": "...", "alertState": "none"|"active"}
 func handleSeenDevice(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			SiteID   string `json:"siteId"`
-			DeviceID string `json:"deviceId"`
+			SiteID     string `json:"siteId"`
+			DeviceID   string `json:"deviceId"`
+			AlertState string `json:"alertState"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -81,17 +83,21 @@ func handleSeenDevice(db *sql.DB) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "siteId and deviceId are required"})
 			return
 		}
+		if req.AlertState == "" {
+			req.AlertState = "none"
+		}
 
 		ctx, cancel := dbCtx(r.Context())
 		defer cancel()
 
 		_, err := db.ExecContext(ctx, `
-			INSERT INTO devices (site_id, device_id, last_seen)
-			VALUES (?, ?, datetime('now'))
+			INSERT INTO devices (site_id, device_id, last_seen, alert_state)
+			VALUES (?, ?, datetime('now'), ?)
 			ON CONFLICT(site_id, device_id) DO UPDATE SET
 				last_seen = datetime('now'),
-				deleted_at = NULL
-		`, req.SiteID, req.DeviceID)
+				deleted_at = NULL,
+				alert_state = excluded.alert_state
+		`, req.SiteID, req.DeviceID, req.AlertState)
 		if err != nil {
 			log.Printf("upsert device error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})

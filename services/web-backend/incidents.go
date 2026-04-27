@@ -19,6 +19,7 @@ type createIncidentRequest struct {
 	Description string `json:"description"`
 	OccurredAt  string `json:"occurredAt"`
 	IsTest      bool   `json:"isTest,omitempty"`
+	AlertID     string `json:"alertId,omitempty"`
 }
 
 // handleCreateIncident handles POST /api/incidents from hw-gateway (internal)
@@ -39,6 +40,31 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 		ctx, cancel := dbCtx(r.Context())
 		defer cancel()
 
+		// Dedup: if alertId provided, check for existing incident with the same alertId
+		if strings.TrimSpace(req.AlertID) != "" {
+			var existingID int64
+			var existingSiteID, existingDescription, existingOccurredAt string
+			err := db.QueryRowContext(ctx,
+				"SELECT id, site_id, description, datetime(occurred_at) FROM incidents WHERE alert_id = ?",
+				req.AlertID,
+			).Scan(&existingID, &existingSiteID, &existingDescription, &existingOccurredAt)
+			if err == nil {
+				// Already exists — return existing incident without creating a duplicate
+				log.Printf("incident dedup: alertId=%s already mapped to incident id=%d", req.AlertID, existingID)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"id":          existingID,
+					"siteId":      existingSiteID,
+					"description": existingDescription,
+					"occurredAt":  existingOccurredAt,
+				})
+				return
+			} else if err != sql.ErrNoRows {
+				log.Printf("dedup check error: %v", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+				return
+			}
+		}
+
 		// Use provided occurredAt or default to now (handled by DB default)
 		isTest := 0
 		if req.IsTest {
@@ -54,13 +80,13 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 		var err error
 		if req.OccurredAt != "" {
 			result, err = db.ExecContext(ctx,
-				"INSERT INTO incidents (site_id, device_id, description, occurred_at, is_test) VALUES (?, ?, ?, ?, ?)",
-				req.SiteID, deviceIDArg, req.Description, req.OccurredAt, isTest,
+				"INSERT INTO incidents (site_id, device_id, description, occurred_at, is_test, alert_id) VALUES (?, ?, ?, ?, ?, NULLIF(?, ''))",
+				req.SiteID, deviceIDArg, req.Description, req.OccurredAt, isTest, req.AlertID,
 			)
 		} else {
 			result, err = db.ExecContext(ctx,
-				"INSERT INTO incidents (site_id, device_id, description, is_test) VALUES (?, ?, ?, ?)",
-				req.SiteID, deviceIDArg, req.Description, isTest,
+				"INSERT INTO incidents (site_id, device_id, description, is_test, alert_id) VALUES (?, ?, ?, ?, NULLIF(?, ''))",
+				req.SiteID, deviceIDArg, req.Description, isTest, req.AlertID,
 			)
 		}
 		if err != nil {
