@@ -208,6 +208,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS
 			DELETE FROM cameras WHERE stream_key = 'cam-a4184f17';
 		`,
 	},
+	{
+		version: 17,
+		name:    "add_incidents_alert_id",
+		sql: `ALTER TABLE incidents ADD COLUMN alert_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_alert_id ON incidents(alert_id) WHERE alert_id IS NOT NULL;`,
+	},
+	{
+		version: 18,
+		name:    "add_devices_alert_state",
+		sql:     `ALTER TABLE devices ADD COLUMN alert_state TEXT NOT NULL DEFAULT 'none';`,
+	},
 }
 
 func runMigrations(db *sql.DB) error {
