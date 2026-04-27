@@ -54,7 +54,7 @@ docker compose logs -f hw-gateway
 | Method | Path | Request | Response | Purpose |
 |--------|------|---------|----------|---------|
 | GET | `/healthz` | — | `200 OK` | 헬스체크 |
-| GET | `/api/equipment/status` | — | `[{deviceId, siteId, alive, lastHeartbeat}]` | in-memory 장비 상태 |
+| GET | `/api/equipment/status` | — | `[{deviceId, siteId, alive, lastHeartbeat, alertState}]` | in-memory 장비 상태 (`alertState`: `"none"` \| `"active"`) |
 | POST | `/api/restart` | `{deviceId}` | `202 Accepted` | restart 명령 수신 → MQTT publish |
 | POST | `/api/alert/resolved` | `{incidentId, siteId, resolvedAt, resolvedBy{kind,id,label}, originalAlert?}` | `200 OK` | web-backend 호출 → MQTT `safety/{siteId}/alert/resolved` publish (QoS 1, retain false). 본 endpoint가 발행한 메시지는 자기 echo로 다시 들어오지만 `resolvedBy.kind == "web"` 검사로 무시된다. |
 
@@ -67,7 +67,8 @@ docker compose logs -f hw-gateway
    - 페이로드: 같은 crisis 이벤트 (incident 기록 + WebSocket push 트리거). `deviceId` 필드 포함 (사고 추적용).
    - notifier 호출과 **병렬** 실행 (goroutine)
 3. **web-backend** `POST http://web-backend:8080/api/devices/seen`
-   - 페이로드: `{siteId, deviceId}`
+   - 페이로드: `{siteId, deviceId, alertState}`
+   - `alertState`: heartbeat에서는 수신된 값(`"none"` | `"active"`), alert/candidate에서는 `"none"` 고정
    - 트리거: heartbeat 또는 alert 수신 시마다
    - Best-effort: 5초 타임아웃, 재시도 없음, 실패는 로그만 (alert/heartbeat 처리는 계속)
 4. **web-backend** `POST http://web-backend:8080/api/incidents/{id}/resolve-from-sensor`
