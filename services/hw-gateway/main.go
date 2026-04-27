@@ -35,10 +35,32 @@ var equipmentStore = struct {
 
 var heartbeatTimeout = 30 * time.Second
 
+type alertEntry struct {
+	insertedAt time.Time
+}
+
 var (
 	processedAlertsMu sync.Mutex
-	processedAlerts   = make(map[string]struct{}) // alertId → 처리됨
+	processedAlerts   = make(map[string]alertEntry) // alertId → 처리됨
 )
+
+// startAlertCacheCleanup removes entries older than 24 hours every hour.
+func startAlertCacheCleanup() {
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			cutoff := time.Now().Add(-24 * time.Hour)
+			processedAlertsMu.Lock()
+			for id, entry := range processedAlerts {
+				if entry.insertedAt.Before(cutoff) {
+					delete(processedAlerts, id)
+				}
+			}
+			processedAlertsMu.Unlock()
+		}
+	}()
+}
 
 // AlertPayload received from MQTT safety/+/alert topic.
 type AlertPayload struct {
@@ -149,6 +171,9 @@ func main() {
 	// Start background heartbeat checker
 	go heartbeatChecker()
 
+	// Start background processedAlerts TTL cleanup (24h retention)
+	startAlertCacheCleanup()
+
 	// Setup MQTT client options
 	opts := mqtt.NewClientOptions().
 		AddBroker(brokerURL).
@@ -256,7 +281,7 @@ func subscribeTopics(client mqtt.Client, notifierURL, webBackendURL string) {
 	}
 
 	// Subscribe to event/candidate topic (QoS 0 — best-effort, high frequency)
-	candidateToken := client.Subscribe("safety/+/event/candidate", 0, func(c mqtt.Client, msg mqtt.Message) {
+	candidateToken := client.Subscribe("safety/+/event/candidate", 0, func(_ mqtt.Client, msg mqtt.Message) {
 		handleCandidate(msg, webBackendURL)
 	})
 	candidateToken.Wait()
@@ -289,7 +314,7 @@ func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
 			log.Printf("[ALERT] Duplicate alertId=%s, skipping", alert.AlertID)
 			return
 		}
-		processedAlerts[alert.AlertID] = struct{}{}
+		processedAlerts[alert.AlertID] = alertEntry{insertedAt: time.Now()}
 		processedAlertsMu.Unlock()
 	}
 
@@ -490,6 +515,11 @@ func handleCandidate(msg mqtt.Message, webBackendURL string) {
 
 	if candidate.DeviceID == "" || candidate.SiteID == "" {
 		log.Printf("[MQTT] Missing required fields in candidate payload: %s", string(msg.Payload()))
+		return
+	}
+
+	if candidate.Class == "" || candidate.Confidence <= 0 || candidate.Threshold <= 0 {
+		log.Printf("[CANDIDATE] missing required fields (class/confidence/threshold), skipping: %s", msg.Payload())
 		return
 	}
 
