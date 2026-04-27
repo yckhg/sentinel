@@ -35,14 +35,20 @@ var equipmentStore = struct {
 
 var heartbeatTimeout = 30 * time.Second
 
+var (
+	processedAlertsMu sync.Mutex
+	processedAlerts   = make(map[string]struct{}) // alertId → 처리됨
+)
+
 // AlertPayload received from MQTT safety/+/alert topic.
 type AlertPayload struct {
 	DeviceID    string `json:"deviceId"`
 	SiteID      string `json:"siteId"`
 	Type        string `json:"type"`
+	Timestamp   string `json:"timestamp"`
+	AlertID     string `json:"alertId"`
 	Description string `json:"description"`
 	Severity    string `json:"severity"`
-	Timestamp   string `json:"timestamp"`
 	Test        bool   `json:"test,omitempty"`
 }
 
@@ -59,6 +65,17 @@ type IncidentPayload struct {
 type TestAlertRequest struct {
 	SiteID   string `json:"siteId"`
 	DeviceID string `json:"deviceId"`
+}
+
+// CandidatePayload received from MQTT safety/+/event/candidate topic.
+type CandidatePayload struct {
+	DeviceID   string  `json:"deviceId"`
+	SiteID     string  `json:"siteId"`
+	Type       string  `json:"type"`
+	Class      string  `json:"class"`
+	Confidence float64 `json:"confidence"`
+	Threshold  float64 `json:"threshold"`
+	Timestamp  string  `json:"timestamp"`
 }
 
 // HeartbeatPayload received from MQTT safety/+/heartbeat topic.
@@ -237,6 +254,17 @@ func subscribeTopics(client mqtt.Client, notifierURL, webBackendURL string) {
 	} else {
 		log.Println("[MQTT] Subscribed to safety/+/alert/resolved (QoS 1)")
 	}
+
+	// Subscribe to event/candidate topic (QoS 0 — best-effort, high frequency)
+	candidateToken := client.Subscribe("safety/+/event/candidate", 0, func(c mqtt.Client, msg mqtt.Message) {
+		handleCandidate(msg, webBackendURL)
+	})
+	candidateToken.Wait()
+	if candidateToken.Error() != nil {
+		log.Printf("[MQTT] Failed to subscribe to safety/+/event/candidate: %v", candidateToken.Error())
+	} else {
+		log.Println("[MQTT] Subscribed to safety/+/event/candidate (QoS 0)")
+	}
 }
 
 func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
@@ -251,6 +279,18 @@ func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
 	if alert.DeviceID == "" || alert.SiteID == "" || alert.Type == "" || alert.Timestamp == "" {
 		log.Printf("[MQTT] Missing required fields in alert payload: %s", string(msg.Payload()))
 		return
+	}
+
+	// Deduplication: skip already-processed alertIds (in-memory, resets on restart)
+	if alert.AlertID != "" {
+		processedAlertsMu.Lock()
+		if _, exists := processedAlerts[alert.AlertID]; exists {
+			processedAlertsMu.Unlock()
+			log.Printf("[ALERT] Duplicate alertId=%s, skipping", alert.AlertID)
+			return
+		}
+		processedAlerts[alert.AlertID] = struct{}{}
+		processedAlertsMu.Unlock()
 	}
 
 	// Use siteId from topic for consistency
@@ -436,6 +476,27 @@ func handleHeartbeat(msg mqtt.Message, webBackendURL string) {
 
 	// Best-effort: notify web-backend for persistent device registration
 	go postDeviceSeen(webBackendURL, hb.SiteID, hb.DeviceID)
+}
+
+// handleCandidate processes safety/+/event/candidate messages.
+// Best-effort: logs the candidate event and notifies web-backend via POST /api/devices/seen.
+// No incident is created and notifier is not called.
+func handleCandidate(msg mqtt.Message, webBackendURL string) {
+	var candidate CandidatePayload
+	if err := json.Unmarshal(msg.Payload(), &candidate); err != nil {
+		log.Printf("[MQTT] Malformed JSON candidate payload on %s: %v", msg.Topic(), err)
+		return
+	}
+
+	if candidate.DeviceID == "" || candidate.SiteID == "" {
+		log.Printf("[MQTT] Missing required fields in candidate payload: %s", string(msg.Payload()))
+		return
+	}
+
+	log.Printf("[CANDIDATE] deviceId=%s class=%s conf=%.3f threshold=%.2f", candidate.DeviceID, candidate.Class, candidate.Confidence, candidate.Threshold)
+
+	// Best-effort: register device in web-backend (fire-and-forget)
+	go postDeviceSeen(webBackendURL, candidate.SiteID, candidate.DeviceID)
 }
 
 // postDeviceSeen notifies web-backend that a device was seen.
