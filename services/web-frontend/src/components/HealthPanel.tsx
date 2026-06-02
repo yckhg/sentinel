@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
+import { parseServerTimeMs, formatKstDateTimeSec } from "../utils/datetime";
 
 interface HealthEntry {
   kind: "service" | "sensor";
@@ -30,23 +31,8 @@ function getAuthHeaders(): HeadersInit {
     : { "Content-Type": "application/json" };
 }
 
-function parseServerTimeMs(s: string | null | undefined): number {
-  if (!s) return 0;
-  if (s.includes("T")) {
-    const t = Date.parse(s);
-    return Number.isNaN(t) ? 0 : t;
-  }
-  const iso = s.replace(" ", "T") + "Z";
-  const t = Date.parse(iso);
-  return Number.isNaN(t) ? 0 : t;
-}
-
 function formatDate(s: string | null | undefined): string {
-  const t = parseServerTimeMs(s);
-  if (!t) return "-";
-  const d = new Date(t);
-  const pad = (n: number) => n.toString().padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return formatKstDateTimeSec(s);
 }
 
 function formatSince(s: string | null | undefined, nowMs: number): string {

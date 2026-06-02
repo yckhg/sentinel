@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchWithTimeout } from "../utils/fetchWithTimeout";
+import { parseServerDate, formatKstClock } from "../utils/datetime";
 
 interface TimeRange {
   start: string;
@@ -33,20 +34,11 @@ interface RecordingTimelineProps {
 }
 
 function formatTime(date: Date): string {
-  return date.toLocaleTimeString("ko-KR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
+  return formatKstClock(date, false);
 }
 
 function formatTimeWithSec(date: Date): string {
-  return date.toLocaleTimeString("ko-KR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
+  return formatKstClock(date, true);
 }
 
 function formatDuration(from: Date, to: Date): string {
@@ -438,14 +430,16 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
 
         {/* Incident markers */}
         {incidents.map((inc) => {
-          const frac = timeToFraction(new Date(inc.occurredAt));
+          const occurred = parseServerDate(inc.occurredAt);
+          if (!occurred) return null;
+          const frac = timeToFraction(occurred);
           if (frac <= 0 || frac >= 1) return null;
           return (
             <div
               key={inc.id}
               className={`rec-timeline-incident${inc.isTest ? " test" : ""}`}
               style={{ left: `${frac * 100}%` }}
-              title={`${inc.isTest ? "[테스트] " : ""}${inc.description} (${formatTimeWithSec(new Date(inc.occurredAt))})`}
+              title={`${inc.isTest ? "[테스트] " : ""}${inc.description} (${formatTimeWithSec(occurred)})`}
             />
           );
         })}

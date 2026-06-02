@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
+import { formatKstDateTime } from "../utils/datetime";
 import DualCalendar from "../components/DualCalendar";
 
 interface Incident {
@@ -64,17 +65,7 @@ function isAdmin(): boolean {
 }
 
 function formatDateTime(iso: string): string {
-  try {
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return iso;
-    const month = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    const hours = String(d.getHours()).padStart(2, "0");
-    const minutes = String(d.getMinutes()).padStart(2, "0");
-    return `${d.getFullYear()}-${month}-${day} ${hours}:${minutes}`;
-  } catch {
-    return iso;
-  }
+  return formatKstDateTime(iso);
 }
 
 function statusLabel(status: string): string {

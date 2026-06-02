@@ -1,5 +1,6 @@
 import { useState, useCallback } from "react";
 import useWebSocket from "../hooks/useWebSocket";
+import { formatKstTime } from "../utils/datetime";
 import EmergencyCallButton from "./EmergencyCallButton";
 
 interface CrisisAlert {
@@ -44,7 +45,7 @@ export default function CrisisAlertBanner() {
             <span className="crisis-banner-icon">🚨</span>
             <div className="crisis-banner-text">
               <span className="crisis-banner-time">
-                {new Date(alert.occurredAt).toLocaleTimeString("ko-KR")}
+                {formatKstTime(alert.occurredAt, true)}
               </span>
               <span className="crisis-banner-desc">{alert.description}</span>
             </div>

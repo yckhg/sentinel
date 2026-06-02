@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
+import { formatKstDateTime, formatKstDate } from "../utils/datetime";
 import DevicesSection from "../components/DevicesSection";
 import HealthPanel from "../components/HealthPanel";
 
@@ -1151,10 +1152,10 @@ export default function ManagementPage() {
                   {link.label || "임시 링크"}
                 </span>
                 <span className="mgmt-card-phone">
-                  생성: {new Date(link.createdAt).toLocaleString("ko-KR")}
+                  생성: {formatKstDateTime(link.createdAt)}
                 </span>
                 <span className="mgmt-card-phone">
-                  만료: {new Date(link.expiresAt).toLocaleString("ko-KR")}
+                  만료: {formatKstDateTime(link.expiresAt)}
                 </span>
               </div>
               <div className="mgmt-card-actions">
@@ -1510,7 +1511,7 @@ export default function ManagementPage() {
                         <span className="mgmt-card-name">{user.name}</span>
                         <span className="mgmt-card-phone">@{user.username}</span>
                         <span className="mgmt-card-phone">
-                          {new Date(user.createdAt).toLocaleDateString("ko-KR")} 가입 요청
+                          {formatKstDate(user.createdAt)} 가입 요청
                         </span>
                       </div>
                       <div className="mgmt-card-actions">
@@ -1612,7 +1613,7 @@ export default function ManagementPage() {
                       </span>
                     </span>
                     <span className="mgmt-card-phone">
-                      {new Date(inv.createdAt + "Z").toLocaleDateString("ko-KR")} 발송
+                      {formatKstDate(inv.createdAt)} 발송
                     </span>
                   </div>
                   <div className="mgmt-card-actions">
@@ -1758,7 +1759,7 @@ export default function ManagementPage() {
                         </span>
                         {firstArchive && (
                           <span className="mgmt-card-phone">
-                            {new Date(firstArchive.from).toLocaleString("ko-KR")} ~ {new Date(firstArchive.to).toLocaleString("ko-KR")}
+                            {formatKstDateTime(firstArchive.from)} ~ {formatKstDateTime(firstArchive.to)}
                           </span>
                         )}
                         <span className="mgmt-card-phone">
