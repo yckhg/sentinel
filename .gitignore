@@ -10,6 +10,9 @@ build/
 *.o
 *.so
 
+# Go compiled binary (web-backend build output)
+services/web-backend/web-backend
+
 # Environment
 .env
 .env.local
