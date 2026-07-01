@@ -1,8 +1,11 @@
-# H/W Spec — 안전차단 액추에이터 (MQTT 릴레이 → 설비 전원 차단)
+# H/W Spec — 원격 릴레이 스위치 (MQTT → 설비 전원 차단)
 
-감지기가 위험을 감지하면 MQTT를 발행하고, **서버(hw-gateway)와 이 릴레이 모듈이 동시에 구독**한다.
-릴레이는 수신 즉시 접점을 조작해 **설비 전원을 차단**한다. (사람에겐 별도 알림 — 현재 이메일, 향후 문자)
-아키텍처상 명칭 = **액추에이터(actuator)** (CCTV·센서와 함께 pluggable 컴포넌트).
+감지기가 위험을 감지하면 MQTT를 발행하고, **서버(hw-gateway)와 이 릴레이 스위치가 동시에 구독**한다.
+릴레이 스위치는 수신 즉시 **전기 접점을 열어 설비 전원을 차단**한다. (사람에겐 별도 알림 — 현재 이메일, 향후 문자)
+
+**정확한 명칭:** 이 장치는 **원격 릴레이 스위치(remote relay switch)** = 네트워크/IP 릴레이, 우리 경우 **MQTT 릴레이 모듈**이다.
+- 모터·실린더 같은 기계식 구동기가 **아니고**, 물리적으로 버튼을 누르는 장치(예: 버튼 푸셔)도 **아니다** — 전기 회로를 직접 개폐한다.
+- `architecture-overview.md`가 이 역할을 추상적으로 "actuator"라 부르지만, **부품 이름은 원격 릴레이 스위치**다. (actuator = 제어신호로 물리세계에 작용하는 장치의 넓은 범주 — 릴레이도 포함되나 오해 소지 있어 본 문서는 구체명 사용)
 
 ## 신호 흐름
 
@@ -142,6 +145,6 @@ MQTT 릴레이 접점은 무전압·저전류라 모터 전류를 직접 못 흘
 - 설비 명판값(정격전류·kW·상·전압) → 접촉기 사이징 입력
 
 ## 참고 근거
-- `docs/architecture-overview.md` — 액추에이터 pluggable 컴포넌트, `safety/{siteId}/alert` 위기 흐름
+- `docs/architecture-overview.md` — 위 역할을 "actuator"로 지칭(추상 역할명), `safety/{siteId}/alert` 위기 흐름
 - `docs/interfaces/mqtt-publisher-guide.md` — MQTT 토픽 규약
 - `docs/hw/pc-spec.md` — 같은 사이트의 PC/CCTV 사양
