@@ -15,8 +15,8 @@ YouTube 영상 URL 또는 로컬 비디오 파일을 소스로 삼아, streaming
 
 - **FFmpeg** — 소스 재생·재인코딩·RTMP push 실행기.
 - **yt-dlp** — YouTube URL을 직접 재생 가능한 스트림 URL로 해석.
-- **streaming 서비스** — RTMP 수신자. 접면 계약의 소유자는 `docs/interfaces/streaming-api.md`("RTMP Input Specification"). 본 스펙은 그 규격을 재정의하지 않고 준수만 보장한다.
-- **web-backend** — reload 시 카메라 목록의 원천. 카메라 목록 API의 계약 소유자는 `docs/interfaces/web-api.md`.
+- **streaming 서비스** — RTMP 수신자. 접면 계약의 소유자는 `docs/spec/interface-streaming.md` §계약 1 (RTMP 입력). 본 스펙은 그 규격을 재정의하지 않고 준수만 보장한다.
+- **web-backend** — reload 시 카메라 목록의 원천 (`GET /internal/cameras`). 이 API의 계약 소유자는 `docs/spec/interface-web-api.md` §계약 13 (Internal).
 - **설정 파일** — JSON 소스 목록 (read-only). **로컬 미디어 파일** — `/media` read-only 마운트.
 
 ## 입력
@@ -33,7 +33,7 @@ YouTube 영상 URL 또는 로컬 비디오 파일을 소스로 삼아, streaming
 
 ## 출력 (계약)
 
-- **RTMP push** — 소스마다 `{RTMP 베이스}/{streamKey}`로 지속 송출. 스트림 내용 규격(FLV 컨테이너, H.264 B-frame 금지, AAC 오디오, streamKey 규칙)의 소유자는 `docs/interfaces/streaming-api.md`이며 본 서비스는 그 규격을 항상 만족하는 스트림만 내보낸다. 로컬 파일 소스는 파일 끝에 도달해도 끊기지 않고 무한 반복 송출된다.
+- **RTMP push** — 소스마다 `{RTMP 베이스}/{streamKey}`로 지속 송출. 스트림 내용 규격(FLV 컨테이너, H.264 B-frame 금지, AAC 오디오, streamKey 규칙)의 소유자는 `docs/spec/interface-streaming.md` §계약 1이며 본 서비스는 그 규격을 항상 만족하는 스트림만 내보낸다. 로컬 파일 소스는 파일 끝에 도달해도 끊기지 않고 무한 반복 송출된다.
 - **`GET /healthz`** — 200, JSON `{"status":"ok","service":"youtube-adapter"}`. 스트림 상태와 무관하게 프로세스 생존만 나타낸다.
 - **`GET /api/streams/status`** — 200, JSON 배열. 현재 소스 목록의 각 소스당 1개 원소: `{id, streamKey, status, lastError?, startedAt?, loopCount}`. `status ∈ {starting, running, error, stopped, unknown}`.
 - **`POST /api/cameras/reload`** — 성공 시 200 `{"status":"ok","count":N}` (N = 채택된 YouTube 소스 수). web-backend 조회 실패 시 500 `{"error":…}`이며 기존 스트림들은 그대로 유지된다.
@@ -57,7 +57,7 @@ YouTube 영상 URL 또는 로컬 비디오 파일을 소스로 삼아, streaming
   - 거부(경고 후 skip, status 목록에 미등장): `http://youtube.com/watch?v=abc`(스킴), 201자 이상 URL, `https://example.com/watch?v=abc`(도메인), `https://youtube.com.evil.com/watch?v=abc`(도메인 위장)
   — 위 판정이 전부 일치하면 OK.
 - D. **로컬 파일 무한 반복**: 10초짜리 `/media/test.mp4`를 `localFile`로 지정하고 기동 → 60초 이상 경과 후에도 streaming의 `GET /api/streams`에서 해당 `streamKey`가 `active: true`이고, yt-dlp 프로세스가 한 번도 실행되지 않았으면 OK.
-- E. **RTMP 출력 규격 준수**: 송출 중인 스트림의 결과물(HLS 세그먼트 또는 RTMP 구독)을 ffprobe로 검사 → video codec `h264` + B-frame 없음(`has_b_frames=0`), audio codec `aac`, 그리고 push 시작 후 5초를 훨씬 넘겨(예: 60초) 연결이 유지되면 OK. (규격 자체의 정의는 `docs/interfaces/streaming-api.md`가 소유)
+- E. **RTMP 출력 규격 준수**: 송출 중인 스트림의 결과물(HLS 세그먼트 또는 RTMP 구독)을 ffprobe로 검사 → video codec `h264` + B-frame 없음(`has_b_frames=0`), audio codec `aac`, 그리고 push 시작 후 5초를 훨씬 넘겨(예: 60초) 연결이 유지되면 OK. (규격 자체의 정의는 `docs/spec/interface-streaming.md` §계약 1이 소유)
 - F. **장애 격리·재시도**: 존재하지 않는 영상 URL 소스 1개 + 정상 로컬 파일 소스 1개로 기동 → 30초 내 status에서 전자는 `status:"error"`+`lastError` 비어있지 않음, 후자는 `running`, `/healthz`는 계속 200이면 OK. 이후 관측되는 재시도 간격이 단조 증가하되 30초를 넘지 않으면 OK.
 - G. **reload 재조정**: (1) web-backend가 유효 YouTube 카메라 N개를 반환하는 상태에서 `curl -s -X POST http://youtube-adapter:8080/api/cameras/reload` → 200 `{"status":"ok","count":N}`, 이후 status 목록이 그 N개와 일치하면 OK. (2) `sourceType`이 youtube가 아니거나 `enabled=false`이거나 `streamKey`가 빈 카메라는 count와 목록에서 제외되면 OK. (3) 동일 streamKey·동일 URL 카메라는 reload 전후 `startedAt`이 변하지 않으면(재시작 안 됨) OK. (4) web-backend가 다운된 상태에서 reload → 500 응답이고 기존 스트림의 status·`startedAt`이 그대로면 OK.
 - H. **설정 결함 내성**: config 파일 없이(또는 깨진 JSON으로) 기동 → 컨테이너가 크래시하지 않고 `/healthz` 200, `/api/streams/status`가 빈 배열이면 OK.

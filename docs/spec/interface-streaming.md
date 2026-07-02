@@ -17,7 +17,7 @@
 |------|------|
 | RTMP 수신 / HLS 생성·서빙 | nginx + ngx_rtmp_module (v1.2.2) |
 | 상태 API (`/api/streams`, `/healthz`) | Go (표준 라이브러리 net/http) |
-| 배포 형태 | 단일 Docker 컨테이너 (내부 네트워크 `yc-network`), 메모리 상한 256M |
+| 배포 형태 | 단일 Docker 컨테이너 (프로젝트 내부 네트워크 `sentinel-net` 전용 — 런타임 이름 `sentinel_sentinel-net`. 외부 공유 네트워크 `yc-network`에는 속하지 않으며, yc-network에서 호스트명 `streaming`은 해석되지 않는다), 메모리 상한 256M |
 
 외부 통합자 관점에서는 **RTMP 1935 포트, HTTP 8080 포트** 두 개만 존재한다. (컨테이너 내부의 프로세스 분리는 계약 대상이 아님)
 
@@ -25,7 +25,7 @@
 
 - **FFmpeg** — 어댑터의 RTMP push, recording의 RTMP pull, 검증 단언 실행(ffprobe)에 사용
 - **hls.js** — 브라우저 측 HLS 재생 (web-frontend)
-- **Docker 내부 네트워크** — RTMP/HTTP 모두 내부 전용. 외부 노출은 web-frontend nginx가 `/live/`를 streaming:8080으로 프록시하는 경로뿐
+- **Docker 내부 네트워크 (`sentinel-net`)** — RTMP/HTTP 모두 내부 전용. 외부 노출은 web-frontend nginx가 `/live/`를 streaming:8080으로 프록시하는 경로뿐 (web-frontend만 `yc-network`에 추가로 조인)
 - **호스트 이름 계약**: 컨테이너 이름 `streaming`이 주소의 일부다 (`rtmp://streaming:1935/...`, `http://streaming:8080/...`)
 
 ---
@@ -39,10 +39,11 @@
 | Protocol | RTMP (push) |
 | Endpoint | `rtmp://streaming:1935/live/{streamKey}` (내부 네트워크 전용) |
 | Container | FLV (`-f flv`) |
-| Video codec | H.264 — Baseline 또는 Main profile |
+| Video codec | H.264 — profile은 강제되지 않음 (B-frame 없는 스트림이면 수락. Baseline 권장 — ⚠️ 리뷰 필요 5 참조) |
 | Audio codec | AAC (LC, HE-AAC 등 모든 profile 허용) |
 | **B-frames** | **금지** — nginx-rtmp v1.2.2가 B-frame composition time offset 포함 FLV를 ~5초 후 연결 종료 |
-| streamKey | 영숫자/하이픈 권장, 슬래시 금지. 표준 형식: `cam-{8hex}` (web-backend가 발급) |
+| **키프레임 간격** | **최대 2초 요구** — streaming은 키프레임에서만 HLS fragment를 자르므로(계약 2), 소스 키프레임 간격이 2초를 넘으면 세그먼트 길이·초기 재생 지연이 그만큼 늘어난다. 위반해도 push는 수락되지만(연결 거부 없음) 계약 2의 fragment/지연 수치는 보장되지 않는다. 재인코딩 시 `-g <2×fps>` 지정 (⚠️ 리뷰 필요 6 참조) |
+| streamKey | 영숫자/하이픈 권장, 슬래시 금지. 형식은 강제되지 않음 — `cam-{8hex}`는 web-backend가 카메라 생성 시 발급하는 **생성 기본값(권장)**이며, 다른 형식(예: `yt-cam-1`)도 실존·수락된다 |
 
 ### 출력 (계약)
 
@@ -51,7 +52,7 @@
 
 ### 핵심 로직 (동작 — 불변식)
 
-- **B-frame 불변식**: 소스에 B-frame 포함 가능성이 있으면 push 측에서 `-tune zerolatency` 또는 `-bf 0`으로 제거해야 한다. "Connection reset by peer on audio packet muxing" 류 에러의 실제 원인은 대부분 비디오 B-frame이다 (에러 메시지가 오디오로 오인 유도).
+- **B-frame 불변식**: 소스에 B-frame 포함 가능성이 있으면 push 측에서 `-tune zerolatency` 또는 `-bf 0`으로 제거해야 한다. 근거는 입력 표의 B-frame 금지 조항(nginx-rtmp v1.2.2가 B-frame 포함 FLV 연결을 조기 종료) — push가 지속되려면 이 불변식이 소스 측에서 보장되어야 한다.
 - **copy 우선 원칙**: 소스가 이미 B-frame 없는 H.264 + AAC면 어댑터는 `-c copy`로 push한다 (RTSP 어댑터 표준 패턴). 재인코딩은 B-frame 제거 등 계약 준수를 위해 불가피할 때만 허용.
 - streamKey는 push URL의 마지막 path segment이며, 이후 모든 산출물(HLS 경로, 상태 API의 `streamKey`/`cameraId`)의 식별자가 된다.
 
@@ -59,18 +60,22 @@
 
 ```bash
 ffmpeg -i <source> \
-  -c:v libx264 -profile:v baseline -tune zerolatency -bf 0 \
+  -c:v libx264 -profile:v baseline -tune zerolatency -bf 0 -g 30 \
   -c:a aac \
-  -f flv rtmp://streaming:1935/live/cam-001
+  -f flv rtmp://streaming:1935/live/cam-3f2a9b1c
 ```
+
+(`-g 30`은 15fps 기준 키프레임 간격 2초. 소스 fps에 맞춰 `2×fps`로 조정한다 — 미지정 시 libx264 기본 keyint 250으로 키프레임 간격 요구를 위반한다.)
+
+(예시의 `cam-3f2a9b1c`는 web-backend 생성 기본값 형식 `cam-{8hex}`를 따른 것 — 형식 자체는 강제되지 않는다.)
 
 ### 검증 단언 (TDD)
 
 - **A1-1 (정상 push 지속)**: B-frame 없는 테스트 스트림을 60초 push했을 때 FFmpeg가 조기 종료하지 않으면 OK.
   ```bash
-  docker run --rm --network yc-network linuxserver/ffmpeg \
+  docker run --rm --network sentinel_sentinel-net linuxserver/ffmpeg \
     -f lavfi -i testsrc=size=640x360:rate=15 -f lavfi -i sine \
-    -t 60 -c:v libx264 -profile:v baseline -tune zerolatency -bf 0 -c:a aac \
+    -t 60 -c:v libx264 -profile:v baseline -tune zerolatency -bf 0 -g 30 -c:a aac \
     -f flv rtmp://streaming:1935/live/spec-test-a1
   # exit code 0 → OK / 60초 이전 비정상 종료 → NOK
   ```
@@ -92,12 +97,12 @@ ffmpeg -i <source> \
 |------|-----|
 | Format | HLS (`m3u8` playlist + `ts` 세그먼트, nested 디렉토리) |
 | URL pattern | `/live/{streamKey}/index.m3u8` (**상대 경로**) |
-| Fragment duration | 2초 |
-| Playlist length | 10초 (세그먼트 5개) |
+| Fragment duration | **max(2초, 소스 키프레임 간격)** — streaming은 키프레임에서만 fragment를 자른다. 소스가 계약 1의 키프레임 간격 요구(≤2초)를 지키면 2초 |
+| Playlist length | 10초 (2초 세그먼트 기준 5개) |
 | Content-Type | `application/vnd.apple.mpegurl` (m3u8), `video/mp2t` (ts) |
 | 응답 헤더 | `Cache-Control: no-cache`, `Access-Control-Allow-Origin: *` |
 | Cleanup | 자동 (오래된 `.ts` 자동 제거) |
-| Latency | 일반적으로 5~10초 (HLS 특성상 계약 위반 아님) |
+| Latency | 일반적으로 5~10초 (HLS 특성상 계약 위반 아님) — 소스 키프레임 간격 ≤2초 전제. 간격이 크면 첫 fragment 완결까지 m3u8 생성이 지연되어 초기 지연이 키프레임 간격만큼 늘어난다 |
 
 ### 핵심 로직 (동작 — 불변식)
 
@@ -112,7 +117,7 @@ ffmpeg -i <source> \
   curl -si http://streaming:8080/live/{streamKey}/index.m3u8
   ```
   → HTTP 200, `Content-Type: application/vnd.apple.mpegurl`, `Cache-Control: no-cache`, `Access-Control-Allow-Origin: *`, 본문 첫 줄 `#EXTM3U`이면 OK.
-- **A2-2 (세그먼트 길이)**: playlist의 `#EXTINF` 값이 2.0초 ±0.5 범위(키프레임 간격에 따른 오차 허용), 세그먼트 수 ≤ 6이면 OK.
+- **A2-2 (세그먼트 길이)**: 계약 1의 키프레임 간격 요구(≤2초)를 지키는 push(A1-1 테스트 스트림 등)에서 playlist의 `#EXTINF` 값이 2.0초 ±0.5 범위, 세그먼트 수 ≤ 6이면 OK. (키프레임 간격을 위반하는 소스에는 적용하지 않는다 — fragment 계약이 max(2초, 키프레임 간격)이므로)
 - **A2-3 (무변환)**: 원본을 `h264 baseline 640x360`으로 push한 뒤
   ```bash
   ffprobe -v error -show_entries stream=codec_name,profile,width,height \
@@ -120,7 +125,7 @@ ffmpeg -i <source> \
   ```
   → `codec_name=h264`, 해상도·프로파일이 push 원본과 동일하면 OK. 다르면 트랜스코딩이 발생한 것 → NOK.
 - **A2-4 (세그먼트 자동 정리)**: 5분 push 후 스트림 디렉토리의 `.ts` 파일 수가 playlist 길이에 상응하는 수준(≤ 10개)으로 유지되면 OK. 단조 증가하면 NOK.
-- **A2-5 (재생 지연)**: push 시작 시점의 실제 콘텐츠가 HLS로 시청 가능해지기까지 15초 이내면 OK.
+- **A2-5 (재생 지연)**: 키프레임 간격 요구를 지키는 push(A1-1 테스트 스트림 등)에서, push 시작 시점의 실제 콘텐츠가 HLS로 시청 가능해지기까지 15초 이내면 OK.
 
 ---
 
@@ -167,9 +172,9 @@ ffmpeg -i <source> \
 ```json
 [
   {
-    "cameraId": "cam-001",
-    "streamKey": "cam-001",
-    "hlsUrl": "/live/cam-001/index.m3u8",
+    "cameraId": "cam-3f2a9b1c",
+    "streamKey": "cam-3f2a9b1c",
+    "hlsUrl": "/live/cam-3f2a9b1c/index.m3u8",
     "active": true,
     "startedAt": "2026-04-13T09:00:00Z"
   }
@@ -200,7 +205,11 @@ ffmpeg -i <source> \
   curl -s http://streaming:8080/api/streams | \
     jq -e '.[] | select(.streamKey=="spec-test-a1") | .active == true and .hlsUrl == "/live/spec-test-a1/index.m3u8" and .cameraId == .streamKey'
   ```
-- **A4-3 (비활성 전환)**: push 중단 후 40초(판정 창 30초 + 여유) 뒤 같은 항목의 `active`가 `false`면 OK.
+- **A4-3 (비활성 전환)**: push 중단 후 40초(판정 창 30초 + 여유) 뒤, 해당 streamKey 항목이 **목록에 없거나**(HLS 산출물 자동 정리로 항목 자체가 소멸할 수 있음), **있으면 `active`가 `false`**면 OK. 항목이 존재하면서 `active: true`면 NOK.
+  ```bash
+  curl -s http://streaming:8080/api/streams | \
+    jq -e '[.[] | select(.streamKey=="spec-test-a1" and .active==true)] | length == 0'
+  ```
 - **A4-4 (상대 URL 정책)**: 모든 항목의 `hlsUrl`이 정규식 `^/live/[^/]+/index\.m3u8$`에 매치하고 `http`를 포함하지 않으면 OK.
   ```bash
   curl -s http://streaming:8080/api/streams | \
@@ -240,3 +249,5 @@ ffmpeg -i <source> \
 2. **`/api/streams`는 "활성 스트림 목록"이 아님** — 기존 문서는 응답을 "활성 스트림 목록"이라 기술하지만, 코드는 `/tmp/hls` 아래 playlist가 남아 있는 모든 디렉토리를 반환한다 (`active: false` 항목 포함). push가 끊긴 스트림도 잔존 playlist가 있는 동안 목록에 남는다. "알려진 스트림 전체 + active 플래그"가 실제 계약이며, 본 스펙(계약 4)은 이 기준으로 작성했다.
 3. **RTMP pull 경로가 기존 문서에 없음** — 기존 문서는 출력을 "HLS pull"로만 규정하지만, recording 서비스가 `rtmp://streaming:1935/live/{streamKey}`를 직접 pull하여 녹화한다 (`services/recording/main.go`, `STREAMING_RTMP_URL` 환경변수). 실존 접합부이므로 본 스펙에 계약 3으로 승격해 명문화했다 — 이 승격이 설계 의도와 맞는지 확인 필요.
 4. **youtube-adapter는 항상 재인코딩** — 기존 문서의 운영 정책은 "가능한 한 copy 모드"이나, youtube-adapter는 무조건 `libx264 300k / aac 48k`로 재인코딩한다 (`services/youtube-adapter/main.go`의 `runFFmpeg`). YouTube 소스의 B-frame 제거를 위한 불가피한 선택으로 보이나(계약 1의 B-frame 금지 준수 목적), "무 트랜스코딩 원칙"의 예외로 인지하고 있어야 한다. cctv-adapter는 문서대로 `-c copy` 준수.
+5. **H.264 profile이 push 측에서 pin되지 않음** — 기존 문서는 "Baseline 또는 Main profile 항상 만족"을 계약으로 기술했으나, 실측상 어느 push 측도 `-profile:v`를 명시하지 않는다. youtube-adapter는 `-preset ultrafast`의 부작용(B-frame·CABAC 비활성)으로 사실상 Constrained Baseline을 송출할 뿐이며, cctv-adapter는 `-c copy`라 소스 profile이 그대로 통과한다. 본 스펙(계약 1)은 이를 "profile 강제 없음, Baseline 권장"으로 정정했다. preset 변경 시 profile이 조용히 바뀔 수 있으므로, 계약으로 profile을 보장하려면 push 측 `-profile:v` 명시(pin)가 필요한지 설계자 확인 필요.
+6. **키프레임 간격 요구(≤2초)가 push 측에서 일괄 보장되지 않음** — streaming은 키프레임에서만 HLS fragment를 자르므로 계약 2의 fragment 2초·지연 수치는 소스 키프레임 간격 ≤2초를 전제한다. 실측: youtube-adapter는 `-g 60`으로 GOP를 pin하지만 이는 프레임 수 기준이라 소스가 30fps일 때만 2초다(15fps 소스면 4초). cctv-adapter는 `-c copy`라 카메라의 GOP 설정이 그대로 통과하며 어댑터 측 보장이 전혀 없다 — 카메라 설정(키프레임 간격 ≤2초)이 운영 전제조건이 된다. 계약 1에 요구로 명문화했으나(위반 시 push는 수락되고 세그먼트 길이·지연만 늘어남), 어댑터/카메라 설정 지침으로 강제할지 설계자 확인 필요.

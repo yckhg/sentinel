@@ -8,7 +8,7 @@
 - 저장 공간은 유한하므로, 보호되지 않은 녹화분은 **롤링 윈도우**(기본 60분)만 유지하고 자동 삭제한다.
 - incident 영상은 두 단계 계약(**protect → finalize**)으로 보존한다: 위기 감지 즉시 삭제만 막고(protect), 상황 종료 후 하나의 MP4로 병합해 영구 아카이브를 만든다(finalize).
 - 과거 구간을 브라우저에서 즉시 돌려볼 수 있도록, 저장된 세그먼트로부터 **VOD형 HLS playlist를 동적 생성**한다.
-- 전 구간 **무 트랜스코딩**(`-c copy`) — 녹화·병합 모두 재인코딩하지 않는다 (mini PC CPU 보호).
+- 전 구간 **무 트랜스코딩** — 녹화·병합 모두 재인코딩하지 않고 원본 코덱을 유지한다 (mini PC CPU 보호).
 
 ## 언어 · 런타임
 
@@ -18,9 +18,9 @@
 
 ## 의존 도구 · 시스템
 
-- **FFmpeg** (컨테이너 내 필수): RTMP 수신·세그먼트 분할, 세그먼트 병합(concat demuxer) 모두 FFmpeg 하위 프로세스로 수행한다.
-- **streaming 서비스** (RTMP pull 원천): 계약 소유자는 [docs/interfaces/streaming-api.md](../interfaces/streaming-api.md). 본 스펙은 그 RTMP 규격(코덱, B-frame 금지 등)을 재정의하지 않는다.
-- **web-backend**: 카메라 목록 원천(`GET /internal/cameras`) 및 본 서비스 `/api/*`의 인증 프록시. 이 접면의 외부 노출 계약은 web-backend 측 인터페이스 문서가 소유한다.
+- **FFmpeg** (컨테이너 내 필수): RTMP 수신·세그먼트 분할, 세그먼트 병합 모두 FFmpeg 하위 프로세스로 수행한다.
+- **streaming 서비스** (RTMP pull 원천): 이 접면의 계약 소유자는 [docs/spec/interface-streaming.md](interface-streaming.md) §계약 3 (RTMP 라이브 재배포) — push 없는 streamKey의 pull은 데이터 없이 대기/실패하며 재시도 책임은 본 서비스에 있다. RTMP 스트림 규격(코덱, B-frame 금지 등)은 같은 문서 §계약 1이 소유하며 본 스펙은 재정의하지 않는다.
+- **web-backend**: 카메라 목록 원천(`GET /internal/cameras` — 계약 소유자 [docs/spec/interface-web-api.md](interface-web-api.md) §계약 13) 및 본 서비스 `/api/*`의 인증 프록시(외부 노출 계약 소유자 [docs/spec/interface-web-api.md](interface-web-api.md) §계약 8).
 - **볼륨 2개**: 롤링 세그먼트 저장소(기본 `/recordings`), 영구 아카이브 저장소(기본 `/archives`). 컨테이너 재시작에도 파일은 유지된다.
 - DB 없음. 아카이브 메타데이터는 아카이브 볼륨 내 단일 JSON 파일로 영속화된다.
 
@@ -38,12 +38,12 @@
 ### 파일 시스템
 
 - **롤링 세그먼트**: `{RECORDINGS_DIR}/{streamKey}/{YYYYMMDD_HHMMSS}.ts`
-  - 파일명은 **UTC** 타임스탬프, 10초 단위, 시계 시각 정렬(segment_atclocktime), MPEG-TS 컨테이너, 코덱 원본 유지.
+  - 파일명은 **UTC** 타임스탬프. 세그먼트는 10초 길이로 분할되며 경계가 벽시계 시각(10초 배수)에 정렬된다. MPEG-TS 컨테이너, 코덱 원본 유지.
   - 보호되지 않은 세그먼트는 파일명 타임스탬프(파싱 불가 시 mtime) 기준으로 롤링 윈도우 초과 시 삭제된다.
   - 0바이트 세그먼트는 보호 여부와 무관하게 삭제된다.
 - **영구 아카이브**: `{ARCHIVES_DIR}/{archiveId}/{streamKey}.mp4`
   - `archiveId = {incidentId}_{streamKey}_{fromUTC(YYYYMMDD_HHMMSS)}` — 같은 (incident, streamKey, from)에 대한 중복 생성 요청은 기존 항목을 반환하며 새로 만들지 않는다.
-  - MP4는 `+faststart` 적용(스트리밍 재생 가능), 세그먼트들의 무손실 병합본이다.
+  - MP4는 다운로드 완료 전에도 재생을 시작할 수 있는 형태(메타데이터 선행 배치)로 생성되며, 세그먼트들의 무손실 병합본이다.
 - **아카이브 메타데이터**: `{ARCHIVES_DIR}/metadata.json` — 전체 아카이브 목록의 SSOT. 상태 변화마다 저장되고 재시작 시 로드된다.
 
 ### HTTP API (응답 계약 요지)
@@ -52,7 +52,7 @@
 |---|---|
 | `GET /healthz` | 200, `{"status":"ok","service":"recording"}` |
 | `GET /api/status` | 활성 카메라별 `{streamKey, status, startedAt, lastError, segmentDir}` 배열. `status ∈ {recording, reconnecting, disconnected}` |
-| `POST /api/cameras/reload` | 최신 카메라 목록으로 recorder를 reconcile(추가된 카메라 시작, 제거된 카메라 중지). `{"status":"reloaded","cameras":N}` |
+| `POST /api/cameras/reload` | 최신 카메라 목록으로 recorder를 reconcile(추가된 카메라 시작, 제거된 카메라 중지). 항상 200 `{"status":"reloaded","cameras":N}`. web-backend 조회 실패(연결 오류·본문 디코드 실패; HTTP 상태코드는 검사하지 않음) 시에도 오류를 반환하지 않고 **빈 목록으로 reconcile하여 모든 recorder를 중지**하며 200 `{"status":"reloaded","cameras":0}`을 반환한다 (⚠️ 8) |
 | `GET /api/recordings/{key}` | 사용 가능 구간 `{streamKey, timeRanges:[{start,end}]}` (RFC3339). 세그먼트 간격 15초 이하면 하나의 연속 구간으로 병합. 녹화 없으면 404 |
 | `GET /api/recordings/{key}/play?from=&to=` | `application/vnd.apple.mpegurl`, VOD형 playlist(`EXT-X-PLAYLIST-TYPE:VOD` + `EXT-X-ENDLIST`), 구간과 겹치는 세그먼트를 시간순 나열. 해당 세그먼트 없으면 404. `from`/`to` 누락·형식 오류는 400 |
 | `GET /api/recordings/{key}/segments/{file}` | `.ts` 파일을 `video/mp2t`로 서빙. 경로 탈출(`/`, `\`, `..`) 및 `.ts` 외 확장자는 400 |
@@ -65,7 +65,7 @@
 | `DELETE /api/archives/incident/{incidentId}` | 해당 incident의 모든 아카이브 삭제 + 삭제 수 반환. 없으면 404 |
 | `GET /api/storage` | `{recordingsBytes, archivesBytes, totalUsedBytes, archiveCount, diskTotalBytes, diskUsedBytes, diskAvailableBytes}` |
 
-- playlist가 가리키는 세그먼트 URL(`/api/recordings/...`)의 외부 노출 형태·인증은 web-backend 프록시 계약(web-backend 인터페이스 문서 소유)을 따른다.
+- playlist가 가리키는 세그먼트 URL(`/api/recordings/...`)의 외부 노출 형태·인증은 web-backend 프록시 계약([docs/spec/interface-web-api.md](interface-web-api.md) §계약 8 소유)을 따른다.
 
 ## 핵심 로직 (동작)
 
@@ -78,10 +78,10 @@
 4. **incident 2단계 아카이브**
    - **protect**: `incidentTime − 1시간 ~ 현재`의 기존 세그먼트를 보호 집합에 넣고, streamKey별 `protecting` 메타를 만든다.
    - **보호 갱신 (30초 주기)**: `protecting` 상태인 동안 새로 생기는 세그먼트도 계속 보호 집합에 추가된다 — 즉 protect 이후 도착 영상도 삭제되지 않는다.
-   - **finalize**: 종료 시각을 `resolvedAt + 30분`으로 확정하고, 구간 내 세그먼트를 보호 처리 후 FFmpeg concat(`-c copy`)으로 단일 MP4를 백그라운드 생성한다. 성공 시 `completed`(+파일 크기), 실패 시 `failed`(+사유)로 기록된다.
+   - **finalize**: 종료 시각을 `resolvedAt + 30분`으로 확정하고, 구간 내 세그먼트를 보호 처리 후 재인코딩 없이 단일 MP4로 백그라운드 병합한다. 성공 시 `completed`(+파일 크기), 실패 시 `failed`(+사유)로 기록된다.
    - **자동 finalize (30초 주기)**: `protecting` 상태가 incident 발생 후 **2시간**을 넘기면 finalize 누락으로 간주하고 현재 시각 기준으로 자동 finalize한다 — 보호가 무한히 지속되어 디스크가 차는 것을 막는 안전장치.
 5. **pseudo-playback**: 요청 구간 `[from, to)`와 **겹치는**(경계 포함 판정: 세그먼트 종료 > from AND 세그먼트 시작 < to) 세그먼트를 시간순으로 나열한 VOD playlist를 매 요청마다 동적 생성한다. 세그먼트 길이는 10초로 간주한다.
-6. **reconcile**: reload 시 streamKey 기준으로만 비교한다 — 새 key는 녹화 시작, 사라진 key는 SIGTERM(3초 후 SIGKILL)으로 중지. 동일 key의 다른 속성 변경은 녹화에 영향 없다.
+6. **reconcile**: reload 시 streamKey 기준으로만 비교한다 — 새 key는 녹화 시작, 사라진 key는 SIGTERM(3초 후 SIGKILL)으로 중지. 동일 key의 다른 속성 변경은 녹화에 영향 없다. 카메라 목록 조회 실패는 "카메라 0대"와 동일하게 취급되어 실행 중인 모든 recorder가 중지된다 (⚠️ 8).
 7. **재시작 내성**: 메타데이터 JSON은 재시작 후 로드된다. `protecting` 아카이브는 보호 갱신 주기에 의해 재시작 후에도 세그먼트 보호가 복원된다.
 
 ## 검증 단언 (TDD)
@@ -113,3 +113,4 @@
 5. **타임존 없는 시간 형식(`"2006-01-02 15:04:05"`)을 UTC로 해석.** protect/finalize의 fallback 파싱이 UTC 가정이라, 호출자가 로컬(KST) 시각을 보내면 보호 구간이 9시간 어긋난다. 이 fallback을 쓰는 호출자가 UTC를 보내는 것이 계약인지 확인 필요.
 6. **watchdog이 "출력 없음 = 고장"을 전제.** FFmpeg를 `-loglevel warning`으로 실행하므로 완전히 정상인 프로세스가 `FFMPEG_TIMEOUT`(기본 60초) 동안 아무 출력도 내지 않으면 건강한 녹화가 주기적으로 강제 재시작될 수 있다(재시작 순간 수 초 유실). 실운영에서 FFmpeg의 주기적 stderr 출력(진행 stats 등)에 의존하는 구조가 의도인지 확인 필요.
 7. **문서와 상태 enum 불일치.** 서비스 문서·메타 주석의 상태 목록에는 `finalizing`이 없으나 실제로 이 상태가 존재한다. 소비자(web-backend/프론트)가 미지의 상태를 안전하게 처리하는지 확인 필요.
+8. **reload가 web-backend 조회 실패를 "카메라 0대"와 구분하지 못함.** 카메라 목록 조회가 연결 오류·본문 디코드 실패로 실패해도(HTTP 상태코드는 검사하지 않음) 오류를 반환하지 않고 빈 목록으로 reconcile하여 **모든 recorder를 중지**시키고 200 `{"status":"reloaded","cameras":0}`을 반환한다. 같은 접면을 쓰는 cctv-adapter(조회 실패 시 502/500 + 기존 push 유지)·youtube-adapter(조회 실패 시 500 + 기존 스트림 유지)와 비대칭이며, web-backend 일시 장애 중 reload 한 번으로 전체 녹화가 끊길 수 있다. 실패 시 기존 recorder 유지 + 오류 응답이 의도인지 확인 필요.

@@ -10,7 +10,7 @@ RTSP CCTV 카메라의 영상을 Sentinel streaming 서버의 RTMP 입력 규격
 - 소스 장애(카메라 다운, 네트워크 단절, push 프로세스 hang)로부터 **사람 개입 없이** 자동 복구한다.
 - 트랜스코딩 없이(codec pass-through) 원본 스트림을 중계하여 단일 미니 PC의 CPU 자원을 보존한다.
 - 어댑터 패턴의 참조 구현: 새 소스 타입 어댑터는 이 계약 구조(inbound pull → RTMP push + 헬스/상태/reload HTTP)를 따른다.
-- 스트림의 alive/dead 판정 권위는 이 서비스가 아니다 — 그 SSOT는 streaming 서비스이며(`docs/interfaces/streaming-api.md` "Stream Status" 소유), 본 서비스는 자신이 관리하는 push 프로세스의 상태만 노출한다.
+- 스트림의 alive/dead 판정 권위는 이 서비스가 아니다 — 그 SSOT는 streaming 서비스이며(`docs/spec/interface-streaming.md` §계약 4 소유), 본 서비스는 자신이 관리하는 push 프로세스의 상태만 노출한다.
 
 ## 언어 · 런타임
 
@@ -24,8 +24,8 @@ RTSP CCTV 카메라의 영상을 Sentinel streaming 서버의 RTMP 입력 규격
 |-----------|------|------------|
 | FFmpeg 바이너리 | 컨테이너에 동봉, 카메라당 1 프로세스 실행 | — (내부 도구) |
 | RTSP 카메라 | inbound pull (카메라 장비 고유 RTSP URL, TCP 전송) | 카메라 장비 |
-| streaming 서비스 | outbound RTMP push | `docs/interfaces/streaming-api.md` — "RTMP Input Specification" |
-| web-backend | reload 시 카메라 목록 조회 (`GET {WEB_BACKEND_URL}/internal/cameras`) | web-backend 측 인터페이스 문서 (본 스펙은 소비 필드만 명시) |
+| streaming 서비스 | outbound RTMP push | `docs/spec/interface-streaming.md` — §계약 1 (RTMP 입력) |
+| web-backend | reload 시 카메라 목록 조회 (`GET {WEB_BACKEND_URL}/internal/cameras`) | `docs/spec/interface-web-api.md` — §계약 13 (Internal) (본 스펙은 소비 필드만 명시) |
 
 ## 입력
 
@@ -45,7 +45,7 @@ RTSP CCTV 카메라의 영상을 Sentinel streaming 서버의 RTMP 입력 규격
 ### 3. RTSP 스트림
 
 - 각 카메라의 RTSP URL에서 pull. 전송은 TCP.
-- 전제조건: 카메라 출력이 B-frame 없는 H.264일 것 (copy 모드 pass-through의 조건 — B-frame 금지 규격은 `docs/interfaces/streaming-api.md` 소유).
+- 전제조건: 카메라 출력이 B-frame 없는 H.264일 것 (copy 모드 pass-through의 조건 — B-frame 금지 규격은 `docs/spec/interface-streaming.md` §계약 1 소유).
 
 ### 4. 환경변수
 
@@ -60,7 +60,7 @@ RTSP CCTV 카메라의 영상을 Sentinel streaming 서버의 RTMP 입력 규격
 
 ### 1. RTMP push (주 산출물)
 
-- 대상: `{STREAMING_RTMP_URL}/{streamKey}` — 규격(FLV 컨테이너, H.264 + AAC, B-frame 금지)은 `docs/interfaces/streaming-api.md` "RTMP Input Specification"이 소유하며, 본 서비스는 그 규격을 준수하는 push를 보장한다.
+- 대상: `{STREAMING_RTMP_URL}/{streamKey}` — 규격(FLV 컨테이너, H.264 + AAC, B-frame 금지)은 `docs/spec/interface-streaming.md` §계약 1 (RTMP 입력)이 소유하며, 본 서비스는 그 규격을 준수하는 push를 보장한다.
 - 트랜스코딩 없음: 출력 스트림의 비디오/오디오 코덱은 입력 RTSP 스트림과 동일하다(codec copy).
 
 ### 2. HTTP API (내부 8080)
