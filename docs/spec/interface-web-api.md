@@ -30,7 +30,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 - role: `admin` · `user` · `temp`(임시 링크, read-only)
 - 성공: `200` / `201` / `204` · 에러 바디: `{"error": "<message>"}`
 - 에러 코드 매핑: `400` 잘못된 입력 · `401` 인증 실패/만료 · `403` 권한 부족 · `404` 없음 · `409` 상태 충돌 · `429` 레이트 리밋(login/register 한정) · `502` 하위 서비스 통신 실패
-- `/api/*` 경로는 authMiddleware 통과 필수(단, 무인증 internal 예외는 §계약 13에 명시). `/auth/pending|approve|reject|users`는 `/api/` 프리픽스가 아니며 핸들러가 직접 admin JWT를 검증
+- `/api/*` 경로는 인증 미들웨어 통과 필수(단, 무인증 internal 예외는 §계약 13에 명시). `/auth/pending|approve|reject|users`는 `/api/` 프리픽스가 아니며 핸들러가 직접 admin JWT를 검증
 
 **공통 검증 단언**
 
@@ -75,7 +75,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 - 가입 기본 상태는 `pending`; 유효한 `inviteToken` 제시 시 자동 `active` + 초대 이메일 주입
 - `pending` 계정은 로그인 불가(`403`) — 승인 전 시스템 접근 경로 없음
 - JWT 유효기간 24h, HS256. 토큰에 `role` 클레임 포함
-- `/auth/pending|approve|reject|users`는 authMiddleware 밖 — 핸들러가 직접 admin JWT 검증 (프리픽스 `/api/` 아님이 계약)
+- `/auth/pending|approve|reject|users`는 인증 미들웨어 밖 — 핸들러가 직접 admin JWT 검증 (프리픽스 `/api/` 아님이 계약)
 - 레이트 리밋은 IP 단위, `/auth/login` 10/min, `/auth/register` 5/min — 다른 엔드포인트에는 적용하지 않음
 
 ### 검증 단언 (TDD)
@@ -374,7 +374,7 @@ Device object:
 
 ### 출력 (계약)
 
-- 요청/응답 바디는 recording 서비스 원본을 그대로 통과 (스키마 SSOT는 recording 서비스 문서 — 본 계약 범위 밖)
+- 요청/응답 바디는 recording 서비스 원본을 그대로 통과 (스키마 SSOT는 `docs/spec/recording.md` §HTTP API — 본 계약 범위 밖)
 - HLS 응답(`application/vnd.apple.mpegurl`)과 다운로드 바이너리 스트림은 Content-Type 보존하여 forward
 - recording 서비스 통신 실패 → `502`
 
@@ -711,7 +711,7 @@ MQTT 발행 페이로드 스키마의 SSOT는 `docs/spec/interface-mqtt.md` — 
 
 실제 라우트/핸들러 대조에서 발견된 어긋남. 본 스펙 본문에는 반영하지 않고 여기에만 기록한다.
 
-1. **notifier의 `POST /api/alarms` 호출은 web-backend에 수신 라우트가 없음 (알려진 시스템 갭)** — notifier는 카카오톡·SMS 발송이 모두 실패했을 때 web-backend `POST /api/alarms`로 시스템 알람을 전송하지만, web-backend에는 이 라우트가 등록되어 있지 않다. 경로가 `/api/` 프리픽스여서 authMiddleware catch-all에 걸리고, notifier는 JWT를 보내지 않으므로 항상 `401`로 거절된다. 결과적으로 WS `system_alarm`(계약 14) 브로드캐스트 함수는 존재하나 호출 경로가 없어 admin에게 시스템 알람이 전달되지 않는다. → 의도 결정 필요: (a) web-backend에 internal 수신 라우트 신설 + `system_alarm` 브로드캐스트 연결, 또는 (b) notifier 측 호출 제거. 결정 전까지 계약으로 추가하지 않는다.
+1. **notifier의 `POST /api/alarms` 호출은 web-backend에 수신 라우트가 없음 (알려진 시스템 갭)** — notifier는 카카오톡·SMS 발송이 모두 실패했을 때 web-backend `POST /api/alarms`로 시스템 알람을 전송하지만, web-backend에는 이 라우트가 등록되어 있지 않다. 경로가 `/api/` 프리픽스여서 인증 미들웨어 catch-all에 걸리고, notifier는 JWT를 보내지 않으므로 항상 `401`로 거절된다. 결과적으로 WS `system_alarm`(계약 14) 브로드캐스트 함수는 존재하나 호출 경로가 없어 admin에게 시스템 알람이 전달되지 않는다. → 의도 결정 필요: (a) web-backend에 internal 수신 라우트 신설 + `system_alarm` 브로드캐스트 연결, 또는 (b) notifier 측 호출 제거. 결정 전까지 계약으로 추가하지 않는다.
 2. **temp link JWT가 일반 JWT 파서를 먼저 통과해 WS에서 temp role 식별·회수(blacklist) 차단이 모두 무력화됨 (알려진 시스템 갭, web-backend 스펙 ⚠️1과 동일 사안)** — 두 토큰 종류가 동일 secret·동일 HS256으로 서명되고, 일반 JWT 파서가 temp 토큰의 payload(`linkId`만 있고 `userId`/`role` 없음)도 관대하게 수용한다. `/ws`와 인증 미들웨어 모두 일반 파서를 **먼저** 시도해 성공하면 temp 분기(role=`temp` 부여 + blacklist 확인)에 도달하지 않는다. 실측 결과: temp 토큰으로 WS 접속 시 `role=""`로 접속이 성립하고, 회수된 temp 토큰도 WS 접속이 거절되지 않는다 (`GET /api/links/verify`는 temp 전용 파서 + blacklist를 직접 확인하므로 회수 후 `401` 정상 동작). → 의도(temp role read-only + 회수 즉시 차단)를 회복하려면 토큰 종류 판별 순서/클레임 검증 강화가 필요. 결정 전까지 "WS에서 `payload.role == "temp"`"·"회수 토큰 WS 접속 `401`"을 계약 단언으로 두지 않는다.
 3. **무인증 internal 엔드포인트가 리버스 프록시를 그대로 통과해 외부 노출됨 (알려진 시스템 갭)** — 현 스택의 유일한 리버스 프록시인 web-frontend nginx는 `/api/` 전체를 web-backend로 무차별 프록시하고, docker-compose가 web-frontend:80을 호스트 `3080`으로 노출한다. 따라서 외부에서 무인증 internal 엔드포인트(계약 13의 `POST /api/incidents`, `POST /api/devices/seen`, `POST /api/incidents/{id}/resolve-from-sensor`와 계약 9의 internal 폴백 `POST /api/links/temp`)가 인증 없이 그대로 호출된다(200/201). 차단 구성이 repo 내 어디에도 없다. → 의도 결정 필요: (a) 리버스 프록시에서 해당 경로 차단(location 규칙), (b) internal 엔드포인트를 `/internal/*` 프리픽스로 이동 + 프록시 미노출, 또는 (c) 내부 호출 인증 도입. 결정 전까지 "외부에서 internal 엔드포인트 `4xx`" 배포 게이트 단언은 계약에 두지 않는다.
 4. **`PUT /api/contacts/{id}`의 email만 partial 시맨틱에서 벗어남 (실측 — web-backend 스펙 ⚠️5와 동일 사안)** — name/phone은 빈 값 무시, notifyEmail은 생략 시 유지인데 email은 요청값으로 무조건 덮어써서, email을 생략한 partial PUT이 기존 email을 NULL로 삭제한다. 본문(계약 5)은 이 실측 동작을 계약으로 기술했다. → 의도 결정 필요: (a) email도 생략 시 유지(partial 통일 — email 삭제는 별도 신호 필요), 또는 (b) 현 덮어쓰기 동작 유지. (a)로 결정되면 계약 5 입력 표·불변식·단언을 함께 갱신해야 한다.

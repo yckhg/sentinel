@@ -70,7 +70,7 @@ YouTube 영상 URL 또는 로컬 비디오 파일을 소스로 삼아, streaming
 1. **reload가 config 파일 기반 소스를 전면 폐기함** — reload는 web-backend 목록으로 소스 집합을 통째로 교체하며, web-backend 경유 소스에는 `localFile` 개념이 없다. 따라서 config 파일로 띄운 로컬 파일 스트림(권장 모드)도 reload 한 번이면 전부 중지된다. "config 파일과 web-backend 중 무엇이 SSOT인가"가 미정의.
 2. **localFile 전용 소스가 기동 시 탈락함** — config 로드 시 모든 소스에 대해 `youtubeUrl` 유효성을 검사해 실패 시 skip한다. `localFile`만 있고 `youtubeUrl`이 빈 소스는 로컬 파일 재생이 가능함에도 거부된다. 서비스 문서의 "localFile 있으면 파일 재생(권장)"과 긴장 관계.
 3. **reload의 '변경 없음' 판정이 URL만 비교** — 같은 식별자에서 `localFile`이 바뀌어도 변경으로 감지되지 않는다(현재 reload 경로가 localFile을 만들지 못해 잠재적 dead path이나, 1번 해소 방식에 따라 실동작이 됨).
-4. **출력 H.264 profile 미고정** — FFmpeg 인자에 `-profile:v`가 없어 기본 profile(High 가능)로 송출될 수 있다. streaming 입력 규격은 "Baseline 또는 Main"을 명시. 현재 동작하는 이유가 규격의 여유인지 우연인지 불확실.
+4. **출력 H.264 profile 미고정** — FFmpeg 인자에 `-profile:v`가 없어 profile은 preset의 부작용으로 결정된다(현재 `-preset ultrafast`가 B-frame·CABAC을 끄므로 사실상 Constrained Baseline 송출). 현행 `docs/spec/interface-streaming.md` §계약 1은 "profile 강제되지 않음 — B-frame 없는 스트림이면 수락, Baseline 권장"이라 규격 위반은 아니나, preset 변경 시 profile이 조용히 바뀔 수 있어 `-profile:v` pin이 필요한지 확인 필요 (interface-streaming ⚠️ 리뷰 필요 5와 동일 쟁점).
 5. **localFile 경로가 서비스 내부에서 검증되지 않음** — 서비스 문서는 "`/media/` 하위로 제한"이라 하나, 제한은 compose의 read-only 마운트에만 의존하고 코드 차원의 경로 검증은 없다.
 6. **종료 시 FFmpeg 유예 완료를 기다리지 않을 수 있음** — 시그널 수신 시 각 스트림에 중지를 지시한 직후 프로세스를 종료한다. FFmpeg SIGTERM→5초 유예→KILL 시퀀스가 완료되기 전에 메인 프로세스가 exit할 수 있다(컨테이너 환경에선 PID 1 종료로 함께 정리되지만, 단언 I의 엄밀성에 영향).
 7. **허용 URL 형태의 문서-코드 불일치** — 서비스 문서는 `youtube.com/watch`와 `youtu.be`만 허용이라 기술하나, 실제로는 `youtube.com/live/…`(라이브 스트림)도 허용된다. 라이브 허용이 의도라면 문서 갱신 필요.

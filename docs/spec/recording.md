@@ -90,7 +90,7 @@
 
 - **A. 헬스**: `curl -fsS $REC/healthz` 가 200이고 body가 `{"status":"ok","service":"recording"}` 이다.
 - **B. 세그먼트 생성**: 활성 RTMP 스트림 `k`가 존재할 때, 30초 대기 후 `{RECORDINGS_DIR}/k/` 안에 정규식 `^\d{8}_\d{6}\.ts$` 파일이 2개 이상 새로 생기고, 최신 파일의 파일명 타임스탬프(UTC)와 현재 UTC의 차가 30초 이내다.
-- **C. 상태 보고**: 단언 B 상황에서 `GET /api/status` 응답 중 `k` 항목의 `status == "recording"` 이고 `startedAt`이 RFC3339다. 스트림 발행을 중단하면 `FFMPEG_TIMEOUT + 10초` 이내에 `status`가 `reconnecting` 또는 `disconnected`로 바뀐다 (로그에 `FFmpeg output timeout` 또는 `FFmpeg exited` 존재).
+- **C. 상태 보고**: 단언 B 상황에서 `GET /api/status` 응답 중 `k` 항목의 `status == "recording"` 이고 `startedAt`이 RFC3339다. 스트림 발행을 중단하면 `1.5 × FFMPEG_TIMEOUT + 15초` 이내에 `status`가 `reconnecting` 또는 `disconnected`로 바뀐다 (로그에 `FFmpeg output timeout` 또는 `FFmpeg exited` 존재). (시한 근거: FFmpeg가 unpublish에 즉시 종료하면 수 초 내 전이되지만, 즉시 종료하지 않는 hang 경로는 watchdog의 `FFMPEG_TIMEOUT/2` 주기 검사(감지 최대 1.5×timeout 지연) + SIGTERM 후 5초 유예를 거친다 — 기본 60초 설정에서 최악 약 95초)
 - **D. 롤링 삭제**: `ROLLING_WINDOW_MINUTES=1`로 기동한 뒤, 파일명이 5분 전인 미보호 더미 `.ts`(1바이트 이상)를 만들어 두면 90초 이내에 삭제된다. 반대로 롤링 윈도우 이내 파일명의 세그먼트는 남아 있다.
 - **E. 0바이트 정리**: 0바이트 `.ts`를 스트림 디렉터리에 만들어 두면 (보호 등록 여부와 무관하게) 60초 이내에 삭제된다.
 - **F. protect가 삭제를 막는다**: `ROLLING_WINDOW_MINUTES=1` 환경에서 `POST /api/archives/protect` (`incidentId`, `streamKeys:[k]`, `incidentTime=현재`)가 202를 반환하고, 그 시점에 존재하던 `k`의 세그먼트들이 3분(윈도우의 3배) 후에도 삭제되지 않고 남아 있다. 또한 protect **이후** 새로 생성된 세그먼트도 같은 기간 남아 있다.

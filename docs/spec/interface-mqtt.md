@@ -18,7 +18,7 @@
 | 참여자 | 역할 | 언어/런타임 |
 |--------|------|-------------|
 | hw-gateway | Sentinel 측 유일한 MQTT 클라이언트 (구독 4토픽 + 발행 3토픽: `cmd/restart`, `alert/resolved`, 테스트 `alert`) | Go (paho.mqtt.golang), Docker 컨테이너 |
-| H/W 디바이스 | 발행 3토픽 + 구독 2토픽 | ESP32 펌웨어 (C, ESP-IDF) 등 — MQTT 3.1.1 클라이언트면 무엇이든 가능 |
+| H/W 디바이스 | 발행 최대 4토픽 (`alert`, `heartbeat`, `event/candidate` + optional `alert/resolved` — 현장 물리 버튼 탑재 시) + 구독 2토픽 | ESP32 펌웨어 (C, ESP-IDF) 등 — MQTT 3.1.1 클라이언트면 무엇이든 가능 |
 | mosquitto | 브로커 | eclipse-mosquitto:2, Docker 컨테이너 |
 
 - 페이로드는 전 토픽 공통 **UTF-8 JSON** 단일 오브젝트.
@@ -232,7 +232,7 @@ db-query "SELECT site_id FROM incidents WHERE device_id='SPEC-03' ORDER BY id DE
 - **alert 발동 중에도 heartbeat는 계속 발행** — `alertState: "active"`로 경보 상태를 실어 나른다. 서버/웹은 heartbeat만으로 장비의 현재 경보 상태를 파악할 수 있어야 한다.
 - **siteId 일관성:** 토픽의 `{siteId}`가 페이로드를 덮어쓴다.
 - **incident를 만들지 않는다.** heartbeat는 상태 채널이지 이벤트 채널이 아니다.
-- **restart 게이트(웹 계층):** 최초 heartbeat(또는 alert)가 한 번 들어와 device가 devices 테이블에 등록되기 전까지, **웹 경로의 재시작 요청**(`docs/spec/interface-web-api.md`의 장비 재시작 API)은 400으로 거부된다. 이 게이트는 web-backend 계층에만 존재한다 — `cmd/restart` 계약의 "핵심 로직" 참조.
+- **restart 게이트(웹 계층):** 최초 heartbeat/alert/candidate 중 어느 하나라도 한 번 들어와 device가 devices 테이블에 등록되기 전까지, **웹 경로의 재시작 요청**(`docs/spec/interface-web-api.md`의 장비 재시작 API)은 400으로 거부된다 (자동 등록 트리거는 "Device ID 정책" 참조). 이 게이트는 web-backend 계층에만 존재한다 — `cmd/restart` 계약의 "핵심 로직" 참조.
 
 ### 검증 단언 (TDD)
 

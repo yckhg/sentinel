@@ -21,7 +21,7 @@
 | 시스템 | 용도 | 계약 소유자 |
 |--------|------|-------------|
 | web-backend (REST) | 비상연락처 목록 조회, 임시 CCTV 링크 발급, 시스템 알람 기록 시도, site_url 설정 조회, 카메라 목록 조회 | `docs/spec/interface-web-api.md` |
-| recording (REST) | 인시던트 녹화 세그먼트 보호 요청 (two-phase 아카이브의 1단계) | recording 서비스 측 API 문서 |
+| recording (REST) | 인시던트 녹화 세그먼트 보호 요청 (two-phase 아카이브의 1단계) | `docs/spec/recording.md` (§HTTP API의 `POST /api/archives/protect`) |
 | KakaoTalk 알림톡 API (외부) | 1순위 알림 채널. `X-Api-Key` + `X-Sender-Key` 인증, 사전 등록된 템플릿 기반 | 외부 벤더 |
 | NHN Cloud SMS v3.0 (외부) | 2순위 알림 채널. `X-Secret-Key` 인증 | 외부 벤더 |
 | SMTP 서버 (선택) | 독립 이메일 채널 + 범용 이메일 발송 API | 외부 인프라 |

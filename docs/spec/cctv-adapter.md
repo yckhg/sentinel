@@ -113,7 +113,7 @@ RTSP CCTV 카메라의 영상을 Sentinel streaming 서버의 RTMP 입력 규격
 
 - **I. 자동 재연결** — 단언 C의 상태에서 RTSP 소스를 강제 중단 후 재개하면, 사람 개입 없이 120초 이내에 HLS가 다시 재생 가능(`active=true`)해지면 OK.
 
-- **J. watchdog** — push 프로세스가 `FFMPEG_TIMEOUT` 초 이상 stdout/stderr 출력 없이 유지될 때, `FFMPEG_TIMEOUT + 10초` 이내에 해당 프로세스가 종료되고 새 프로세스로 교체되면(프로세스 PID 변경 관측) OK.
+- **J. watchdog** — push 프로세스가 `FFMPEG_TIMEOUT` 초 이상 stdout/stderr 출력 없이 유지될 때, `1.5 × FFMPEG_TIMEOUT + 15초` 이내에 해당 프로세스가 종료되고 새 프로세스로 교체되면(프로세스 PID 변경 관측) OK. (시한 근거: watchdog 검사는 `FFMPEG_TIMEOUT/2` 주기이므로 hang 감지가 최대 1.5×timeout까지 지연되고, 종료는 SIGTERM 후 5초 유예를 거친다 — 기본 30초 설정에서 최악 약 50초)
 
 - **K. 환경변수 기본값** — 네 변수 모두 미설정으로 기동해도 기본값(`/config/cameras.json`, `rtmp://streaming:1935/live`, `http://web-backend:8080`, 30초)으로 동작하면 OK. `FFMPEG_TIMEOUT=abc` 또는 `0` 설정 시 기동 로그에 경고가 남고 30초 기본값으로 동작하면 OK.
 
