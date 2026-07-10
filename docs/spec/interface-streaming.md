@@ -7,8 +7,9 @@
 ## 목적 / 의도
 
 - **단일 수신·단일 송출**: 모든 영상 소스는 RTMP push로 streaming 서비스에 모이고, 클라이언트는 HLS로만 시청한다. 소스(카메라/어댑터)와 시청자(웹) 사이의 결합을 이 접합부 하나로 끊는다.
-- **무 트랜스코딩 (remux only)**: streaming 서비스는 코덱을 건드리지 않는다. FLV→TS 컨테이너 변환만 수행하여 mini PC 한 대에서 다중 스트림을 처리한다.
-- **벤더 독립성**: 이 스펙만 준수하면 어떤 카메라/어댑터든 교체 가능. streaming·web-backend는 변경 없이 유지된다.
+- **무 트랜스코딩 (remux only) — 하드 불변식**: streaming 서비스는 코덱을 **절대** 건드리지 않는다. FLV→TS 컨테이너 변환만 수행하여 mini PC 한 대에서 다중 스트림을 처리한다. remux-only는 CPU를 스트림 수에 대해 상수로 유지하는 유일한 방법이며, 이것이 제품 코어(단일 온프레미스 PC, 저지연)를 성립시킨다.
+- **코덱 정규화는 어댑터 책임 (아키텍처 원칙)**: 소스 코덱을 브라우저 재생 규격(H.264/AAC)에 맞추는 모든 정규화 — 비-H.264(HEVC 등) → H.264 트랜스코딩, 저지연이 필요한 경우의 B-frame 제거 — 는 **push 측(어댑터)의 책임**이다. 허브는 어떤 이유로도 트랜스코딩하지 않는다. 이 원칙은 향후 HEVC 카메라 등장 등으로 트랜스코딩이 허브로 새어드는 것을 사전 차단한다. (youtube-adapter의 상시 재인코딩은 이 원칙의 예외가 아니라 **정규 적용 사례**다.)
+- **소스 독립성 (벤더 독립성)**: 이 스펙만 준수하면 어떤 카메라/어댑터든 교체 가능. streaming·web-backend는 변경 없이 유지된다. 허브는 적법한 H.264를 소스 특성(profile, B-frame 유무)과 무관하게 수용해야 하며, 적법한 입력을 거부하는 것은 제품 목적(소스 독립) 위반이다.
 - **상태 권위 단일화**: 스트림 alive/dead 판정의 유일한 권위는 streaming 서비스. 어댑터·타 서비스는 스트림 상태를 보고하지 않는다.
 
 ## 언어 · 런타임
@@ -39,10 +40,10 @@
 | Protocol | RTMP (push) |
 | Endpoint | `rtmp://streaming:1935/live/{streamKey}` (내부 네트워크 전용) |
 | Container | FLV (`-f flv`) |
-| Video codec | H.264 — profile은 강제되지 않음 (B-frame 없는 스트림이면 수락. Baseline 권장 — ⚠️ 리뷰 필요 5 참조) |
+| Video codec | **H.264 (모든 profile — Baseline/Main/High 수락)**. profile을 강제하지 않는다. 비-H.264(HEVC 등)는 브라우저 HLS 재생이 불가하므로 어댑터가 H.264로 정규화해 push한다(허브는 트랜스코딩하지 않음 — 코덱 정규화 원칙). |
 | Audio codec | AAC (LC, HE-AAC 등 모든 profile 허용) |
-| **B-frames** | **금지** — nginx-rtmp v1.2.2가 B-frame composition time offset 포함 FLV를 ~5초 후 연결 종료 |
-| **키프레임 간격** | **최대 2초 요구** — streaming은 키프레임에서만 HLS fragment를 자르므로(계약 2), 소스 키프레임 간격이 2초를 넘으면 세그먼트 길이·초기 재생 지연이 그만큼 늘어난다. 위반해도 push는 수락되지만(연결 거부 없음) 계약 2의 fragment/지연 수치는 보장되지 않는다. 재인코딩 시 `-g <2×fps>` 지정 (⚠️ 리뷰 필요 6 참조) |
+| **B-frames** | **수용됨 — 거부하지 않는다.** 허브는 remux-only라 코덱을 검사하지 않으며, 적법한 H.264(B-frame 포함)를 통과·서빙한다. B-frame은 프레임 재정렬로 지연을 늘리므로, **저지연이 필요한 어댑터는** push 측에서 `-bf 0`으로 제거할 수 있다(**선택 권고이며 계약 위반이 아니다**). 특정 다운스트림 소비자가 B-frame에서 실제로 깨진다면 그것은 그 소비자의 국소 제약으로 문서화할 뿐, 전역 입력 계약으로 올리지 않는다. |
+| **키프레임 간격** | **최대 2초 권고** — streaming은 키프레임에서만 HLS fragment를 자르므로(계약 2), 소스 키프레임 간격이 2초를 넘으면 세그먼트 길이·초기 재생 지연이 그만큼 늘어난다. 위반해도 push는 수락되며(연결 거부 없음) 계약 2의 fragment/지연 수치만 보장되지 않는다. 재인코딩 시 `-g <2×fps>` 지정 권장. |
 | streamKey | 영숫자/하이픈 권장, 슬래시 금지. 형식은 강제되지 않음 — `cam-{8hex}`는 web-backend가 카메라 생성 시 발급하는 **생성 기본값(권장)**이며, 다른 형식(예: `yt-cam-1`)도 실존·수락된다 |
 
 ### 출력 (계약)
@@ -52,35 +53,43 @@
 
 ### 핵심 로직 (동작 — 불변식)
 
-- **B-frame 불변식**: 소스에 B-frame 포함 가능성이 있으면 push 측에서 `-tune zerolatency` 또는 `-bf 0`으로 제거해야 한다. 근거는 입력 표의 B-frame 금지 조항(nginx-rtmp v1.2.2가 B-frame 포함 FLV 연결을 조기 종료) — push가 지속되려면 이 불변식이 소스 측에서 보장되어야 한다.
-- **copy 우선 원칙**: 소스가 이미 B-frame 없는 H.264 + AAC면 어댑터는 `-c copy`로 push한다 (RTSP 어댑터 표준 패턴). 재인코딩은 B-frame 제거 등 계약 준수를 위해 불가피할 때만 허용.
+- **허브 무검사 불변식**: 허브는 push된 스트림의 코덱을 검사하지 않고 통과·서빙한다. 적법한 H.264(B-frame·profile 무관)는 조기 종료 없이 지속된다. 따라서 push 지속을 위해 소스 측이 보장해야 하는 코덱 제약은 없다.
+- **copy 우선 원칙**: 소스가 이미 H.264 + AAC면 어댑터는 `-c copy`로 push한다 (RTSP 어댑터 표준 패턴). 재인코딩은 코덱 정규화(비-H.264 → H.264)나 저지연을 위한 B-frame 제거 등 **어댑터 판단에 따른 선택**이며, 허브 계약 준수를 위해 강제되는 것은 아니다.
+- **저지연 권고**: B-frame·큰 키프레임 간격은 지연을 늘린다. 저지연이 필요한 어댑터는 `-tune zerolatency -bf 0`, `-g <2×fps>`를 push 측에서 적용할 수 있다(선택). 이는 correctness 요구가 아니라 지연 최적화다.
 - streamKey는 push URL의 마지막 path segment이며, 이후 모든 산출물(HLS 경로, 상태 API의 `streamKey`/`cameraId`)의 식별자가 된다.
 
-권장 push 커맨드 (재인코딩이 필요한 경우):
+권장 push 커맨드 (저지연/정규화가 필요한 경우 — 선택):
 
 ```bash
 ffmpeg -i <source> \
-  -c:v libx264 -profile:v baseline -tune zerolatency -bf 0 -g 30 \
+  -c:v libx264 -tune zerolatency -bf 0 -g 30 \
   -c:a aac \
   -f flv rtmp://streaming:1935/live/cam-3f2a9b1c
 ```
 
-(`-g 30`은 15fps 기준 키프레임 간격 2초. 소스 fps에 맞춰 `2×fps`로 조정한다 — 미지정 시 libx264 기본 keyint 250으로 키프레임 간격 요구를 위반한다.)
+(`-bf 0`/`-g 30`은 저지연 최적화 선택지다 — 허브 수락 조건이 아니다. `-g 30`은 15fps 기준 키프레임 간격 2초로, 소스 fps에 맞춰 `2×fps`로 조정한다. 소스가 이미 H.264 + AAC면 `-c copy`가 우선.)
 
 (예시의 `cam-3f2a9b1c`는 web-backend 생성 기본값 형식 `cam-{8hex}`를 따른 것 — 형식 자체는 강제되지 않는다.)
 
 ### 검증 단언 (TDD)
 
-- **A1-1 (정상 push 지속)**: B-frame 없는 테스트 스트림을 60초 push했을 때 FFmpeg가 조기 종료하지 않으면 OK.
+- **A1-1 (정상 push 지속)**: 규격 준수 테스트 스트림을 60초 push했을 때 FFmpeg가 조기 종료하지 않으면 OK.
   ```bash
   docker run --rm --network sentinel_sentinel-net linuxserver/ffmpeg \
     -f lavfi -i testsrc=size=640x360:rate=15 -f lavfi -i sine \
-    -t 60 -c:v libx264 -profile:v baseline -tune zerolatency -bf 0 -g 30 -c:a aac \
+    -t 60 -c:v libx264 -tune zerolatency -bf 0 -g 30 -c:a aac \
     -f flv rtmp://streaming:1935/live/spec-test-a1
   # exit code 0 → OK / 60초 이전 비정상 종료 → NOK
   ```
 - **A1-2 (HLS 자동 생성)**: A1-1 push 시작 후 10초 이내에 `curl -sf http://streaming:8080/live/spec-test-a1/index.m3u8`이 HTTP 200 + `#EXTM3U`로 시작하는 본문을 반환하면 OK.
-- **A1-3 (B-frame 거부 — 금지 규칙의 실효성)**: 동일 push를 `-bf 2`로 실행하면 약 5초 내 연결이 끊긴다(FFmpeg broken pipe/EOF 종료). 이 동작이 재현되면 B-frame 금지 조항 유지가 타당함이 확인(OK). 정상 지속된다면 nginx-rtmp 버전이 바뀐 것이므로 스펙 재검토(NOK → 스펙 갱신 트리거).
+- **A1-3 (B-frame 수용 — 소스 독립성 계약)**: 동일 push를 `-bf 2`(B-frame 포함, `-profile:v main`)로 실행하면 **60초 완주하며 조기 종료하지 않고**, push 중 `curl -sf http://streaming:8080/live/spec-test-a1/index.m3u8`이 HTTP 200 + `#EXTM3U`를 반환하고 갱신되면 OK. 즉 허브는 B-frame을 통과·서빙한다. **조기에 연결이 끊기면 NOK**(허브가 적법한 H.264를 거부 → 소스 독립성 계약 위반 → 스펙/코드 재검토 트리거).
+  ```bash
+  docker run --rm --network sentinel_sentinel-net linuxserver/ffmpeg \
+    -f lavfi -i testsrc=size=640x360:rate=15 -f lavfi -i sine \
+    -t 60 -c:v libx264 -profile:v main -bf 2 -g 30 -c:a aac \
+    -f flv rtmp://streaming:1935/live/spec-test-bf
+  # exit code 0 (60초 완주) + push 중 m3u8 200 → OK / 5초 내 broken pipe·EOF 조기 종료 → NOK
+  ```
 
 ---
 
@@ -100,7 +109,7 @@ ffmpeg -i <source> \
 | Fragment duration | **max(2초, 소스 키프레임 간격)** — streaming은 키프레임에서만 fragment를 자른다. 소스가 계약 1의 키프레임 간격 요구(≤2초)를 지키면 2초 |
 | Playlist length | 10초 (2초 세그먼트 기준 5개) |
 | Content-Type | `application/vnd.apple.mpegurl` (m3u8), `video/mp2t` (ts) |
-| 응답 헤더 | `Cache-Control: no-cache`, `Access-Control-Allow-Origin: *` |
+| 응답 헤더 | `Cache-Control: no-cache`, `Access-Control-Allow-Origin: *` (프론트 직접 재생 편의용 · 내부망 전용이므로 실해 없음 — 의도된 개방) |
 | Cleanup | 자동 (오래된 `.ts` 자동 제거) |
 | Latency | 일반적으로 5~10초 (HLS 특성상 계약 위반 아님) — 소스 키프레임 간격 ≤2초 전제. 간격이 크면 첫 fragment 완결까지 m3u8 생성이 지연되어 초기 지연이 키프레임 간격만큼 늘어난다 |
 
@@ -177,7 +186,7 @@ ffmpeg -i <source> \
     "streamKey": "cam-3f2a9b1c",
     "hlsUrl": "/live/cam-3f2a9b1c/index.m3u8",
     "active": true,
-    "startedAt": "2026-04-13T09:00:00Z"
+    "lastUpdatedAt": "2026-04-13T09:00:00Z"
   }
 ]
 ```
@@ -188,15 +197,22 @@ ffmpeg -i <source> \
 | `streamKey` | `cameraId`와 항상 동일 |
 | `hlsUrl` | 상대 경로, 정확히 `/live/{streamKey}/index.m3u8` |
 | `active` | boolean — 아래 판정 기준 |
-| `startedAt` | RFC3339 UTC 타임스탬프 |
+| `lastUpdatedAt` | RFC3339 UTC 타임스탬프 — 해당 스트림 playlist의 **최종 갱신 시각(mtime)**. 라이브 중에는 폴링마다 전진한다. **시작 시각이 아니다.** 소비자는 이를 freshness 신호로 사용할 수 있다(`active` 판정의 근거값). 시스템 내 실 소비자는 현재 없다 |
 
 - 스트림이 하나도 없으면 빈 배열 `[]` (200, null 아님)
 
 ### 핵심 로직 (동작 — 불변식)
 
-- **활성 판정 기준 (SSOT)**: 마지막 30초 이내에 해당 스트림의 playlist가 갱신되었으면 `active: true`, 그 외 `false`. (판정 창은 환경변수 `STREAM_ACTIVE_TIMEOUT`(초)으로 조정 가능, 기본 30)
+- **활성 판정 기준 (SSOT)**: 마지막 30초 이내에 해당 스트림의 playlist가 갱신되었으면(`lastUpdatedAt`이 판정 창 이내) `active: true`, 그 외 `false`. (판정 창은 환경변수 `STREAM_ACTIVE_TIMEOUT`(초)으로 조정 가능, 기본 30)
 - 판정 근거는 streaming 내부 관측(HLS 산출물 갱신)뿐이다. 어댑터의 자기 보고를 절대 반영하지 않는다.
+- **소비자 의무 (MUST)**: dead 스트림은 HLS 산출물이 자동 정리(cleanup)될 때까지 `active: false` 항목으로 목록에 잔존할 수 있고, 정리 후에는 항목 자체가 소멸한다(수명 불확정). 따라서 **소비자는 "항목 부재"와 "`active: false`"를 동일하게 취급해야 한다(= disconnected).** 두 상태의 관측 결과는 항상 같아야 하며, 어느 쪽인지에 의존하는 로직을 두지 않는다.
+- **휘발성 계약 (거짓 alive 금지)**: streaming의 HLS 산출물은 휘발성으로 다룬다(tmpfs 마운트 — 상세는 아래 "상태 휘발성"). 그 결과 **어떤 재기동(컨테이너 recreate·`docker compose restart` 모두)에서도** 이전 스트림 흔적이 남지 않는다. 재기동 직후 실제로 발행 중이지 않은 스트림이 stale mtime 때문에 일시적으로 `active: true`로 보고되는 일(거짓 alive)이 없어야 한다.
 - web-backend는 이 API 하나만 호출하면 카메라별 시청 URL과 상태를 얻는다 — streaming의 다른 내부 사정을 알 필요가 없다.
+
+### 상태 휘발성 (계약)
+
+- streaming의 HLS 출력 디렉토리(`/tmp/hls`)는 **tmpfs로 마운트**되어 컨테이너 재기동 시 항상 비워진다. 이로써 recreate와 restart의 동작이 균일해진다 — 둘 다 완전 초기화.
+- 근거: 마운트가 없으면 `docker compose restart`(컨테이너 재생성 아님)는 직전 playlist를 쓰기 레이어에 남겨, 재접속 중이라 실제로는 dead인 스트림을 최근 mtime으로 인해 `active: true`로 잘못 보고할 수 있다(SSOT 거짓 양성). tmpfs는 이 거짓 alive를 원천 제거한다.
 
 ### 검증 단언 (TDD)
 
@@ -216,7 +232,16 @@ ffmpeg -i <source> \
   curl -s http://streaming:8080/api/streams | \
     jq -e 'all(.[]; .hlsUrl | test("^/live/[^/]+/index\\.m3u8$"))'
   ```
-- **A4-5 (startedAt 형식)**: 모든 항목의 `startedAt`이 RFC3339 UTC(`...Z`)로 파싱되면 OK.
+- **A4-5 (lastUpdatedAt 형식·의미)**: 모든 항목의 `lastUpdatedAt`이 RFC3339 UTC(`...Z`)로 파싱되면 OK. 또한 응답에 `startedAt` 키가 **존재하지 않으면** OK(개명 완료 확인 — 옛 이름 잔존 시 NOK).
+  ```bash
+  curl -s http://streaming:8080/api/streams | \
+    jq -e 'all(.[]; (.lastUpdatedAt | test("Z$")) and (has("startedAt") | not))'
+  ```
+- **A4-6 (재기동 거짓 alive 금지 — 휘발성 SSOT)**: 스트림을 발행해 `active: true`가 관측된 뒤 push를 유지한 채 `docker compose restart streaming`을 실행하면(어댑터는 재접속 시도 중), 재기동 직후(어댑터 RTMP 재연결·첫 playlist 갱신 이전 창) `/api/streams`에 직전 streamKey가 `active: true`로 남아 있지 않으면 OK — 항목이 없거나 `active: false`여야 한다. stale mtime으로 `active: true`가 관측되면 NOK(거짓 alive — tmpfs 미적용 신호).
+  ```bash
+  curl -s http://streaming:8080/api/streams | \
+    jq -e '[.[] | select(.streamKey=="spec-test-a1" and .active==true)] | length == 0'
+  ```
 
 ---
 
@@ -242,13 +267,18 @@ ffmpeg -i <source> \
 
 ---
 
-## ⚠️ 리뷰 필요 (문서-코드 불일치)
+## 설계 결정 기록 (Resolved)
 
-기존 `docs/interfaces/streaming-api.md`와 실제 코드를 대조하며 발견한 불일치. 스펙 본문에는 코드의 실제 동작 기준으로 반영했으나, 아래 항목은 설계자 확인이 필요하다.
+원점 재검토(제품 정의 = "스트리밍 서버, CCTV는 어댑터")로 확정된 결정. 이전의 "리뷰 필요" 항목을 계약 본문에 반영하고 여기 근거를 남긴다.
 
-1. **`startedAt`의 의미가 이름과 다름** — 코드는 playlist 파일의 마지막 수정 시각(mtime)을 `startedAt`으로 반환한다 (`services/streaming/main.go`의 `info.ModTime()`). 즉 실제 의미는 "스트림 시작 시각"이 아니라 "마지막 갱신 시각"이며, 라이브 중에는 호출 때마다 값이 전진한다. 필드명 변경(`lastUpdatedAt`) 또는 시작 시각 추적 구현 중 택일 필요.
-2. **`/api/streams`는 "활성 스트림 목록"이 아님** — 기존 문서는 응답을 "활성 스트림 목록"이라 기술하지만, 코드는 `/tmp/hls` 아래 playlist가 남아 있는 모든 디렉토리를 반환한다 (`active: false` 항목 포함). push가 끊긴 스트림도 잔존 playlist가 있는 동안 목록에 남는다. "알려진 스트림 전체 + active 플래그"가 실제 계약이며, 본 스펙(계약 4)은 이 기준으로 작성했다.
-3. **RTMP pull 경로가 기존 문서에 없음** — 기존 문서는 출력을 "HLS pull"로만 규정하지만, recording 서비스가 `rtmp://streaming:1935/live/{streamKey}`를 직접 pull하여 녹화한다 (`services/recording/main.go`, `STREAMING_RTMP_URL` 환경변수). 실존 접합부이므로 본 스펙에 계약 3으로 승격해 명문화했다 — 이 승격이 설계 의도와 맞는지 확인 필요.
-4. **youtube-adapter는 항상 재인코딩** — 기존 문서의 운영 정책은 "가능한 한 copy 모드"이나, youtube-adapter는 무조건 `libx264 300k / aac 48k`로 재인코딩한다 (`services/youtube-adapter/main.go`의 `runFFmpeg`). YouTube 소스의 B-frame 제거를 위한 불가피한 선택으로 보이나(계약 1의 B-frame 금지 준수 목적), "무 트랜스코딩 원칙"의 예외로 인지하고 있어야 한다. cctv-adapter는 문서대로 `-c copy` 준수.
-5. **H.264 profile이 push 측에서 pin되지 않음** — 기존 문서는 "Baseline 또는 Main profile 항상 만족"을 계약으로 기술했으나, 실측상 어느 push 측도 `-profile:v`를 명시하지 않는다. youtube-adapter는 `-preset ultrafast`의 부작용(B-frame·CABAC 비활성)으로 사실상 Constrained Baseline을 송출할 뿐이며, cctv-adapter는 `-c copy`라 소스 profile이 그대로 통과한다. 본 스펙(계약 1)은 이를 "profile 강제 없음, Baseline 권장"으로 정정했다. preset 변경 시 profile이 조용히 바뀔 수 있으므로, 계약으로 profile을 보장하려면 push 측 `-profile:v` 명시(pin)가 필요한지 설계자 확인 필요.
-6. **키프레임 간격 요구(≤2초)가 push 측에서 일괄 보장되지 않음** — streaming은 키프레임에서만 HLS fragment를 자르므로 계약 2의 fragment 2초·지연 수치는 소스 키프레임 간격 ≤2초를 전제한다. 실측: youtube-adapter는 `-g 60`으로 GOP를 pin하지만 이는 프레임 수 기준이라 소스가 30fps일 때만 2초다(15fps 소스면 4초). cctv-adapter는 `-c copy`라 카메라의 GOP 설정이 그대로 통과하며 어댑터 측 보장이 전혀 없다 — 카메라 설정(키프레임 간격 ≤2초)이 운영 전제조건이 된다. 계약 1에 요구로 명문화했으나(위반 시 push는 수락되고 세그먼트 길이·지연만 늘어남), 어댑터/카메라 설정 지침으로 강제할지 설계자 확인 필요.
+1. **B-frame은 수용 대상 (거부 아님)** — 허브는 remux-only라 코덱을 검사하지 않으며 적법한 H.264(B-frame 포함)를 통과·서빙한다(실측 확인: `-bf 2 -profile:v main` push 60초 완주 + active m3u8 서빙). 원 스펙의 "허브가 B-frame FLV를 ~5초 후 종료" 전제는 사실 오류이자 제품 목적(소스 독립성) 위반 방향이었다. 계약 1에서 "push측 금지"를 **저지연 선택 권고**로 강등. A1-3은 "거부 확인"에서 "수용 확인"으로 방향을 뒤집었다.
+2. **코덱 정규화는 어댑터 책임** — 비-H.264(HEVC 등)→H.264, 저지연용 B-frame 제거는 push 측(어댑터)이 수행하고 허브는 절대 트랜스코딩하지 않는다(아키텍처 원칙, 목적/의도 섹션). youtube-adapter의 상시 재인코딩은 "무변환 원칙의 예외"가 아니라 이 원칙의 정규 적용 사례로 재프레이밍했다.
+3. **`startedAt` → `lastUpdatedAt` 개명** — 코드가 반환하던 값은 시작 시각이 아니라 playlist mtime(폴링마다 전진)이며, web-backend가 디코드만 하고 미사용인 **죽은 필드**였다. 실 소비 신호는 `active` + `hlsUrl`뿐. 이름을 실제 의미(최종 갱신 시각)로 바로잡았다. 실제 시작 시각 추적은 소비자 요구가 생기기 전까지 채택하지 않는다(상태 컴포넌트·콜백 추가 = 현 단순성과 상충).
+4. **상태 휘발성 균일화(tmpfs) + 소비자 부재==inactive** — `/tmp/hls`를 tmpfs로 마운트해 recreate·restart 모두 완전 초기화, 재기동 거짓 alive(SSOT 거짓 양성)를 제거한다(계약 4 "상태 휘발성", A4-6). dead 스트림 목록 잔존 수명은 불확정이나 소비자가 "부재"와 "`active:false`"를 동일 취급(MUST)하면 무해하다.
+5. **CORS `Access-Control-Allow-Origin: *`는 의도된 것** — `/live/` 응답의 전면 개방은 프론트엔드 직접 재생 편의용이며 내부망(Docker network) 전용이라 실해가 없다. 외부 노출은 web-frontend nginx 프록시 경유 한정. 계약 2 응답 헤더로 유지한다.
+
+### 하위 세션(어댑터/테스트 하니스)으로 이관된 사항 (허브 계약 범위 밖)
+
+- **push 측 H.264 profile pin** — 어느 어댑터도 `-profile:v`를 명시하지 않아 profile은 preset 부작용으로 결정된다. 허브는 profile을 강제하지 않으므로(계약 1) 이는 허브 계약 문제가 아니다. profile 보장이 필요하면 각 어댑터 스펙에서 pin 여부를 결정한다.
+- **키프레임 간격 ≤2초 보장** — 세그먼트 길이·초기 지연 최적화 문제이며(계약 위반 아님, 위반 시 push는 수락됨), 카메라/어댑터 설정 지침으로 각 어댑터 스펙에서 다룬다.
+- **SSOT dead 전이의 CI 상시 검증 공백** — A4-3/A4-6이 mutating-gated라 상시 미검증인 것은 테스트 하니스 결함이며 계약 결함이 아니다. 별도 테스트 개선 트랙에서 처리.
