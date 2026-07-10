@@ -90,6 +90,9 @@ func main() {
 	// Incident resolve from sensor (internal — from hw-gateway on MQTT alert/resolved with kind=sensor_button)
 	mux.HandleFunc("POST /api/incidents/{id}/resolve-from-sensor", handleResolveIncidentFromSensor(db))
 
+	// System alarm ingest (internal — from notifier when all notification channels fail)
+	mux.HandleFunc("POST /internal/alarms", handleCreateSystemAlarm())
+
 	// Protected API routes (JWT required)
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {

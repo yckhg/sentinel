@@ -390,7 +390,7 @@ func sendSystemAlarm(cfg Config, contact Contact, alert AlertPayload, kakaoErr, 
 		return
 	}
 
-	resp, err := httpClient.Post(cfg.WebBackendURL+"/api/alarms", "application/json", bytes.NewReader(payload))
+	resp, err := httpClient.Post(cfg.WebBackendURL+"/internal/alarms", "application/json", bytes.NewReader(payload))
 	if err != nil {
 		log.Printf("[alarm] Failed to send system alarm: %v", err)
 		return

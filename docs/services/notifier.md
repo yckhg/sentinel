@@ -59,7 +59,7 @@ docker compose logs -f notifier
 
 - **web-backend** `GET /api/contacts` — 전송 대상 목록. 실패 시 해당 이벤트 전체 abort (no silent fail이지만 대상이 없으면 보낼 수 없음).
 - **web-backend** `POST /api/links/temp` — temp CCTV link 요청. 실패 시 degraded mode (링크 없이 전송).
-- **web-backend** `POST /api/alarms` — 모든 외부 채널 실패 시 시스템 알람. KakaoTalk/SMS 둘 다 미설정이어도 호출 (silent fail 금지).
+- **web-backend** `POST /internal/alarms` — 모든 외부 채널 실패 시 시스템 알람. KakaoTalk/SMS 둘 다 미설정이어도 호출 (silent fail 금지). web-backend가 수신해 admin WS `system_alarm` 채널로 브로드캐스트 (무인증 internal 라우트, DB 영속 없음).
 - **KakaoTalk** — 1순위. 알림톡 템플릿 기반.
 - **NHN SMS** — 2순위. `https://api-sms.cloud.toast.com/sms/v3.0/appKeys/{appKey}/sender/sms`.
 
@@ -72,7 +72,7 @@ KakaoTalk 성공 → done
   ↓ 실패/미설정
 SMS 성공 → done
   ↓ 실패/미설정
-web-backend /api/alarms (항상 호출, degraded done)
+web-backend /internal/alarms (항상 호출, degraded done)
 ```
 
 ## Constraints / Known Issues
@@ -84,4 +84,4 @@ web-backend /api/alarms (항상 호출, degraded done)
 
 ## Storage / State
 
-- 영구 저장 없음. 전송 이력은 로그에만 남음 (웹에서 감사 기능 필요하면 web-backend 쪽 alarms 테이블로 기록 경로 있음).
+- 영구 저장 없음. 전송 이력은 로그에만 남음. 최후 보루 시스템 알람은 web-backend `POST /internal/alarms`로 전달되어 admin WS로 브로드캐스트되지만, web-backend 측에도 DB 영속(alarms 테이블)은 없다 — 보장 동작은 "수신 + admin 브로드캐스트"까지.
