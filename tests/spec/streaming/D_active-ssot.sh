@@ -23,8 +23,8 @@ if [ "${SPEC_TDD_ALLOW_MUTATING:-0}" != "1" ]; then
 fi
 KEY="spec-test"
 docker run --rm --network sentinel_sentinel-net --entrypoint ffmpeg linuxserver/ffmpeg \
-  -f lavfi -i "testsrc=size=640x360:rate=15" -f lavfi -i sine \
-  -t 30 -c:v libx264 -bf 0 -g 30 -c:a aac \
+  -re -f lavfi -i "testsrc=size=640x360:rate=15" -f lavfi -i sine \
+  -t 30 -c:v libx264 -pix_fmt yuv420p -bf 0 -g 30 -c:a aac \
   -f flv "rtmp://streaming:1935/live/${KEY}" >/dev/null 2>&1
 sleep 35   # 판정 창 30초 + 여유 5초
 docker exec sentinel-cctv-adapter wget -qO- http://streaming:8080/api/streams | \
