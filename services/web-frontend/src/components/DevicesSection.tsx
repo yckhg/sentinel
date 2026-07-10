@@ -14,7 +14,10 @@ interface Device {
 }
 
 const POLL_INTERVAL_MS = 10_000;
-const ALIVE_THRESHOLD_MS = 30_000;
+// Source of truth for the alive/online cutoff is the runtime health config
+// `health.sensor_alive_threshold_sec` (GET /api/settings, default 60s). This
+// default is only a fallback when that config can't be fetched (e.g. non-admin 403).
+const DEFAULT_ALIVE_THRESHOLD_MS = 60_000;
 
 function getAuthHeaders(): HeadersInit {
   const token = localStorage.getItem("token");
@@ -27,10 +30,10 @@ function formatDate(s: string | null | undefined): string {
   return formatKstDateTimeSec(s);
 }
 
-function isAlive(lastSeen: string, nowMs: number): boolean {
+function isAlive(lastSeen: string, nowMs: number, thresholdMs: number): boolean {
   const t = parseServerTimeMs(lastSeen);
   if (!t) return false;
-  return nowMs - t < ALIVE_THRESHOLD_MS;
+  return nowMs - t < thresholdMs;
 }
 
 export default function DevicesSection() {
@@ -39,6 +42,8 @@ export default function DevicesSection() {
   const [error, setError] = useState<string | null>(null);
   const [showDeleted, setShowDeleted] = useState(false);
   const [nowMs, setNowMs] = useState(Date.now());
+  // Runtime alive/online cutoff, sourced from health config; falls back to default.
+  const [aliveThresholdMs, setAliveThresholdMs] = useState(DEFAULT_ALIVE_THRESHOLD_MS);
 
   // Alias edit (inline)
   const [editId, setEditId] = useState<number | null>(null);
@@ -75,13 +80,31 @@ export default function DevicesSection() {
     }
   };
 
+  // Fetch the alive threshold from the runtime health config. Uses GET /api/settings
+  // (admin-only); on any failure (e.g. non-admin 403) the default is kept.
+  const fetchAliveThreshold = async () => {
+    try {
+      const res = await fetchWithTimeout("/api/settings", { headers: getAuthHeaders() });
+      if (!res.ok) return;
+      const data: { key: string; value: string }[] = await res.json();
+      const setting = data.find((s) => s.key === "health.sensor_alive_threshold_sec");
+      const secs = setting ? parseInt(setting.value, 10) : NaN;
+      if (Number.isFinite(secs) && secs > 0) {
+        setAliveThresholdMs(secs * 1000);
+      }
+    } catch {
+      // keep default
+    }
+  };
+
   useEffect(() => {
+    fetchAliveThreshold();
     fetchDevices();
     const tick = setInterval(() => {
       fetchDevices();
       setNowMs(Date.now());
     }, POLL_INTERVAL_MS);
-    // separate fast tick for alive indicator so 30s threshold feels responsive
+    // separate fast tick for alive indicator so the threshold feels responsive
     const fastTick = setInterval(() => setNowMs(Date.now()), 5_000);
     return () => {
       clearInterval(tick);
@@ -179,8 +202,8 @@ export default function DevicesSection() {
     const aAlerting = !aDeleted && a.alertState === "active";
     const bAlerting = !bDeleted && b.alertState === "active";
     if (aAlerting !== bAlerting) return aAlerting ? -1 : 1;
-    const aAlive = !aDeleted && isAlive(a.lastSeen, nowMs);
-    const bAlive = !bDeleted && isAlive(b.lastSeen, nowMs);
+    const aAlive = !aDeleted && isAlive(a.lastSeen, nowMs, aliveThresholdMs);
+    const bAlive = !bDeleted && isAlive(b.lastSeen, nowMs, aliveThresholdMs);
     if (aAlive !== bAlive) return aAlive ? -1 : 1;
     return parseServerTimeMs(b.lastSeen) - parseServerTimeMs(a.lastSeen);
   });
@@ -211,7 +234,7 @@ export default function DevicesSection() {
         <div className="mgmt-list">
           {sortedDevices.map((d) => {
             const deleted = !!d.deletedAt;
-            const alive = !deleted && isAlive(d.lastSeen, nowMs);
+            const alive = !deleted && isAlive(d.lastSeen, nowMs, aliveThresholdMs);
             const isEditing = editId === d.id;
             return (
               <div
