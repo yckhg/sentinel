@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 interface EmergencyCallButtonProps {
   className?: string;
@@ -27,7 +28,7 @@ export default function EmergencyCallButton({
     // Fetch site address from settings
     const token = localStorage.getItem("token");
     if (token) {
-      fetch("/api/sites", {
+      fetchWithTimeout("/api/sites", {
         headers: { Authorization: `Bearer ${token}` },
       })
         .then((res) => (res.ok ? res.json() : Promise.reject()))

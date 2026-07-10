@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 
 interface RestartDialogProps {
   cameraName: string;
@@ -25,7 +26,7 @@ export default function RestartDialog({
     setSending(true);
     try {
       const token = localStorage.getItem("token");
-      const res = await fetch("/api/equipment/restart", {
+      const res = await fetchWithTimeout("/api/equipment/restart", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -41,8 +42,11 @@ export default function RestartDialog({
     } catch (err) {
       setResult({
         success: false,
-        message:
-          err instanceof Error ? err.message : "재시작 명령 전송에 실패했습니다.",
+        message: isTimeoutError(err)
+          ? timeoutMessage()
+          : err instanceof Error
+            ? err.message
+            : "재시작 명령 전송에 실패했습니다.",
       });
     } finally {
       setSending(false);
