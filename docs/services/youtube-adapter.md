@@ -51,7 +51,7 @@ docker compose logs -f youtube-adapter
 
 ## FFmpeg Invocation
 
-YouTube 비디오는 거의 항상 B-frame 포함 → `-c copy` **금지**. 재인코딩 필수:
+YouTube 소스는 코덱·비트레이트가 제각각이라 **재인코딩으로 정규화**한다(코덱 정규화 = 어댑터 책임). 허브가 B-frame을 거부해서가 아니라, 소스를 저비트레이트 저지연 H.264로 맞추기 위함이다. `-preset ultrafast`가 B-frame·CABAC을 끄므로 결과적으로 B-frame 없는 저지연 스트림이 된다:
 
 ```
 ffmpeg -re -stream_loop -1 -i <file-or-yt-dlp-stdout> \
@@ -62,7 +62,7 @@ ffmpeg -re -stream_loop -1 -i <file-or-yt-dlp-stdout> \
 
 - `-re` : 로컬 파일 native frame rate 재생 (실시간 흉내)
 - `-stream_loop -1` : 로컬 파일 무한 반복 (최근 수정 반영; US-002)
-- `-tune zerolatency -bf 0` : B-frame 제거 (streaming 입력 규격 준수)
+- `-preset ultrafast -tune zerolatency` : 저지연 + B-frame 미생성 (저지연 최적화 — 허브 수락 조건은 아님)
 - yt-dlp는 URL을 best format으로 resolve → FFmpeg stdin 혹은 URL pass
 
 ## HTTP API
@@ -75,7 +75,7 @@ ffmpeg -re -stream_loop -1 -i <file-or-yt-dlp-stdout> \
 
 ## Outbound Calls
 
-- **RTMP push** → `rtmp://streaming:1935/live/{streamKey}` (H.264 no B-frame + AAC FLV).
+- **RTMP push** → `rtmp://streaming:1935/live/{streamKey}` (H.264 + AAC FLV — 본 어댑터는 정규화 재인코딩으로 저지연 H.264를 송출).
 - **web-backend** — reload 시 소스 목록 fetch (구현되어 있다면).
 
 ## Constraints / Known Issues
@@ -85,7 +85,7 @@ ffmpeg -re -stream_loop -1 -i <file-or-yt-dlp-stdout> \
 - 로컬 파일 경로는 `/media/` 하위로 제한 (compose read-only mount).
 - 재시작 backoff: 1s → 30s, clean exit 시 reset.
 - 0바이트 세그먼트 등 streaming 쪽 부작용은 streaming 세션의 책임, 본 세션은 RTMP 송출 스펙 준수만 보장.
-- B-frame 제거를 게을리하면 ~5초 후 streaming 쪽에서 connection reset (증상이 audio packet 쪽으로 보이지만 원인은 video).
+- 허브는 B-frame을 거부하지 않는다 — B-frame 유무는 지연에만 영향한다. 본 어댑터의 재인코딩은 저지연·저비트레이트 정규화 목적이지 "허브 거부 회피"가 아니다.
 
 ## Storage / State
 

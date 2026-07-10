@@ -61,9 +61,11 @@ func main() {
     // 3. For each source, launch FFmpeg:
     //      ffmpeg -i <source> ... -f flv rtmp://streaming:1935/live/{streamKey}
     //    See RTMP Input Spec for codec requirements:
-    //      - H.264 Baseline/Main, NO B-frames (-tune zerolatency or -bf 0)
+    //      - H.264 (any profile — B-frames ACCEPTED; hub is remux-only, no codec check)
     //      - AAC audio
     //      - FLV container (-f flv)
+    //      - Codec normalization (non-H.264 -> H.264) is the adapter's job; hub never transcodes
+    //      - Optional low-latency: -tune zerolatency -bf 0 (recommendation, not required)
     // 4. Handle reconnection with exponential backoff (1s → 30s max)
     // 5. Implement watchdog to kill hung FFmpeg processes (FFMPEG_TIMEOUT env var)
 
@@ -181,7 +183,7 @@ Create `services/<source-type>-adapter/AGENTS.md` documenting:
 
 - **One adapter per source type** — don't mix RTSP and YouTube in one container
 - **No status reporting** — the streaming server is the single source of truth for stream status
-- **Conform to RTMP Input Spec** — H.264 no B-frames, AAC audio, FLV container
+- **Conform to RTMP Input Spec** — H.264 (B-frames accepted), AAC audio, FLV container. Codec normalization (non-H.264→H.264) is the adapter's responsibility; the hub never transcodes
 - **Expose `/healthz`** — required for Docker healthcheck
 - **Use passthrough (`-c copy`) when possible** — only re-encode if the source is incompatible
 
