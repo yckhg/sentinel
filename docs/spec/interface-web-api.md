@@ -587,7 +587,7 @@ Device object:
 
 ### 핵심 로직 (불변식)
 
-- `POST /api/incidents` **멱등성(alertId dedup)**: `alertId`가 오면 `incidents.alert_id`의 UNIQUE 부분 인덱스(`alert_id IS NOT NULL` 한정) 기준으로 dedup — 동일 alertId 재전송은 기존 incident를 `200`으로 반환하고 새 행을 만들지 않음. `alertId` 없으면 dedup 없음 (재전송마다 새 incident)
+- `POST /api/incidents` **멱등성(alertId dedup)**: `alertId`가 오면 `incidents.alert_id`의 UNIQUE 부분 인덱스(`alert_id IS NOT NULL` 한정) 기준으로 dedup — 동일 alertId 재전송은 기존 incident를 `200`으로 반환하고 새 행을 만들지 않음. `alertId` 없으면 dedup 없음 (재전송마다 새 incident). 이 dedup은 **동시 요청 하에서도 원자적**이다 — 같은 alertId N건이 동시에 도착해도 정확히 1건만 `201`(신규), 나머지 전부 `200`(동일 incident)이며, UNIQUE 충돌로 인한 `5xx`/`SQLITE_BUSY`나 중복 행·유실이 발생하지 않는다
 - `POST /api/incidents`의 `deviceId`는 best-effort device UPSERT 트리거 — `/api/devices/seen`과 동일 의미론(`last_seen` 갱신 + soft-delete 자동 복원). UPSERT 실패가 `201`을 막지 않음
 - **호출자 노트**: hw-gateway는 crisis forward 시 `alertId`를 전송한다 — DB dedup 경로가 운영에서 실사용된다. hw-gateway는 forward가 전송 계층 오류 또는 HTTP 5xx면 재시도하고, 2xx 응답을 받은 후에만 자신의 in-memory dedup을 등록하므로, 5xx로 유실된 이벤트는 펌웨어 재전송으로 복구된다(계약 15 / `docs/services/hw-gateway.md` 참조)
 - `POST /api/incidents` 신규 생성(`201`) 성공 부작용: 전체 WS 클라이언트에 `crisis_alert` 브로드캐스트 — dedup `200` 경로에서는 브로드캐스트 없음
@@ -615,6 +615,14 @@ Device object:
   B=$(curl -s -X POST http://localhost:8080/api/incidents -d '{"siteId":"site1","description":"t","alertId":"dup-test-1"}')
   [ "$(echo "$A" | jq .id)" = "$(echo "$B" | jq .id)" ]   # → true
   ```
+- [ ] `POST /api/incidents` 동일 `alertId`로 **동시** N(≥12)건 전송 → 정확히 1건 `201`, 나머지 전부 `200`이며 응답 `id` 전부 동일; incidents 행 1개, 응답 중 `5xx`/`SQLITE_BUSY` 0건
+  ```bash
+  for i in $(seq 12); do curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+    http://localhost:8080/api/incidents \
+    -d '{"siteId":"site1","description":"t","alertId":"race-1"}' & done; wait
+  # → 201 정확히 1개, 나머지 200; 500/503 0개
+  ```
+- [ ] `POST /api/incidents` 서로 다른 요청(상이 alertId 또는 alertId 없음) **동시** N(≥30)건 → 전부 `201`, `SQLITE_BUSY`/`5xx`/유실 0건, incidents 행 정확히 N 증가
 - [ ] `POST /api/incidents`에 `deviceId` 포함 → 이후 `GET /api/devices`에 해당 device 등장 (UPSERT 확인)
 - [ ] `POST /api/incidents/0/resolve-from-sensor` + body `incidentId: 0` + 유효 `siteId` → 해당 site 최신 미해결 incident가 resolved, `resolvedByKind == "sensor_button"`
 - [ ] 위에서 resolved된 incident의 **명시적 id**로 `POST /api/incidents/{id}/resolve-from-sensor` 재전송 → `409`
