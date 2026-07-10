@@ -57,7 +57,7 @@
 | `GET /api/recordings/{key}/play?from=&to=` | `application/vnd.apple.mpegurl`, VOD형 playlist(`EXT-X-PLAYLIST-TYPE:VOD` + `EXT-X-ENDLIST`), 구간과 겹치는 세그먼트를 시간순 나열. 해당 세그먼트 없으면 404. `from`/`to` 누락·형식 오류는 400 |
 | `GET /api/recordings/{key}/segments/{file}` | `.ts` 파일을 `video/mp2t`로 서빙. 경로 탈출(`/`, `\`, `..`) 및 `.ts` 외 확장자는 400 |
 | `POST /api/archives/protect` | (Phase 1) 202. incident별·streamKey별 상태 `protecting` 아카이브 항목 생성. `incidentTime − 1시간`부터의 세그먼트를 삭제 보호. 이후 도착하는 세그먼트도 주기적으로 계속 보호 |
-| `POST /api/archives/finalize` | (Phase 2) 해당 incident의 `protecting` 아카이브들을 `resolvedAt + 30분`을 종료 시각으로 백그라운드 병합 시작. `protecting`이 하나도 없으면 404 |
+| `POST /api/archives/finalize` | (Phase 2) 해당 incident의 `protecting` 아카이브들을 `resolvedAt + 30분`을 종료 시각으로 백그라운드 병합 시작. `protecting`이 하나도 없으면 404. **종료 시각(`To`)은 메타 상한**이며 병합이 즉시 실행되므로 `resolvedAt`이 현재 시각에 가까우면 그 이후 post-roll 세그먼트는 디스크에 없어 MP4에 포함되지 않는다(과대표기 가능, ⚠️ 리뷰 필요 2) |
 | `POST /api/archives` | 임의 구간 즉시 아카이브(수동). 202 + 생성된 항목들. `incidentId` 생략 시 `manual_*` 자동 부여 |
 | `GET /api/archives` | 전체 아카이브 메타 배열. `status ∈ {protecting, pending, finalizing, processing, completed, failed}` |
 | `GET /api/archives/{id}/download` | `completed`만 `video/mp4` + attachment로 서빙. 미완료면 409, 없으면 404 |
@@ -78,7 +78,7 @@
 4. **incident 2단계 아카이브**
    - **protect**: `incidentTime − 1시간 ~ 현재`의 기존 세그먼트를 보호 집합에 넣고, streamKey별 `protecting` 메타를 만든다.
    - **보호 갱신 (30초 주기)**: `protecting` 상태인 동안 새로 생기는 세그먼트도 계속 보호 집합에 추가된다 — 즉 protect 이후 도착 영상도 삭제되지 않는다.
-   - **finalize**: 종료 시각을 `resolvedAt + 30분`으로 확정하고, 구간 내 세그먼트를 보호 처리 후 재인코딩 없이 단일 MP4로 백그라운드 병합한다. 성공 시 `completed`(+파일 크기), 실패 시 `failed`(+사유)로 기록된다.
+   - **finalize**: 종료 시각을 `resolvedAt + 30분`으로 확정하고, 구간 내 세그먼트를 보호 처리 후 재인코딩 없이 단일 MP4로 백그라운드 병합한다. 성공 시 `completed`(+파일 크기), 실패 시 `failed`(+사유)로 기록된다. 단, 병합은 즉시 실행되므로 `resolvedAt`이 현재 시각에 가까우면 `To`(=resolvedAt+30분) 이후의 post-roll 세그먼트는 아직 디스크에 없어 MP4에 포함되지 않는다 — 메타의 `To`는 실제 병합 범위의 **상한(과대표기 가능)**이다(⚠️ 리뷰 필요 2).
    - **자동 finalize (30초 주기)**: `protecting` 상태가 incident 발생 후 **2시간**을 넘기면 finalize 누락으로 간주하고 현재 시각 기준으로 자동 finalize한다 — 보호가 무한히 지속되어 디스크가 차는 것을 막는 안전장치.
 5. **pseudo-playback**: 요청 구간 `[from, to)`와 **겹치는**(경계 포함 판정: 세그먼트 종료 > from AND 세그먼트 시작 < to) 세그먼트를 시간순으로 나열한 VOD playlist를 매 요청마다 동적 생성한다. 세그먼트 길이는 10초로 간주한다.
 6. **reconcile**: reload 시 streamKey 기준으로만 비교한다 — 새 key는 녹화 시작, 사라진 key는 SIGTERM(3초 후 SIGKILL)으로 중지. 동일 key의 다른 속성 변경은 녹화에 영향 없다. 카메라 목록 조회 실패는 "카메라 0대"와 동일하게 취급되어 실행 중인 모든 recorder가 중지된다 (⚠️ 8).
