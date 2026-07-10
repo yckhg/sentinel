@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -31,6 +32,7 @@ func main() {
 	initHWGatewayURL()
 	initServiceURLs()
 	initNotifierURL()
+	initTrustedProxies()
 
 	if err := seedAdminUser(db); err != nil {
 		log.Fatalf("failed to seed admin user: %v", err)
@@ -69,7 +71,10 @@ func main() {
 
 	// Internal service routes (no auth — accessed by other services via Docker network)
 	mux.HandleFunc("GET /internal/contacts", handleListContacts(db))
+	// Temp link issuance: /api/links/temp is admin-only (proxied externally);
+	// /internal/links/temp is the unauthenticated Docker-internal path (notifier).
 	mux.HandleFunc("POST /api/links/temp", handleCreateTempLink(db))
+	mux.HandleFunc("POST /internal/links/temp", handleInternalCreateTempLink(db))
 	mux.HandleFunc("GET /api/links/verify/{token}", handleVerifyTempLink())
 
 	// Internal cameras list (no auth — for cctv-adapter reload)
@@ -185,27 +190,29 @@ func main() {
 }
 
 func initDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	// Apply pragmas via the DSN so they run on EVERY pooled connection. Setting
+	// them once with db.ExecContext only configures a single connection; other
+	// connections in the pool would keep busy_timeout=0 and immediately return
+	// SQLITE_BUSY (HTTP 500, lost writes) under concurrent writes.
+	dsn := fmt.Sprintf(
+		"%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=wal_autocheckpoint(100)",
+		path,
+	)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 
+	// SQLite allows only one writer at a time. Cap the pool at a single
+	// connection so concurrent writes serialize inside Go's sql pool (queued,
+	// not failed) — combined with busy_timeout above this makes concurrent
+	// POST /api/incidents lossless instead of racing to SQLITE_BUSY.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+
 	ctx, cancel := dbCtx(context.Background())
 	defer cancel()
-
-	// SQLite pragmas for performance and safety
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-		"PRAGMA wal_autocheckpoint=100",
-	}
-	for _, p := range pragmas {
-		if _, err := db.ExecContext(ctx, p); err != nil {
-			db.Close()
-			return nil, err
-		}
-	}
 
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()

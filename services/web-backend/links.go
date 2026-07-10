@@ -129,74 +129,89 @@ func getSiteURL(db *sql.DB) string {
 	return getFrontendURL()
 }
 
-// handleCreateTempLink handles POST /api/links/temp
-// Accepts admin JWT or internal service calls (no auth)
+// handleCreateTempLink handles POST /api/links/temp — admin only.
+// Previously this endpoint treated a missing Authorization header as an
+// "internal service call" and issued a token with no auth. Because the reverse
+// proxy exposes all of /api/* externally, that allowed anyone to mint 24h view
+// tokens. Unauthenticated internal issuance now lives at POST /internal/links/temp
+// (not proxied externally), used by notifier.
 func handleCreateTempLink(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Check auth: if Authorization header present, must be valid admin
-		authHeader := r.Header.Get("Authorization")
-		if authHeader != "" {
-			parts := strings.SplitN(authHeader, " ", 2)
-			if len(parts) != 2 || parts[0] != "Bearer" {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid authorization header format"})
-				return
-			}
-			claims, err := parseJWT(parts[1])
-			if err != nil {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired token"})
-				return
-			}
-			if claims.Role != "admin" {
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
-				return
-			}
-		}
-		// No auth header = internal service call (Docker network isolation)
-
-		var req struct {
-			Label string `json:"label"`
-		}
-		if r.Body != nil {
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
-				return
-			}
-		}
-
-		linkID := generateUUID()
-		expiresAt := time.Now().Add(24 * time.Hour)
-
-		token, err := generateTempLinkJWT(linkID, expiresAt)
-		if err != nil {
-			log.Printf("temp link JWT generation error: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+		if requireAdmin(w, r) == nil {
 			return
 		}
-
-		link := &TempLink{
-			ID:        linkID,
-			Token:     token,
-			Label:     req.Label,
-			CreatedAt: time.Now(),
-			ExpiresAt: expiresAt,
+		label, ok := readTempLinkLabel(w, r)
+		if !ok {
+			return
 		}
-
-		linkStore.mu.Lock()
-		linkStore.links[linkID] = link
-		linkStore.mu.Unlock()
-
-		siteURL := getSiteURL(db)
-		url := fmt.Sprintf("%s/view/%s", siteURL, token)
-
-		log.Printf("temp link created: id=%s label=%s expires=%s", linkID, req.Label, expiresAt.Format(time.RFC3339))
-
-		writeJSON(w, http.StatusCreated, map[string]any{
-			"id":        linkID,
-			"token":     token,
-			"url":       url,
-			"expiresAt": expiresAt.Format(time.RFC3339),
-		})
+		issueTempLink(db, w, label)
 	}
+}
+
+// handleInternalCreateTempLink handles POST /internal/links/temp — unauthenticated,
+// reachable only from the Docker network (the reverse proxy does not forward
+// /internal/*). Used by notifier to attach a CCTV view link to crisis alerts.
+func handleInternalCreateTempLink(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		label, ok := readTempLinkLabel(w, r)
+		if !ok {
+			return
+		}
+		issueTempLink(db, w, label)
+	}
+}
+
+// readTempLinkLabel decodes the optional {label} body. Returns ok=false (and
+// writes a 400) only on malformed JSON.
+func readTempLinkLabel(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var req struct {
+		Label string `json:"label"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return "", false
+		}
+	}
+	return req.Label, true
+}
+
+// issueTempLink mints a 24h temp-link JWT, stores it in memory, and writes the
+// 201 response.
+func issueTempLink(db *sql.DB, w http.ResponseWriter, label string) {
+	linkID := generateUUID()
+	expiresAt := time.Now().Add(24 * time.Hour)
+
+	token, err := generateTempLinkJWT(linkID, expiresAt)
+	if err != nil {
+		log.Printf("temp link JWT generation error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+		return
+	}
+
+	link := &TempLink{
+		ID:        linkID,
+		Token:     token,
+		Label:     label,
+		CreatedAt: time.Now(),
+		ExpiresAt: expiresAt,
+	}
+
+	linkStore.mu.Lock()
+	linkStore.links[linkID] = link
+	linkStore.mu.Unlock()
+
+	siteURL := getSiteURL(db)
+	url := fmt.Sprintf("%s/view/%s", siteURL, token)
+
+	log.Printf("temp link created: id=%s label=%s expires=%s", linkID, label, expiresAt.Format(time.RFC3339))
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":        linkID,
+		"token":     token,
+		"url":       url,
+		"expiresAt": expiresAt.Format(time.RFC3339),
+	})
 }
 
 // handleVerifyTempLink handles GET /api/links/verify/{token}
