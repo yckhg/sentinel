@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -1215,7 +1216,12 @@ func main() {
 	reloadClient := &http.Client{Timeout: 10 * time.Second}
 	var cameras []CameraInfo
 	for attempt := 1; attempt <= 10; attempt++ {
-		cameras = fetchCameras(reloadClient, webBackendURL)
+		fetched, ferr := fetchCameras(reloadClient, webBackendURL)
+		if ferr != nil {
+			log.Printf("Failed to fetch cameras (attempt %d/10): %v", attempt, ferr)
+		} else {
+			cameras = fetched
+		}
 		if len(cameras) > 0 {
 			break
 		}
@@ -1268,7 +1274,18 @@ func main() {
 	mux.HandleFunc("POST /api/cameras/reload", func(w http.ResponseWriter, r *http.Request) {
 		log.Println("[reload] Reload triggered, fetching cameras from web-backend")
 
-		cameras := fetchCameras(reloadClient, webBackendURL)
+		cameras, err := fetchCameras(reloadClient, webBackendURL)
+		if err != nil {
+			// web-backend unreachable / untrustworthy: preserve the existing
+			// recorder set rather than tearing everything down. Only an explicit
+			// 200 + array (possibly empty) is allowed to drive a reconcile that
+			// stops recorders (⚠️ 8). Aligns with cctv-adapter (502) / youtube-adapter (500).
+			log.Printf("[reload] Failed to fetch cameras, preserving existing recorders: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			json.NewEncoder(w).Encode(map[string]string{"error": "failed to fetch cameras from web-backend"})
+			return
+		}
 		manager.Reload(cameras)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1612,13 +1629,24 @@ func main() {
 }
 
 // fetchCameras retrieves the camera list from web-backend.
-func fetchCameras(client *http.Client, webBackendURL string) []CameraInfo {
+//
+// A trustworthy result (non-nil error == nil) is returned ONLY on an explicit
+// HTTP 200 with a decodable array body. Connection errors, non-200 status codes,
+// and body-decode failures all return an error so callers can distinguish an
+// "unreachable / untrustworthy" web-backend from a genuine "zero cameras" (which
+// is an explicit 200 + empty array). This prevents a transient web-backend outage
+// from being misread as "no cameras" and tearing down every recorder (⚠️ 8).
+func fetchCameras(client *http.Client, webBackendURL string) ([]CameraInfo, error) {
 	resp, err := client.Get(webBackendURL + "/internal/cameras")
 	if err != nil {
-		log.Printf("[fetch] Failed to fetch cameras: %v", err)
-		return nil
+		return nil, fmt.Errorf("fetch cameras: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("fetch cameras: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 
 	var raw []struct {
 		Name       string `json:"name"`
@@ -1628,8 +1656,7 @@ func fetchCameras(client *http.Client, webBackendURL string) []CameraInfo {
 		Enabled    bool   `json:"enabled"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		log.Printf("[fetch] Failed to decode cameras: %v", err)
-		return nil
+		return nil, fmt.Errorf("decode cameras: %w", err)
 	}
 
 	var cameras []CameraInfo
@@ -1644,5 +1671,5 @@ func fetchCameras(client *http.Client, webBackendURL string) []CameraInfo {
 	}
 
 	log.Printf("[fetch] Found %d enabled camera(s)", len(cameras))
-	return cameras
+	return cameras, nil
 }
