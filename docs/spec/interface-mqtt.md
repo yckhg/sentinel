@@ -69,6 +69,9 @@
 - Sentinel(hw-gateway)은 `safety/+/alert`, `safety/+/heartbeat`, `safety/+/event/candidate`, `safety/+/alert/resolved` 4개를 와일드카드 구독한다.
 - H/W는 자기 사이트의 `safety/{내siteId}/cmd/restart`, `safety/{내siteId}/alert/resolved` 2개를 구독한다.
 - 전 토픽 retain `false` — 브로커에 마지막 메시지를 남기지 않는다. 상태는 heartbeat 반복 발행으로만 전달된다.
+- **수신자 측 방어 (receiver-side defense):** 계약이 전 토픽 retain `false`를 보장하므로, hw-gateway는 `safety/#` 어느 토픽에서든 **retained 플래그가 설정된 메시지를 처리하지 않고 드롭한다** (경고 로그 `[RETAINED]`만 남김). retained 메시지는 정의상 계약 위반이거나 브로커에 잔존한 stale 메시지이므로 상태를 구동해서는 안 된다. 특히 `alert/resolved`에서 이 방어가 사람 게이트 원칙을 지킨다 — 잔존 retained resolve가 재구독 시 재전달되어 최근 미해결 incident를 사람 개입 없이 자동 해소하는 것을 차단한다.
+
+> **운영 메모 (root cause):** 이 방어는 수신 측 안전장치일 뿐이며 근본 원인은 **발행자가 retain=1로 발행**하는 것이다 (예: VOICE-01 펌웨어가 `safety/site1/alert/resolved`에 retain=1 발행 → sentinel-voice 저장소에서 수정). 이미 브로커에 잔존 중인 retained 메시지는 별도로 비워야 한다: `mosquitto_pub -r -n -t safety/site1/alert/resolved` (빈 payload를 retain으로 발행해 retained 슬롯을 clear). 이는 브로커 상태를 바꾸는 mutating 작업이므로 운영자 승인 후 실행한다.
 
 ---
 
@@ -527,6 +530,18 @@ db-query "SELECT resolved_at FROM incidents WHERE site_id='site1' ORDER BY id DE
 # 대상 디바이스 관측:
 # OK: LED/부저 OFF 유지, 에러 로그 없음, 이후 새 alert 감지/발행 가능
 # NOK: GPIO 에러, 상태 머신 stuck, 감지 루틴 중복 기동
+```
+
+**RS-6. retained resolve 드롭 (OK: retain 메시지가 incident를 자동 해소하지 않음)**
+```bash
+# 사전: A-1 유형으로 미해결 incident를 하나 만들어 둔다 (resolved_at IS NULL).
+# 계약 위반을 시뮬레이션: -r 플래그로 retain=1 sensor_button resolve 발행.
+docker compose exec mosquitto mosquitto_pub -h localhost -q 1 -r -t 'safety/site1/alert/resolved' \
+  -m '{"incidentId":0,"siteId":"site1","resolvedAt":"2026-07-02T10:33:00Z","resolvedBy":{"kind":"sensor_button","id":"SPEC-01","label":"SPEC-01 reset 버튼"}}'
+db-query "SELECT resolved_at FROM incidents WHERE site_id='site1' ORDER BY id DESC LIMIT 1;"
+# OK: resolved_at NULL 유지 + hw-gateway 로그에 [RETAINED] 경고 (retained 메시지 드롭)
+# NOK: resolved_at 갱신됨 (retained 메시지가 자동 해소를 구동)
+# 정리(운영 승인 필요): mosquitto_pub -r -n -t safety/site1/alert/resolved 로 잔존 retained 슬롯 clear
 ```
 
 ---

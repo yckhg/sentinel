@@ -296,7 +296,24 @@ func subscribeTopics(client mqtt.Client, notifierURL, webBackendURL string) {
 	}
 }
 
+// isRetainedMessage returns true (and logs a warning) if msg carries the MQTT
+// retained flag. The Sentinel contract fixes retain=false on ALL safety/# topics
+// (docs/spec/interface-mqtt.md), so any retained message is stale/contract-violating
+// and must never drive state — most critically the alert/resolved auto-resolve path,
+// where a stale retained resolve would auto-close the latest unresolved incident
+// without a human gate. Receiver-side defense: drop + log, never process.
+func isRetainedMessage(msg mqtt.Message) bool {
+	if msg.Retained() {
+		log.Printf("[RETAINED] ignoring retained message on topic=%s (contract: retain=false)", msg.Topic())
+		return true
+	}
+	return false
+}
+
 func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
+	if isRetainedMessage(msg) {
+		return
+	}
 	log.Printf("[MQTT] Received alert on topic: %s", msg.Topic())
 
 	var alert AlertPayload
@@ -495,6 +512,9 @@ func forwardToWebBackend(webBackendURL string, alert *AlertPayload) bool {
 }
 
 func handleHeartbeat(msg mqtt.Message, webBackendURL string) {
+	if isRetainedMessage(msg) {
+		return
+	}
 	log.Printf("[MQTT] Received heartbeat on topic: %s", msg.Topic())
 
 	var hb HeartbeatPayload
@@ -548,6 +568,9 @@ func handleHeartbeat(msg mqtt.Message, webBackendURL string) {
 // Best-effort: logs the candidate event and notifies web-backend via POST /api/devices/seen.
 // No incident is created and notifier is not called.
 func handleCandidate(msg mqtt.Message, webBackendURL string) {
+	if isRetainedMessage(msg) {
+		return
+	}
 	var candidate CandidatePayload
 	if err := json.Unmarshal(msg.Payload(), &candidate); err != nil {
 		log.Printf("[MQTT] Malformed JSON candidate payload on %s: %v", msg.Topic(), err)
@@ -847,6 +870,9 @@ func handleAlertResolvedPublish(w http.ResponseWriter, r *http.Request, mqttClie
 // - resolvedBy.kind == "web"  → ignore (echo of our own publish, no-op).
 // - resolvedBy.kind == "sensor_button" → forward to web-backend POST /api/incidents/{id}/resolve-from-sensor.
 func handleAlertResolvedSubscription(msg mqtt.Message, webBackendURL string) {
+	if isRetainedMessage(msg) {
+		return
+	}
 	log.Printf("[MQTT] Received alert/resolved on topic: %s", msg.Topic())
 
 	var payload AlertResolvedPayload

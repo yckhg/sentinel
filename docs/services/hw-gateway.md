@@ -22,6 +22,7 @@ H/W(MQTT)와 S/W(HTTP) 사이의 유일한 접점. MQTT에서 받은 crisis/hear
 
 단일 파일: `services/hw-gateway/main.go` (~550 lines).
 - MQTT 클라이언트 초기화 + `safety/+/alert`, `safety/+/heartbeat`, `safety/+/alert/resolved` 구독
+- **retained-message 방어:** 모든 구독 핸들러(alert/heartbeat/candidate/alert-resolved) 진입 즉시 `msg.Retained()`를 검사한다. 계약이 전 `safety/#` 토픽 retain=false를 보장하므로(`docs/spec/interface-mqtt.md`), retained 플래그가 켜진 메시지는 stale/계약 위반으로 간주해 **처리하지 않고 드롭 + `[RETAINED]` 경고 로그**만 남긴다 (`isRetainedMessage` 공용 헬퍼). non-retained 메시지 흐름은 이전과 완전히 동일.
 - crisis 수신 → notifier와 web-backend로 병렬 forward (goroutine + context timeout)
 - heartbeat → in-memory map 갱신
 - alert/resolved 수신 → `resolvedBy.kind` 분기: `"web"`은 자기 echo로 무시, `"sensor_button"`은 web-backend `POST /api/incidents/{id}/resolve-from-sensor`로 forward
@@ -85,6 +86,7 @@ docker compose logs -f hw-gateway
 - crisis forward는 at-most-once가 아니라 재시도 기반. web-backend는 `alertId`로 DB dedup하고, 본 서비스도 `alertId` 단위 in-memory dedup을 둔다. in-memory dedup 등록은 web-backend로의 forward가 2xx로 성공한 **이후에만** 이뤄지므로, forward가 최종 실패(5xx 재시도 소진 등)한 이벤트는 dedup에 막히지 않고 펌웨어 재전송으로 복구될 수 있다.
 - 장비 상태는 휘발성. 재시작 시 모두 "unknown" → 첫 heartbeat까지 dead.
 - MQTT 스펙 변경 시 `.claude/hooks/mqtt-spec-sync-check.sh`가 `interfaces/mqtt-publisher-guide.md`와 `main.go` 동시 수정을 강제한다.
+- **Retained-message 자동 해소 방어:** 브로커에 retained resolve 메시지가 잔존하면 hw-gateway 재시작/재구독 시마다 재전달되어 최근 미해결 incident를 사람 개입 없이 자동 해소할 위험이 있다(사람 게이트 위반). 이를 위해 hw-gateway는 retained 메시지를 드롭한다(위 "retained-message 방어" 참조). **근본 원인은 발행자 측 retain=1 발행**이며(sentinel-voice 펌웨어에서 수정), 이미 브로커에 잔존 중인 retained 메시지는 운영자가 `mosquitto_pub -r -n -t safety/site1/alert/resolved`로 별도 clear해야 한다 (브로커 상태 변경 = 승인 필요 작업).
 
 ## Storage / State
 
