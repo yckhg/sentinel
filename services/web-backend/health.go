@@ -225,6 +225,12 @@ func (m *HealthMonitor) evaluateSensors() {
 	ctx, cancel := dbCtx(context.Background())
 	defer cancel()
 
+	// Drain the device rows fully and CLOSE the read cursor BEFORE evaluating
+	// transitions, because that evaluation calls recordEvent (an INSERT on the
+	// same *sql.DB). Writing while this cursor is still open would keep the read
+	// connection pinned for the whole loop; under a contended pool the write
+	// would then wait on the reader up to busy_timeout, self-starving the tick.
+	// Materializing first keeps the read connection short-lived.
 	rows, err := m.db.QueryContext(ctx, `
 		SELECT site_id, device_id, alias, datetime(last_seen)
 		FROM devices
@@ -234,16 +240,22 @@ func (m *HealthMonitor) evaluateSensors() {
 		log.Printf("health: query devices error: %v", err)
 		return
 	}
-	defer rows.Close()
-
-	seen := make(map[string]struct{})
-
+	type deviceRow struct{ siteID, deviceID, alias, lastSeenStr string }
+	var devices []deviceRow
 	for rows.Next() {
-		var siteID, deviceID, alias, lastSeenStr string
-		if err := rows.Scan(&siteID, &deviceID, &alias, &lastSeenStr); err != nil {
+		var d deviceRow
+		if err := rows.Scan(&d.siteID, &d.deviceID, &d.alias, &d.lastSeenStr); err != nil {
 			log.Printf("health: scan device error: %v", err)
 			continue
 		}
+		devices = append(devices, d)
+	}
+	rows.Close()
+
+	seen := make(map[string]struct{})
+
+	for _, d := range devices {
+		siteID, deviceID, alias, lastSeenStr := d.siteID, d.deviceID, d.alias, d.lastSeenStr
 		entityID := siteID + ":" + deviceID
 		key := KindSensor + "|" + entityID
 		seen[key] = struct{}{}

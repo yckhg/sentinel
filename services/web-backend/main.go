@@ -203,13 +203,22 @@ func initDB(path string) (*sql.DB, error) {
 		return nil, err
 	}
 
-	// SQLite allows only one writer at a time. Cap the pool at a single
-	// connection so concurrent writes serialize inside Go's sql pool (queued,
-	// not failed) — combined with busy_timeout above this makes concurrent
-	// POST /api/incidents lossless instead of racing to SQLITE_BUSY.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
+	// WAL mode (enabled via the DSN above) permits multiple concurrent readers
+	// alongside a single writer, and busy_timeout(5000) makes a contending
+	// writer wait for the lock rather than fail with SQLITE_BUSY. Together these
+	// keep concurrent POST /api/incidents lossless WITHOUT collapsing the pool
+	// to one shared connection.
+	//
+	// A single-connection pool (SetMaxOpenConns(1)) is self-defeating: a
+	// long-lived read cursor — e.g. the health monitor walking the devices
+	// table — holds that one connection for the whole loop, so an interleaved
+	// write on the same goroutine has no second connection to use and blocks
+	// for busy_timeout before failing with "context deadline exceeded", while
+	// every other DB-backed HTTP request stalls behind it. Allow a small pool
+	// so readers and writers get independent connections.
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(8)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 
 	ctx, cancel := dbCtx(context.Background())
 	defer cancel()
