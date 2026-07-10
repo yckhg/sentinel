@@ -10,7 +10,7 @@ if [ "${SPEC_TDD_ALLOW_MUTATING:-0}" != "1" ]; then
 fi
 
 # 승인 시 실행 절차: streaming 재생성 직후(어댑터 push 재개 전) 즉시 조회
-docker compose -f /home/yc/projects/sentinel/docker-compose.yml up -d --force-recreate streaming
+COMPOSE_PROJECT_NAME=sentinel docker compose -f "$(git rev-parse --show-toplevel)/docker-compose.yml" up -d --force-recreate streaming
 sleep 3
 BODY=$(docker exec sentinel-cctv-adapter wget -qO- http://streaming:8080/api/streams)
 echo "body: $BODY"

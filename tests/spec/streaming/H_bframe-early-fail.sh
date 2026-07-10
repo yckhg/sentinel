@@ -17,9 +17,11 @@ fi
 
 KEY="spec-test-bf"
 START=$(date +%s)
-timeout 40 docker run --rm --network sentinel_sentinel-net --entrypoint ffmpeg linuxserver/ffmpeg \
+# 전체 60초 지속(sustain) 완주를 검증한다 — streaming §H / interface-streaming §A1-3 계약.
+# (sibling A1-3_bframe-reject.sh 와 동일한 -t 60 으로 정합.)
+timeout 70 docker run --rm --network sentinel_sentinel-net --entrypoint ffmpeg linuxserver/ffmpeg \
   -re -f lavfi -i "testsrc=size=640x360:rate=15" -f lavfi -i sine \
-  -t 35 -c:v libx264 -pix_fmt yuv420p -profile:v main -bf 2 -g 30 -c:a aac \
+  -t 60 -c:v libx264 -pix_fmt yuv420p -profile:v main -bf 2 -g 30 -c:a aac \
   -f flv "rtmp://streaming:1935/live/${KEY}"
 RC=$?
 ELAPSED=$(( $(date +%s) - START ))
@@ -27,9 +29,9 @@ echo "ffmpeg rc=$RC elapsed=${ELAPSED}s"
 # 허브가 B-frame push를 통과시켰다면: 지속(rc=0)되고 m3u8이 신선하다.
 M=$(docker exec sentinel-streaming stat -c %Y "/tmp/hls/${KEY}/index.m3u8" 2>/dev/null || echo 0)
 NOW=$(date +%s)
-if [ "$RC" -eq 0 ] && [ "$M" -ne 0 ] && [ $((NOW - M)) -le 15 ]; then
-  echo "OK: B-frame push accepted (remux-only, m3u8 fresh) — 허브 코덱 무검사 계약 확인"
+if [ "$RC" -eq 0 ] && [ "$ELAPSED" -ge 55 ] && [ "$M" -ne 0 ] && [ $((NOW - M)) -le 15 ]; then
+  echo "OK: B-frame push accepted & sustained ~${ELAPSED}s (remux-only, m3u8 fresh) — 허브 코덱 무검사 계약 확인 (60s 완주)"
   exit 0
 fi
-echo "NOK: B-frame push rejected/terminated (rc=$RC, m3u8 age=$((NOW-M))s) — nginx-rtmp 동작 변경(코덱 검사 재도입?), 스펙 재검토 필요"
+echo "NOK: B-frame push rejected/terminated (rc=$RC, elapsed=${ELAPSED}s, m3u8 age=$((NOW-M))s) — 60s 완주 실패: nginx-rtmp 동작 변경(코덱 검사 재도입?), 스펙 재검토 필요"
 exit 1
