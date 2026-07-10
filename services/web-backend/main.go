@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -43,6 +44,10 @@ func main() {
 	monitorCtx, monitorCancel := context.WithCancel(context.Background())
 	defer monitorCancel()
 	healthMonitor.Start(monitorCtx)
+
+	// Periodic + size-triggered TRUNCATE checkpoint keeps the -wal file bounded
+	// under load and reclaims it once writes quiesce (WAL hygiene contract).
+	startWALCheckpoint(db, dbPath)
 
 	mux := http.NewServeMux()
 
@@ -218,7 +223,14 @@ func initDB(path string) (*sql.DB, error) {
 	// so readers and writers get independent connections.
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(8)
-	db.SetConnMaxIdleTime(5 * time.Minute)
+	// A long-lived pooled reader connection can keep pinning an old WAL snapshot,
+	// which prevents a TRUNCATE checkpoint from advancing and lets the -wal file
+	// grow without bound under sustained writer+reader load. Recycling connections
+	// on a short lifetime forces those readers to drop their snapshot so the
+	// checkpoint can reclaim frames. (Idle time is also shortened so an idle reader
+	// does not sit on a snapshot for minutes.)
+	db.SetConnMaxLifetime(15 * time.Second)
+	db.SetConnMaxIdleTime(20 * time.Second)
 
 	ctx, cancel := dbCtx(context.Background())
 	defer cancel()
@@ -230,4 +242,107 @@ func initDB(path string) (*sql.DB, error) {
 
 	log.Printf("database initialized at %s", path)
 	return db, nil
+}
+
+const (
+	// walCheckpointInterval is the unconditional periodic TRUNCATE cadence — it
+	// reclaims the -wal file once writes quiesce even if no size threshold fires.
+	walCheckpointInterval = 1 * time.Second
+	// walSizeCheckInterval is how often the -wal file size is polled for the
+	// size-triggered fast path.
+	walSizeCheckInterval = 250 * time.Millisecond
+	// walSizeThreshold is the -wal byte size that triggers an immediate TRUNCATE
+	// checkpoint, so a writer burst is reclaimed before it can push the file past
+	// the fixed bound. Kept well under the 5 MB recommended ceiling.
+	walSizeThreshold = int64(2 * 1024 * 1024)
+)
+
+// walDirty is set by every write handler (via markWALDirty) and cleared after a
+// successful periodic TRUNCATE. It lets the 1s ticker SKIP the checkpoint at zero
+// write load instead of touching the DB every second forever. It is only an
+// optimization hint: the ticker also checkpoints whenever the -wal file is still
+// non-empty (see startWALCheckpoint), so no unmarked write path can cause a
+// missed checkpoint and the reclaim guarantee holds even if a handler forgets to
+// mark. When in doubt we err toward checkpointing.
+var walDirty atomic.Bool
+
+// markWALDirty records that a write occurred since the last successful TRUNCATE
+// checkpoint. Called from write handlers after a successful mutating statement.
+func markWALDirty() { walDirty.Store(true) }
+
+// startWALCheckpoint bounds and reclaims the -wal file. wal_autocheckpoint (DSN)
+// only performs PASSIVE checkpoints, which never truncate the file and stall
+// behind any reader still pinned to an old WAL snapshot; under sustained
+// writer+reader load the -wal file can grow past its ceiling and never reclaim
+// space after the load stops. Two goroutines drive TRUNCATE checkpoints (which
+// move committed frames into the main DB and reset the WAL toward zero):
+//
+//  1. a 1s ticker — guarantees reclaim once writes quiesce. It is gated so that
+//     at zero write load (no writes since the last TRUNCATE AND the -wal file
+//     already reclaimed to empty) it skips the checkpoint entirely instead of
+//     hammering the DB every second. The gate is deliberately conservative: it
+//     fires on EITHER a write mark OR a non-empty -wal file, so a still-pinned
+//     WAL snapshot (e.g. an idle pooled reader) keeps getting TRUNCATE attempts
+//     until it is actually reclaimed to zero — preserving reclaim-under-idle-
+//     readers. Only the provably-quiescent case (no marks + empty -wal) is
+//     skipped, where a checkpoint would be a guaranteed no-op.
+//  2. a 250ms size sampler — the moment the -wal file exceeds walSizeThreshold
+//     it forces a TRUNCATE, so a writer burst is reclaimed before it overshoots
+//     the bound (the timer alone cannot keep up with a burst). Left UNGATED: it
+//     only fires when the file is already over threshold, which itself proves
+//     writes occurred, so gating would add nothing but risk.
+//
+// Combined with short connection lifetimes (so readers release their WAL
+// snapshot and let the checkpoint advance), this keeps the WAL within a fixed
+// bound even under adversarial writer+reader concurrency. Every checkpoint is
+// best-effort: a transient SQLITE_BUSY (a checkpoint racing an in-flight writer)
+// is logged and retried on the next tick, never surfaced to a request.
+func startWALCheckpoint(db *sql.DB, dbPath string) {
+	walPath := dbPath + "-wal"
+	checkpoint := func() {
+		ctx, cancel := dbCtx(context.Background())
+		if _, err := db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			log.Printf("wal checkpoint(TRUNCATE) error: %v", err)
+		}
+		cancel()
+	}
+	// walNeedsCheckpoint reports whether a periodic TRUNCATE could still do useful
+	// work. Consuming the dirty mark first (Swap) means a write racing in during a
+	// checkpoint re-arms the flag for the next tick. The -wal size is the
+	// authoritative backstop: after a TRUNCATE the file is reset to 0 bytes, so a
+	// non-empty -wal proves frames remain unreclaimed (either a fresh write not yet
+	// marked, or a pinned snapshot the previous TRUNCATE could not advance past).
+	// We keep checkpointing until it reaches zero.
+	walNeedsCheckpoint := func() bool {
+		if walDirty.Swap(false) {
+			return true
+		}
+		fi, err := os.Stat(walPath)
+		if err != nil {
+			// No -wal file yet => nothing to reclaim. Any other stat error: err
+			// toward checkpointing (a spurious TRUNCATE is harmless).
+			return !os.IsNotExist(err)
+		}
+		return fi.Size() > 0
+	}
+	// Periodic gated TRUNCATE.
+	go func() {
+		ticker := time.NewTicker(walCheckpointInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			if walNeedsCheckpoint() {
+				checkpoint()
+			}
+		}
+	}()
+	// Size-triggered fast path (ungated).
+	go func() {
+		ticker := time.NewTicker(walSizeCheckInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			if fi, err := os.Stat(walPath); err == nil && fi.Size() > walSizeThreshold {
+				checkpoint()
+			}
+		}
+	}()
 }

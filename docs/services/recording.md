@@ -83,7 +83,7 @@ docker compose logs -f recording
 - 세그먼트 파일명은 `%Y%m%d_%H%M%S.ts` UTC 기준. 시간 범위 쿼리는 ISO8601로 받지만 내부 비교는 파일명 파싱.
 - FFmpeg watchdog은 조용히 멈춘 프로세스를 복구하는 핵심. 로그에서 `FFmpeg output timeout` 메시지 확인.
 - 0바이트 `.ts` 세그먼트(네트워크 단절 등)는 별도 정리 로직 존재 (US-003).
-- segment는 `-c copy`이므로 streaming의 B-frame 제약이 그대로 적용 — 이미 streaming이 받은 스트림이면 문제 없음.
+- segment는 `-c copy`(무변환 pull·녹화)이므로 streaming이 받은 스트림의 코덱을 그대로 저장한다. streaming이 B-frame 포함 H.264를 수용·서빙하므로 mp4 세그먼트도 B-frame을 포함할 수 있으며(mp4는 B-frame 정상 지원), 이미 streaming이 받은 스트림이면 문제 없음.
 
 ## Storage / State
 

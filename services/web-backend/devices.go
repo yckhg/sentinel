@@ -103,6 +103,7 @@ func handleSeenDevice(db *sql.DB) http.HandlerFunc {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 			return
 		}
+		markWALDirty()
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}

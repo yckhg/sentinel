@@ -82,6 +82,11 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    tmpfs:
+      # HLS output is volatile: tmpfs wipes /tmp/hls on every restart AND recreate,
+      # so no stale playlist survives to falsely report active:true after a restart
+      # (streaming §단언 G / interface-streaming §계약 4 A4-6).
+      - /tmp/hls
     networks:
       - sentinel-net
     # ports: internal only

@@ -56,13 +56,12 @@ docker compose logs -f cctv-adapter
 
 ## Outbound Calls
 
-- **RTMP push** → `rtmp://streaming:1935/live/{streamKey}` (H.264 no B-frame + AAC, FLV). 스펙은 [../interfaces/streaming-api.md](../interfaces/streaming-api.md) 참조.
+- **RTMP push** → `rtmp://streaming:1935/live/{streamKey}` (H.264 + AAC, FLV). 스펙은 [../interfaces/streaming-api.md](../interfaces/streaming-api.md) 참조 (허브는 B-frame 포함 H.264도 수용).
 - **web-backend** `GET {WEB_BACKEND_URL}/internal/cameras` — reload 시 카메라 목록 조회 (응답: `[{id, streamKey, rtspUrl, enabled}]`)
 
 ## FFmpeg Invocation
 
-기본은 `-c copy -f flv` (대부분의 산업용 CCTV는 baseline H.264, no B-frame).
-카메라가 B-frame을 출력하면 다음으로 전환 필요:
+기본은 `-c copy -f flv` — 소스가 H.264 + AAC면 B-frame 유무와 무관하게 그대로 pass-through한다(허브가 B-frame 수용, CPU~0). 재인코딩이 필요한 경우는 **코덱 정규화**(비-H.264/HEVC → H.264)나 저지연을 위한 B-frame 제거일 때뿐이며, 그때만 다음으로 전환:
 ```
 -c:v libx264 -tune zerolatency -bf 0 -c:a aac -f flv
 ```

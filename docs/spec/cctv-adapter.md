@@ -45,7 +45,7 @@ RTSP CCTV 카메라의 영상을 Sentinel streaming 서버의 RTMP 입력 규격
 ### 3. RTSP 스트림
 
 - 각 카메라의 RTSP URL에서 pull. 전송은 TCP.
-- 전제조건: 카메라 출력이 B-frame 없는 H.264일 것 (copy 모드 pass-through의 조건 — B-frame 금지 규격은 `docs/spec/interface-streaming.md` §계약 1 소유).
+- 전제조건: 카메라 출력이 H.264 + AAC일 것 (copy 모드 pass-through의 조건 — B-frame 유무는 무관하며 허브가 수용. 입력 규격은 `docs/spec/interface-streaming.md` §계약 1 소유). 비-H.264(HEVC 등) 소스는 어댑터가 정규화 재인코딩해야 브라우저 재생 가능.
 
 ### 4. 환경변수
 
@@ -60,7 +60,7 @@ RTSP CCTV 카메라의 영상을 Sentinel streaming 서버의 RTMP 입력 규격
 
 ### 1. RTMP push (주 산출물)
 
-- 대상: `{STREAMING_RTMP_URL}/{streamKey}` — 규격(FLV 컨테이너, H.264 + AAC, B-frame 금지)은 `docs/spec/interface-streaming.md` §계약 1 (RTMP 입력)이 소유하며, 본 서비스는 그 규격을 준수하는 push를 보장한다.
+- 대상: `{STREAMING_RTMP_URL}/{streamKey}` — 규격(FLV 컨테이너, H.264 + AAC)은 `docs/spec/interface-streaming.md` §계약 1 (RTMP 입력)이 소유하며(허브는 B-frame 포함 H.264도 수용), 본 서비스는 그 규격을 준수하는 push를 보장한다.
 - 트랜스코딩 없음: 출력 스트림의 비디오/오디오 코덱은 입력 RTSP 스트림과 동일하다(codec copy).
 
 ### 2. HTTP API (내부 8080)

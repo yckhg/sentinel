@@ -134,6 +134,77 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+// --- Secret Masking (§출력 9 / assertion K) ---
+//
+// Credentials (KakaoTalk/SMS API + secret keys, SMTP password) must never appear
+// in plaintext in any log line, error message or dispatch summary — on both the
+// success and the failure path. The known structural leak is that NHN SMS embeds
+// NHN_SMS_APP_KEY directly in the request URL, so any net/http transport error
+// (an *url.Error carrying the full URL) would print the key when logged with %v.
+//
+// Defense is two-layered:
+//  1. `scrub` replaces every configured secret plaintext with a masked form.
+//  2. `logf` routes every log line through `scrub`, so no code path can leak a
+//     credential to `docker compose logs notifier`, regardless of how the string
+//     was assembled. Error strings that also travel off-box (system-alarm payload)
+//     are scrubbed at their source as well.
+
+// secretValues holds the plaintext credential values to redact from all output.
+// Populated once at startup from Config; only values long enough to be genuine
+// credentials are registered (short/empty values would over-match benign text).
+var secretValues []string
+
+func initSecretScrubber(cfg Config) {
+	candidates := []string{
+		cfg.KakaoAPIKey,
+		cfg.KakaoSenderKey,
+		cfg.NHNAppKey,
+		cfg.NHNSecretKey,
+		cfg.SMTPPass,
+	}
+	secretValues = secretValues[:0]
+	for _, c := range candidates {
+		if len(c) >= 4 { // avoid redacting trivially short values
+			secretValues = append(secretValues, c)
+		}
+	}
+}
+
+// maskSecret keeps a short prefix for diagnostics and replaces the rest with "***".
+// The exposed prefix is capped at min(4, len/4) so short credentials never leak a
+// large fraction of their bytes (an 8-char secret exposes at most 2 chars; anything
+// under 4 chars is fully redacted). §9 permits "keep a leading part, mask the rest".
+func maskSecret(s string) string {
+	if s == "" {
+		return ""
+	}
+	n := len(s) / 4
+	if n > 4 {
+		n = 4
+	}
+	if n == 0 {
+		return "***"
+	}
+	return s[:n] + "***"
+}
+
+// scrub redacts any occurrence of a configured secret plaintext from s.
+func scrub(s string) string {
+	for _, sec := range secretValues {
+		if sec == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, sec, maskSecret(sec))
+	}
+	return s
+}
+
+// logf is the single logging entry point; every line is scrubbed of credentials
+// before it is written, so no credential can leak into the notifier logs.
+func logf(format string, args ...interface{}) {
+	log.Print(scrub(fmt.Sprintf(format, args...)))
+}
+
 // --- HTTP Client ---
 
 var httpClient = &http.Client{
@@ -150,13 +221,13 @@ var httpClient = &http.Client{
 func fetchSiteURL(cfg Config) string {
 	resp, err := httpClient.Get(cfg.WebBackendURL + "/internal/settings/site_url")
 	if err != nil {
-		log.Printf("[settings] Failed to fetch site_url: %v", err)
+		logf("[settings] Failed to fetch site_url: %v", err)
 		return strings.TrimRight(cfg.FrontendURL, "/")
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[settings] site_url returned status %d", resp.StatusCode)
+		logf("[settings] site_url returned status %d", resp.StatusCode)
 		return strings.TrimRight(cfg.FrontendURL, "/")
 	}
 
@@ -164,7 +235,7 @@ func fetchSiteURL(cfg Config) string {
 		Value string `json:"value"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		log.Printf("[settings] Failed to decode site_url response: %v", err)
+		logf("[settings] Failed to decode site_url response: %v", err)
 		return strings.TrimRight(cfg.FrontendURL, "/")
 	}
 
@@ -222,7 +293,7 @@ func requestTempLink(cfg Config, label string) (*TempLinkResponse, error) {
 
 func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
 	if cfg.KakaoAPIURL == "" || cfg.KakaoAPIKey == "" {
-		log.Printf("[kakao] API not configured, skipping KakaoTalk for %s (%s)", contact.Name, contact.Phone)
+		logf("[kakao] API not configured, skipping KakaoTalk for %s (%s)", contact.Name, contact.Phone)
 		return fmt.Errorf("KakaoTalk API not configured")
 	}
 
@@ -261,7 +332,7 @@ func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink str
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("kakao API call: %w", err)
+		return fmt.Errorf("kakao API call: %s", scrub(err.Error()))
 	}
 	defer resp.Body.Close()
 
@@ -270,7 +341,7 @@ func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink str
 		return fmt.Errorf("kakao API error: status %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	log.Printf("[kakao] Successfully sent to %s (%s)", contact.Name, contact.Phone)
+	logf("[kakao] Successfully sent to %s (%s)", contact.Name, contact.Phone)
 	return nil
 }
 
@@ -278,7 +349,7 @@ func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink str
 
 func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
 	if cfg.NHNAppKey == "" || cfg.NHNSecretKey == "" {
-		log.Printf("[sms] NHN Cloud SMS not configured, skipping SMS for %s (%s)", contact.Name, contact.Phone)
+		logf("[sms] NHN Cloud SMS not configured, skipping SMS for %s (%s)", contact.Name, contact.Phone)
 		return fmt.Errorf("NHN Cloud SMS not configured")
 	}
 
@@ -315,7 +386,11 @@ func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) e
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("SMS API call: %w", err)
+		// The request URL embeds NHN_SMS_APP_KEY; a transport error (*url.Error)
+		// carries the full URL, so scrub it here so the credential cannot leak
+		// through any downstream consumer of this error (logs, system-alarm
+		// payload, dispatch result).
+		return fmt.Errorf("SMS API call: %s", scrub(err.Error()))
 	}
 	defer resp.Body.Close()
 
@@ -324,7 +399,7 @@ func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) e
 		return fmt.Errorf("SMS API error: status %d, body: %s", resp.StatusCode, string(respBody))
 	}
 
-	log.Printf("[sms] Successfully sent to %s (%s)", contact.Name, contact.Phone)
+	logf("[sms] Successfully sent to %s (%s)", contact.Name, contact.Phone)
 	return nil
 }
 
@@ -332,7 +407,7 @@ func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) e
 
 func sendCrisisEmail(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
 	if cfg.SMTPHost == "" || cfg.SMTPFrom == "" {
-		log.Printf("[email] SMTP not configured, skipping email for %s (%s)", contact.Name, contact.Email)
+		logf("[email] SMTP not configured, skipping email for %s (%s)", contact.Name, contact.Email)
 		return fmt.Errorf("SMTP not configured")
 	}
 
@@ -374,7 +449,7 @@ func sendCrisisEmail(cfg Config, contact Contact, alert AlertPayload, cctvLink s
 		return fmt.Errorf("crisis email to %s: %w", contact.Email, err)
 	}
 
-	log.Printf("[email] Crisis alert sent to %s (%s)", contact.Name, contact.Email)
+	logf("[email] Crisis alert sent to %s (%s)", contact.Name, contact.Email)
 	return nil
 }
 
@@ -390,32 +465,34 @@ func sendSystemAlarm(cfg Config, contact Contact, alert AlertPayload, kakaoErr, 
 			"contactPhone": contact.Phone,
 			"siteId":      alert.SiteID,
 			"deviceId":    alert.DeviceID,
-			"kakaoError":  kakaoErr.Error(),
-			"smsError":    smsErr.Error(),
+			// Scrub in case an error string carries a credential (defense in depth):
+			// this payload travels to web-backend and is broadcast to admin clients.
+			"kakaoError":  scrub(kakaoErr.Error()),
+			"smsError":    scrub(smsErr.Error()),
 			"timestamp":   time.Now().UTC().Format(time.RFC3339),
 		},
 	}
 
 	payload, err := json.Marshal(alarm)
 	if err != nil {
-		log.Printf("[alarm] Failed to marshal alarm payload: %v", err)
+		logf("[alarm] Failed to marshal alarm payload: %v", err)
 		return
 	}
 
 	resp, err := httpClient.Post(cfg.WebBackendURL+"/internal/alarms", "application/json", bytes.NewReader(payload))
 	if err != nil {
-		log.Printf("[alarm] Failed to send system alarm: %v", err)
+		logf("[alarm] Failed to send system alarm: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
-		log.Printf("[alarm] System alarm failed: status %d, body: %s", resp.StatusCode, string(respBody))
+		logf("[alarm] System alarm failed: status %d, body: %s", resp.StatusCode, string(respBody))
 		return
 	}
 
-	log.Printf("[alarm] System alarm sent for contact %s (%s) — both KakaoTalk and SMS failed", contact.Name, contact.Phone)
+	logf("[alarm] System alarm sent for contact %s (%s) — both KakaoTalk and SMS failed", contact.Name, contact.Phone)
 }
 
 // --- Recording Archive (Two-Phase) ---
@@ -424,7 +501,7 @@ func sendSystemAlarm(cfg Config, contact Contact, alert AlertPayload, kakaoErr, 
 // Protects segments from (incident_time - 1h) for all cameras. Finalization happens on incident resolution.
 func requestArchiveProtect(cfg Config, alert AlertPayload) {
 	if cfg.RecordingURL == "" {
-		log.Printf("[archive] Recording URL not configured, skipping protect request")
+		logf("[archive] Recording URL not configured, skipping protect request")
 		return
 	}
 
@@ -433,7 +510,7 @@ func requestArchiveProtect(cfg Config, alert AlertPayload) {
 	if err != nil {
 		incidentTime, err = time.Parse("2006-01-02 15:04:05", alert.Timestamp)
 		if err != nil {
-			log.Printf("[archive] Cannot parse incident timestamp %q: %v", alert.Timestamp, err)
+			logf("[archive] Cannot parse incident timestamp %q: %v", alert.Timestamp, err)
 			return
 		}
 	}
@@ -441,7 +518,7 @@ func requestArchiveProtect(cfg Config, alert AlertPayload) {
 	// Fetch camera list to get all stream keys
 	resp, err := httpClient.Get(cfg.WebBackendURL + "/internal/cameras")
 	if err != nil {
-		log.Printf("[archive] Failed to fetch cameras: %v", err)
+		logf("[archive] Failed to fetch cameras: %v", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -451,7 +528,7 @@ func requestArchiveProtect(cfg Config, alert AlertPayload) {
 		Enabled   bool   `json:"enabled"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&cameras); err != nil {
-		log.Printf("[archive] Failed to decode cameras: %v", err)
+		logf("[archive] Failed to decode cameras: %v", err)
 		return
 	}
 
@@ -463,7 +540,7 @@ func requestArchiveProtect(cfg Config, alert AlertPayload) {
 	}
 
 	if len(streamKeys) == 0 {
-		log.Printf("[archive] No enabled cameras, skipping protect")
+		logf("[archive] No enabled cameras, skipping protect")
 		return
 	}
 
@@ -478,22 +555,22 @@ func requestArchiveProtect(cfg Config, alert AlertPayload) {
 
 	payload, err := json.Marshal(protectReq)
 	if err != nil {
-		log.Printf("[archive] Failed to marshal protect request: %v", err)
+		logf("[archive] Failed to marshal protect request: %v", err)
 		return
 	}
 
 	protectResp, err := httpClient.Post(cfg.RecordingURL+"/api/archives/protect", "application/json", bytes.NewReader(payload))
 	if err != nil {
-		log.Printf("[archive] Failed to send protect request: %v", err)
+		logf("[archive] Failed to send protect request: %v", err)
 		return
 	}
 	defer protectResp.Body.Close()
 
 	if protectResp.StatusCode >= 200 && protectResp.StatusCode < 300 {
-		log.Printf("[archive] Protect request accepted for incident %s (%d cameras)", incidentID, len(streamKeys))
+		logf("[archive] Protect request accepted for incident %s (%d cameras)", incidentID, len(streamKeys))
 	} else {
 		body, _ := io.ReadAll(protectResp.Body)
-		log.Printf("[archive] Protect request failed: status %d, body: %s", protectResp.StatusCode, string(body))
+		logf("[archive] Protect request failed: status %d, body: %s", protectResp.StatusCode, string(body))
 	}
 }
 
@@ -503,28 +580,28 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 	// 1. Fetch contacts from web-backend
 	contacts, err := fetchContacts(cfg)
 	if err != nil {
-		log.Printf("[notify] Failed to fetch contacts: %v", err)
+		logf("[notify] Failed to fetch contacts: %v", err)
 		return 0, nil
 	}
 
 	if len(contacts) == 0 {
-		log.Printf("[notify] No contacts configured, skipping notification")
+		logf("[notify] No contacts configured, skipping notification")
 		return 0, nil
 	}
 
-	log.Printf("[notify] Fetched %d contacts for alert from site %s", len(contacts), alert.SiteID)
+	logf("[notify] Fetched %d contacts for alert from site %s", len(contacts), alert.SiteID)
 
 	// 2. Request temporary CCTV link (degraded mode if fails)
 	cctvLink := ""
 	label := fmt.Sprintf("Crisis alert %s", alert.Timestamp)
 	tempLink, err := requestTempLink(cfg, label)
 	if err != nil {
-		log.Printf("[notify] Failed to get temp link (degraded mode): %v", err)
+		logf("[notify] Failed to get temp link (degraded mode): %v", err)
 	} else {
 		// Construct full URL using site_url from settings (falls back to FRONTEND_URL)
 		siteURL := fetchSiteURL(cfg)
 		cctvLink = fmt.Sprintf("%s/view/%s", siteURL, tempLink.Token)
-		log.Printf("[notify] Temp CCTV link created: %s (expires %s)", cctvLink, tempLink.ExpiresAt)
+		logf("[notify] Temp CCTV link created: %s (expires %s)", cctvLink, tempLink.ExpiresAt)
 	}
 
 	// 3. Send to all contacts in parallel with fallback chain: KakaoTalk → SMS → Web alarm
@@ -532,10 +609,10 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 	kakaoEnabled := os.Getenv("KAKAO_ENABLED") == "true"
 	smsEnabled := os.Getenv("SMS_ENABLED") == "true"
 	if !kakaoEnabled {
-		log.Printf("[notify] KakaoTalk disabled (KAKAO_ENABLED=false), skipping Kakao channel")
+		logf("[notify] KakaoTalk disabled (KAKAO_ENABLED=false), skipping Kakao channel")
 	}
 	if !smsEnabled {
-		log.Printf("[notify] SMS disabled (SMS_ENABLED=false), skipping SMS channel")
+		logf("[notify] SMS disabled (SMS_ENABLED=false), skipping SMS channel")
 	}
 
 	var wg sync.WaitGroup
@@ -548,9 +625,9 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 			go func(c Contact) {
 				defer wg.Done()
 				if err := sendCrisisEmail(cfg, c, alert, cctvLink); err != nil {
-					log.Printf("[notify] Email FAILED for %s (%s): %v", c.Name, c.Email, err)
+					logf("[notify] Email FAILED for %s (%s): %v", c.Name, c.Email, err)
 				} else {
-					log.Printf("[notify] Email SUCCESS for %s (%s)", c.Name, c.Email)
+					logf("[notify] Email SUCCESS for %s (%s)", c.Name, c.Email)
 				}
 			}(contact)
 		}
@@ -567,40 +644,46 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 			// Step 1: Try KakaoTalk (if enabled)
 			var kakaoErr error
 			if !kakaoEnabled {
+				// Disabled channel: never call sendKakaoTalk (no external send
+				// attempt is logged); record the skip and proceed to the next step.
 				kakaoErr = fmt.Errorf("KakaoTalk disabled (KAKAO_ENABLED=false)")
+				logf("[notify] KakaoTalk skipped for %s (%s) — channel disabled, proceeding to SMS/fallback", c.Name, c.Phone)
 			} else {
 				kakaoErr = sendKakaoTalk(cfg, c, alert, cctvLink)
 				if kakaoErr == nil {
 					result.Channel = "kakaotalk"
 					result.Success = true
-					log.Printf("[notify] KakaoTalk SUCCESS for %s (%s)", c.Name, c.Phone)
+					logf("[notify] KakaoTalk SUCCESS for %s (%s)", c.Name, c.Phone)
 					results[idx] = result
 					return
 				}
-				log.Printf("[notify] KakaoTalk FAILED for %s (%s): %v — falling back to SMS", c.Name, c.Phone, kakaoErr)
+				logf("[notify] KakaoTalk FAILED for %s (%s): %v — falling back to SMS", c.Name, c.Phone, kakaoErr)
 			}
 
 			// Step 2: Fallback to SMS (if enabled)
 			var smsErr error
 			if !smsEnabled {
+				// Disabled channel: never call sendSMS (no external send attempt is
+				// logged); record the skip and proceed to the system-alarm fallback.
 				smsErr = fmt.Errorf("SMS disabled (SMS_ENABLED=false)")
+				logf("[notify] SMS skipped for %s (%s) — channel disabled, proceeding to system alarm", c.Name, c.Phone)
 			} else {
 				smsErr = sendSMS(cfg, c, alert, cctvLink)
 				if smsErr == nil {
 					result.Channel = "sms"
 					result.Success = true
-					log.Printf("[notify] SMS SUCCESS for %s (%s)", c.Name, c.Phone)
+					logf("[notify] SMS SUCCESS for %s (%s)", c.Name, c.Phone)
 					results[idx] = result
 					return
 				}
-				log.Printf("[notify] SMS FAILED for %s (%s): %v — sending system alarm", c.Name, c.Phone, smsErr)
+				logf("[notify] SMS FAILED for %s (%s): %v — sending system alarm", c.Name, c.Phone, smsErr)
 			}
 
 			// Step 3: Both channels unavailable or failed — send system alarm to web-backend
 			sendSystemAlarm(cfg, c, alert, kakaoErr, smsErr)
 			result.Channel = "alarm"
 			result.Success = false
-			result.Error = fmt.Sprintf("kakao: %s; sms: %s", kakaoErr.Error(), smsErr.Error())
+			result.Error = scrub(fmt.Sprintf("kakao: %s; sms: %s", kakaoErr.Error(), smsErr.Error()))
 			results[idx] = result
 		}(i, contact)
 	}
@@ -615,7 +698,7 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 		}
 	}
 	if emailCount > 0 {
-		log.Printf("[notify] Email dispatched to %d contacts", emailCount)
+		logf("[notify] Email dispatched to %d contacts", emailCount)
 	}
 
 	return len(contacts), results
@@ -653,14 +736,14 @@ func handleNotify(cfg Config) http.HandlerFunc {
 		// Inject sensible defaults so downstream template variables are never empty.
 		if alert.Description == "" {
 			alert.Description = alert.Type + " at " + alert.SiteID
-			log.Printf("[notify] description missing, using fallback: %q", alert.Description)
+			logf("[notify] description missing, using fallback: %q", alert.Description)
 		}
 		if alert.Severity == "" {
 			alert.Severity = "unknown"
-			log.Printf("[notify] severity missing, using fallback: %q", alert.Severity)
+			logf("[notify] severity missing, using fallback: %q", alert.Severity)
 		}
 
-		log.Printf("[notify] Received alert: site=%s device=%s type=%s severity=%s",
+		logf("[notify] Received alert: site=%s device=%s type=%s severity=%s",
 			alert.SiteID, alert.DeviceID, alert.Type, alert.Severity)
 
 		// Dispatch notifications asynchronously
@@ -674,7 +757,7 @@ func handleNotify(cfg Config) http.HandlerFunc {
 					channels[r.Channel]++
 				}
 			}
-			log.Printf("[notify] Dispatch complete: %d/%d contacts notified (kakao:%d sms:%d failed:%d)",
+			logf("[notify] Dispatch complete: %d/%d contacts notified (kakao:%d sms:%d failed:%d)",
 				successCount, contactCount, channels["kakaotalk"], channels["sms"], contactCount-successCount)
 
 			// Request segment protection for this incident (Phase 1 of two-phase archiving)
@@ -881,7 +964,7 @@ func sendEmail(cfg Config, to, subject, body string) error {
 
 	auth := smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPHost)
 	if err := smtp.SendMail(addr, auth, cfg.SMTPFrom, []string{to}, msg); err != nil {
-		return fmt.Errorf("smtp send: %w", err)
+		return fmt.Errorf("smtp send: %s", scrub(err.Error()))
 	}
 	return nil
 }
@@ -890,7 +973,7 @@ func handleSendEmail(cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Check source IP — only allow internal Docker network
 		if !isInternalIP(r.RemoteAddr) {
-			log.Printf("[email] Rejected request from external IP: %s", r.RemoteAddr)
+			logf("[email] Rejected request from external IP: %s", r.RemoteAddr)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]string{"error": "access denied"})
@@ -930,14 +1013,16 @@ func handleSendEmail(cfg Config) http.HandlerFunc {
 		req.Body = sanitizeHTML(req.Body)
 
 		if err := sendEmail(cfg, req.To, req.Subject, req.Body); err != nil {
-			log.Printf("[email] Failed to send email to %s: %v", req.To, err)
+			logf("[email] Failed to send email to %s: %v", req.To, err)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("failed to send email: %v", err)})
+			// §9: error messages must not leak credentials — scrub before returning
+			// the SMTP error to the caller (this response bypasses logf/scrub otherwise).
+			json.NewEncoder(w).Encode(map[string]string{"error": scrub(fmt.Sprintf("failed to send email: %v", err))})
 			return
 		}
 
-		log.Printf("[email] Successfully sent email to %s (subject: %s)", req.To, req.Subject)
+		logf("[email] Successfully sent email to %s (subject: %s)", req.To, req.Subject)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "sent"})
@@ -948,6 +1033,7 @@ func handleSendEmail(cfg Config) http.HandlerFunc {
 
 func main() {
 	cfg := loadConfig()
+	initSecretScrubber(cfg)
 
 	mux := http.NewServeMux()
 
@@ -960,7 +1046,7 @@ func main() {
 	mux.HandleFunc("POST /api/notify", handleNotify(cfg))
 	mux.HandleFunc("POST /api/send-email", handleSendEmail(cfg))
 
-	log.Printf("notifier listening on :8080 (kakao configured: %v, sms configured: %v, smtp configured: %v, frontend: %s)",
+	logf("notifier listening on :8080 (kakao configured: %v, sms configured: %v, smtp configured: %v, frontend: %s)",
 		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "", cfg.SMTPHost != "", cfg.FrontendURL)
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatal(err)
