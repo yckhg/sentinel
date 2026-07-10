@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net"
@@ -723,46 +724,119 @@ func mustParseCIDR(s string) *net.IPNet {
 // --- HTML Sanitization ---
 
 var (
-	// Tags to strip entirely (including content)
+	// Tags whose content is dangerous and must be dropped whole (tag + content).
 	reScriptTag = regexp.MustCompile(`(?is)<script[\s>].*?</script>`)
 	reIframeTag = regexp.MustCompile(`(?is)<iframe[\s>].*?</iframe>`)
-	// Event handler attributes (on*)
-	reOnEvent = regexp.MustCompile(`(?i)\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*)`)
-	// javascript: URIs in href/src/action attributes
-	reJSURI = regexp.MustCompile(`(?i)(href|src|action)\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*')`)
-	// Match HTML tags for allowlist filtering
-	reHTMLTag = regexp.MustCompile(`</?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>`)
+	reStyleTag  = regexp.MustCompile(`(?is)<style[\s>].*?</style>`)
+	// Whole-tag matcher. Quoted attribute values are consumed as units so that a
+	// '>' inside an attribute value cannot terminate the tag early.
+	reHTMLTag = regexp.MustCompile(`(?s)<(/?)\s*([a-zA-Z][a-zA-Z0-9]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>`)
+	// Attribute name (+ optional value) extractor over a tag's attribute section.
+	reAttr = regexp.MustCompile(`([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'>]+))?`)
 )
 
-// allowedTags is the set of safe HTML tags
+// allowedTags is the set of safe HTML tags (bare shells of others are removed,
+// their text content preserved).
 var allowedTags = map[string]bool{
 	"p": true, "a": true, "br": true, "strong": true, "em": true,
 	"h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true,
 	"html": true, "head": true, "body": true,
 }
 
+// allowedAttrs is a per-tag attribute whitelist. Any attribute not listed here
+// (including every on* event handler) is dropped. This structurally removes the
+// on*-handler and dangerous-URI vectors instead of pattern-matching them.
+var allowedAttrs = map[string]map[string]bool{
+	"a": {"href": true},
+}
+
+// urlAttrs are attributes whose value is a URL and must pass a scheme check.
+var urlAttrs = map[string]bool{"href": true, "src": true, "action": true}
+
+// isSafeURL returns true only for relative URLs or the http/https/mailto/tel
+// schemes. HTML entities and control/whitespace obfuscation (e.g. `&#106;avascript:`
+// or `java\tscript:`) are decoded/stripped before the scheme is inspected, closing
+// the quoted/unquoted `javascript:`, `data:` and `vbscript:` bypasses.
+func isSafeURL(raw string) bool {
+	v := raw
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+		v = v[1 : len(v)-1]
+	}
+	v = html.UnescapeString(v)
+	// Drop all control/whitespace chars used to obfuscate the scheme.
+	v = strings.Map(func(r rune) rune {
+		if r <= ' ' || r == 0x7f {
+			return -1
+		}
+		return r
+	}, v)
+	v = strings.ToLower(v)
+	for i := 0; i < len(v); i++ {
+		switch v[i] {
+		case ':':
+			switch v[:i] {
+			case "http", "https", "mailto", "tel":
+				return true
+			}
+			return false // any other explicit scheme (javascript/data/vbscript/...) is unsafe
+		case '/', '?', '#':
+			return true // path/query/fragment reached first → relative URL, safe
+		}
+	}
+	return true // no scheme delimiter → relative, safe
+}
+
+// normalizeAttrValue returns the attribute value always double-quoted, with any
+// embedded double quote escaped so it cannot break out of the attribute.
+func normalizeAttrValue(v string) string {
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+		v = v[1 : len(v)-1]
+	}
+	return `"` + strings.ReplaceAll(v, `"`, "&quot;") + `"`
+}
+
 func sanitizeHTML(input string) string {
-	// 1. Strip script and iframe tags (including content)
+	// 1. Drop script/iframe/style tags together with their content.
 	result := reScriptTag.ReplaceAllString(input, "")
 	result = reIframeTag.ReplaceAllString(result, "")
+	result = reStyleTag.ReplaceAllString(result, "")
 
-	// 2. Strip on* event handler attributes
-	result = reOnEvent.ReplaceAllString(result, "")
-
-	// 3. Strip javascript: URIs
-	result = reJSURI.ReplaceAllString(result, "")
-
-	// 4. Remove disallowed tags (keep content, just strip the tag itself)
+	// 2. Rewrite every remaining tag: drop disallowed tags (keeping their text),
+	//    and for allowed tags emit only whitelisted, scheme-checked attributes.
 	result = reHTMLTag.ReplaceAllStringFunc(result, func(tag string) string {
-		matches := reHTMLTag.FindStringSubmatch(tag)
-		if len(matches) < 2 {
+		m := reHTMLTag.FindStringSubmatch(tag)
+		if m == nil {
 			return ""
 		}
-		tagName := strings.ToLower(matches[1])
-		if allowedTags[tagName] {
-			return tag
+		closing := m[1] == "/"
+		name := strings.ToLower(m[2])
+		if !allowedTags[name] {
+			return "" // strip the tag shell, preserve surrounding content
 		}
-		return ""
+		if closing {
+			return "</" + name + ">"
+		}
+
+		var b strings.Builder
+		b.WriteString("<" + name)
+		attrWhitelist := allowedAttrs[name]
+		for _, a := range reAttr.FindAllStringSubmatch(m[3], -1) {
+			an := strings.ToLower(a[1])
+			if !attrWhitelist[an] {
+				continue // not whitelisted (covers on* handlers, style, etc.)
+			}
+			val := a[2]
+			if urlAttrs[an] && !isSafeURL(val) {
+				continue // dangerous URI scheme
+			}
+			if val == "" {
+				b.WriteString(" " + an)
+			} else {
+				b.WriteString(" " + an + "=" + normalizeAttrValue(val))
+			}
+		}
+		b.WriteString(">")
+		return b.String()
 	})
 
 	return result
