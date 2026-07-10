@@ -1,7 +1,7 @@
 # Web API 인터페이스 스펙
 
 > 상태: 살아있는 계약 (living spec) · 독자: 스펙 작성자 / 오케스트레이터
-> 접합부: **web-backend ↔ web-frontend** (+ 내부 서비스 HTTP: web-backend ↔ hw-gateway, 계약 15)
+> 접합부: **web-backend ↔ web-frontend** (+ 내부 서비스 HTTP: web-backend ↔ hw-gateway 계약 15, web-backend ← notifier 계약 13의 `/internal/*`)
 > 본 문서가 Web API 접면의 SSOT다. MQTT 접면은 `docs/spec/interface-mqtt.md`, 스트리밍 접면은 `docs/spec/interface-streaming.md` 참조.
 
 ## 목적 / 의도
@@ -560,6 +560,7 @@ Device object:
 | POST | `/api/incidents` | hw-gateway | `{siteId*, deviceId?, description, occurredAt?, isTest?, alertId?}` |
 | POST | `/api/devices/seen` | hw-gateway | `{siteId*, deviceId*, alertState?: "none"\|"active"}` |
 | POST | `/api/incidents/{id}/resolve-from-sensor` | hw-gateway | 아래 참조 |
+| POST | `/internal/alarms` | notifier | `{type?, message?, details?}` |
 
 `resolve-from-sensor` 바디:
 
@@ -582,12 +583,13 @@ Device object:
 - `POST /api/incidents` → 신규 생성 `201` `{id, siteId, description, occurredAt}` · 동일 `alertId` 재전송 시 **`200` + 기존 incident 반환** (신규 생성 없음) · `siteId` 누락 `400`
 - `POST /api/devices/seen` → `200` `{"status":"ok"}`
 - `resolve-from-sensor` → `200` `{"status":"resolved","incidentId",  "resolvedByKind":"sensor_button","resolvedById","resolvedByLabel"}` · 매칭 미해결 incident 없음 `404` · **명시적(non-zero) id가 가리키는 incident가** 이미 resolved면 `409`(중복 버튼 방어) · `siteId` 누락 `400`
+- `POST /internal/alarms` → `200` `{"status":"ok"}`. `type` 생략 시 `"system_alarm"`으로 기본값 주입. 부작용: admin WS 클라이언트에 `system_alarm` 브로드캐스트(계약 14). DB 영속 없음 — 보장 동작은 "수신 + admin 브로드캐스트"
 
 ### 핵심 로직 (불변식)
 
 - `POST /api/incidents` **멱등성(alertId dedup)**: `alertId`가 오면 `incidents.alert_id`의 UNIQUE 부분 인덱스(`alert_id IS NOT NULL` 한정) 기준으로 dedup — 동일 alertId 재전송은 기존 incident를 `200`으로 반환하고 새 행을 만들지 않음. `alertId` 없으면 dedup 없음 (재전송마다 새 incident)
 - `POST /api/incidents`의 `deviceId`는 best-effort device UPSERT 트리거 — `/api/devices/seen`과 동일 의미론(`last_seen` 갱신 + soft-delete 자동 복원). UPSERT 실패가 `201`을 막지 않음
-- **호출자 실측 노트**: 현재 유일한 실호출자인 hw-gateway는 `alertId`를 전송하지 않음 (전달 페이로드에 alertId 필드 없음) — dedup 경로는 계약상 유효하나 현 운영 경로에서는 미사용
+- **호출자 노트**: hw-gateway는 crisis forward 시 `alertId`를 전송한다 — DB dedup 경로가 운영에서 실사용된다. hw-gateway는 forward가 전송 계층 오류 또는 HTTP 5xx면 재시도하고, 2xx 응답을 받은 후에만 자신의 in-memory dedup을 등록하므로, 5xx로 유실된 이벤트는 펌웨어 재전송으로 복구된다(계약 15 / `docs/services/hw-gateway.md` 참조)
 - `POST /api/incidents` 신규 생성(`201`) 성공 부작용: 전체 WS 클라이언트에 `crisis_alert` 브로드캐스트 — dedup `200` 경로에서는 브로드캐스트 없음
 - `POST /api/devices/seen`: `(site_id, device_id)` UPSERT — 없으면 INSERT(first_seen=last_seen=now), 있으면 `last_seen=now` + `deleted_at=NULL`(soft-delete 자동 복원). `alertState`는 전송값으로 갱신되며 미전송/빈 값이면 `"none"` 처리 — 계약 6 Device 객체의 `alertState`로 노출됨. **멱등**
 - `resolve-from-sensor` incident 매칭 폴백 체인: path `{id}`(0 허용) → body `incidentId` → 둘 다 0이면 `siteId`의 가장 최근 **미해결** incident 자동 매칭
@@ -640,14 +642,14 @@ Device object:
 | `connected` | 접속 본인 | `{userId, role, connectedAt}` |
 | `crisis_alert` | 전체 (admin/user/temp) | `{incidentId, siteId, description, occurredAt, isTest, site:{address,managerName,managerPhone}}` |
 | `incident_resolved` | 전체 (admin/user/temp) | `{incidentId, siteId, resolvedAt, resolvedByKind, resolvedById, resolvedByLabel}` |
-| `system_alarm` | admin 전용 | 임의 payload — **현재 이 메시지를 발생시키는 수신 경로가 없음** (⚠️ 리뷰 항목 1 참조) |
+| `system_alarm` | admin 전용 | `{type, message, details}` — `POST /internal/alarms`(계약 13) 수신 시 발생 |
 
 ### 핵심 로직 (불변식)
 
 - 인증 실패(토큰 없음/서명 불일치/만료) 시 업그레이드 자체를 `401`로 거절 — 단, **회수된 temp 토큰의 차단은 현재 보장되지 않음** (⚠️ 리뷰 항목 2 참조)
 - 서버가 30초마다 ping — 클라이언트는 40초 내 pong 없으면 연결 종료
 - role은 JWT의 `role` 클레임에서 추출 (`admin`/`user`) — `system_alarm`은 admin에게만 전달. temp link 토큰에는 role 클레임이 없어 접속은 성립하지만 role이 `"temp"`로 식별되는 것은 현재 보장되지 않음 (⚠️ 리뷰 항목 2 참조)
-- `crisis_alert`는 `POST /api/incidents`(계약 13) 성공 시, `incident_resolved`는 웹 resolve(계약 2) 또는 센서 resolve(계약 13) 성공 시 발생
+- `crisis_alert`는 `POST /api/incidents`(계약 13) 성공 시, `incident_resolved`는 웹 resolve(계약 2) 또는 센서 resolve(계약 13) 성공 시 발생. `system_alarm`은 `POST /internal/alarms`(계약 13, notifier가 모든 외부 채널 실패 시 호출) 수신 시 admin에게만 발생
 
 ### 검증 단언 (TDD)
 
@@ -711,7 +713,7 @@ MQTT 발행 페이로드 스키마의 SSOT는 `docs/spec/interface-mqtt.md` — 
 
 실제 라우트/핸들러 대조에서 발견된 어긋남. 본 스펙 본문에는 반영하지 않고 여기에만 기록한다.
 
-1. **notifier의 `POST /api/alarms` 호출은 web-backend에 수신 라우트가 없음 (알려진 시스템 갭)** — notifier는 카카오톡·SMS 발송이 모두 실패했을 때 web-backend `POST /api/alarms`로 시스템 알람을 전송하지만, web-backend에는 이 라우트가 등록되어 있지 않다. 경로가 `/api/` 프리픽스여서 인증 미들웨어 catch-all에 걸리고, notifier는 JWT를 보내지 않으므로 항상 `401`로 거절된다. 결과적으로 WS `system_alarm`(계약 14) 브로드캐스트 함수는 존재하나 호출 경로가 없어 admin에게 시스템 알람이 전달되지 않는다. → 의도 결정 필요: (a) web-backend에 internal 수신 라우트 신설 + `system_alarm` 브로드캐스트 연결, 또는 (b) notifier 측 호출 제거. 결정 전까지 계약으로 추가하지 않는다.
+1. **~~notifier의 시스템 알람 최후 보루 수신측 부재~~ (해소됨)** — 무인증 internal 라우트 `POST /internal/alarms`가 신설되어 notifier가 이 경로로 호출하고, web-backend가 수신해 WS `system_alarm`(계약 14)을 admin에게 브로드캐스트한다. 계약 13(입력/출력)과 계약 14(WS 발생 경로)에 반영됨. DB 영속은 없으며 보장 동작은 "수신 + admin 브로드캐스트"까지. (번호는 항목 2~4의 교차참조 안정성을 위해 유지)
 2. **temp link JWT가 일반 JWT 파서를 먼저 통과해 WS에서 temp role 식별·회수(blacklist) 차단이 모두 무력화됨 (알려진 시스템 갭, web-backend 스펙 ⚠️1과 동일 사안)** — 두 토큰 종류가 동일 secret·동일 HS256으로 서명되고, 일반 JWT 파서가 temp 토큰의 payload(`linkId`만 있고 `userId`/`role` 없음)도 관대하게 수용한다. `/ws`와 인증 미들웨어 모두 일반 파서를 **먼저** 시도해 성공하면 temp 분기(role=`temp` 부여 + blacklist 확인)에 도달하지 않는다. 실측 결과: temp 토큰으로 WS 접속 시 `role=""`로 접속이 성립하고, 회수된 temp 토큰도 WS 접속이 거절되지 않는다 (`GET /api/links/verify`는 temp 전용 파서 + blacklist를 직접 확인하므로 회수 후 `401` 정상 동작). → 의도(temp role read-only + 회수 즉시 차단)를 회복하려면 토큰 종류 판별 순서/클레임 검증 강화가 필요. 결정 전까지 "WS에서 `payload.role == "temp"`"·"회수 토큰 WS 접속 `401`"을 계약 단언으로 두지 않는다.
 3. **무인증 internal 엔드포인트가 리버스 프록시를 그대로 통과해 외부 노출됨 (알려진 시스템 갭)** — 현 스택의 유일한 리버스 프록시인 web-frontend nginx는 `/api/` 전체를 web-backend로 무차별 프록시하고, docker-compose가 web-frontend:80을 호스트 `3080`으로 노출한다. 따라서 외부에서 무인증 internal 엔드포인트(계약 13의 `POST /api/incidents`, `POST /api/devices/seen`, `POST /api/incidents/{id}/resolve-from-sensor`와 계약 9의 internal 폴백 `POST /api/links/temp`)가 인증 없이 그대로 호출된다(200/201). 차단 구성이 repo 내 어디에도 없다. → 의도 결정 필요: (a) 리버스 프록시에서 해당 경로 차단(location 규칙), (b) internal 엔드포인트를 `/internal/*` 프리픽스로 이동 + 프록시 미노출, 또는 (c) 내부 호출 인증 도입. 결정 전까지 "외부에서 internal 엔드포인트 `4xx`" 배포 게이트 단언은 계약에 두지 않는다.
 4. **`PUT /api/contacts/{id}`의 email만 partial 시맨틱에서 벗어남 (실측 — web-backend 스펙 ⚠️5와 동일 사안)** — name/phone은 빈 값 무시, notifyEmail은 생략 시 유지인데 email은 요청값으로 무조건 덮어써서, email을 생략한 partial PUT이 기존 email을 NULL로 삭제한다. 본문(계약 5)은 이 실측 동작을 계약으로 기술했다. → 의도 결정 필요: (a) email도 생략 시 유지(partial 통일 — email 삭제는 별도 신호 필요), 또는 (b) 현 덮어쓰기 동작 유지. (a)로 결정되면 계약 5 입력 표·불변식·단언을 함께 갱신해야 한다.

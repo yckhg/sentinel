@@ -6,13 +6,15 @@
 
 ## A. 시스템 실결함 (spec 문제가 아니라 코드가 어긋난 곳 — 수정 백로그 후보)
 
-| # | 발견 | 판정 근거 |
-|---|------|-----------|
-| A-1 | **notifier의 최후 보루 `POST /api/alarms` 수신 라우트가 web-backend에 없음.** `/api/` 프리픽스라 인증 미들웨어에 걸려 항상 401 → "외부 채널 전무 시 시스템 알람 1건 보장" 계약이 실환경에서 항상 실패, 로그만 남음 | notifier main.go:393 호출 vs web-backend 라우팅 전수 확인 (부재) |
-| A-2 | **hw-gateway가 incident forward 시 `alertId`를 페이로드에 넣지 않음** → web-backend에 실재하는 DB unique 인덱스 기반 멱등 경로가 영원히 발화 불가. 멱등이 hw-gateway in-memory dedup(재시작 시 소실)에만 의존 | hw-gateway IncidentPayload 필드 vs web-backend incidents.go:43-60 + migrations.go unique index |
-| A-3 | 프론트 타임라인 사고 마커가 `data.incidents`를 읽으나 API는 `data` 반환 → 마커 영구 미렌더 | RecordingTimeline.tsx:144 vs incidents.go:246 |
-| A-4 | hw-gateway 재시도는 transport 에러만 재시도, HTTP 4xx/5xx 응답은 미재시도 — 어떤 문서도 이 구분 미명시 | forwardToWebBackend 로직 |
-| A-5 | 센서 생존 판정 이원화: 프론트 장비 탭 30초 하드코딩 vs health API 설정값 기본 60초 — 사용자에게 상이한 두 판정 공존 | DevicesSection.tsx:17 vs health.go:222 |
+> A-1~A-5는 branch `fix/spec-tdd-0702`에서 모두 해소됨. 아래 표에 각 항목의 해소 반영을 병기한다.
+
+| # | 발견 | 판정 근거 | 해소 |
+|---|------|-----------|------|
+| A-1 | **notifier의 최후 보루 `POST /api/alarms` 수신 라우트가 web-backend에 없음.** `/api/` 프리픽스라 인증 미들웨어에 걸려 항상 401 → "외부 채널 전무 시 시스템 알람 1건 보장" 계약이 실환경에서 항상 실패, 로그만 남음 | notifier main.go:393 호출 vs web-backend 라우팅 전수 확인 (부재) | ✅ 무인증 internal 라우트 `POST /internal/alarms` 신설 + `system_alarm` WS 브로드캐스트; notifier가 `/internal/alarms`로 호출 |
+| A-2 | **hw-gateway가 incident forward 시 `alertId`를 페이로드에 넣지 않음** → web-backend에 실재하는 DB unique 인덱스 기반 멱등 경로가 영원히 발화 불가. 멱등이 hw-gateway in-memory dedup(재시작 시 소실)에만 의존 | hw-gateway IncidentPayload 필드 vs web-backend incidents.go:43-60 + migrations.go unique index | ✅ `IncidentPayload.alertId` 추가, forward 시 전달 → DB dedup 경로 발화 |
+| A-3 | 프론트 타임라인 사고 마커가 `data.incidents`를 읽으나 API는 `data` 반환 → 마커 영구 미렌더 | RecordingTimeline.tsx:144 vs incidents.go:246 | ✅ `data.data` 읽도록 정렬 |
+| A-4 | hw-gateway 재시도는 transport 에러만 재시도, HTTP 4xx/5xx 응답은 미재시도 — 어떤 문서도 이 구분 미명시 | forwardToWebBackend 로직 | ✅ HTTP 5xx도 재시도(4xx는 미재시도), 2xx만 성공 판정 |
+| A-5 | 센서 생존 판정 이원화: 프론트 장비 탭 30초 하드코딩 vs health API 설정값 기본 60초 — 사용자에게 상이한 두 판정 공존 | DevicesSection.tsx:17 vs health.go:222 | ✅ 프론트가 `GET /api/settings`의 `health.sensor_alive_threshold_sec`를 런타임 소비(실패 시 60초 폴백 = 백엔드 기본값) |
 
 ## B. Spec 자체 결함 — 심각 (본문 수정 필요)
 
@@ -36,7 +38,7 @@
 - **B-11**: H.264 profile 계약(Baseline/Main)이 youtube-adapter에서 우연으로만 충족(`-preset ultrafast` 부작용) — push측 `-profile:v` pin 또는 계약 완화 중 택일 필요.
 
 ### notifier.md
-- **B-12**: 존재하지 않는 수신측(`/api/alarms`) 계약을 자체 정의 (A-1의 spec측 면).
+- **B-12**: ~~존재하지 않는 수신측(`/api/alarms`) 계약을 자체 정의 (A-1의 spec측 면).~~ ✅ 해소 — A-1 수신 라우트(`POST /internal/alarms`) 신설로 수신측 실재. notifier·web-backend spec 및 interface-web-api 계약 13/14에 반영.
 
 ## C. 경미 (표현·중복·소량 침투)
 
@@ -51,7 +53,7 @@
 각 spec 파일 말미 "⚠️ 리뷰 필요" 섹션 참조 (총 65건). 우선 리뷰 권고:
 1. **notifier**: `KAKAO_ENABLED`/`SMS_ENABLED` 기본 꺼짐 — 미설정 시 외부 알림 전부 비활성
 2. **web-backend 보안 묶음**: 임시 링크 발급 무인증 가능성, temp 역할 권한 초과, 폐기 링크 JWT 우회 가능성, SSRF 도메인 우회, X-Forwarded-For 신뢰
-3. **hw-gateway**: dedup이 forward 성공 전 등록 → 전량 실패 시 재전송으로도 복구 불가
+3. **hw-gateway**: ~~dedup이 forward 성공 전 등록 → 전량 실패 시 재전송으로도 복구 불가~~ ✅ 해소 — in-memory dedup 등록을 forward 2xx 성공 이후로 이동, 5xx 재시도 소진 시 미등록 유지로 펌웨어 재전송 복구 가능
 4. **recording**: 타임존 없는 시간 UTC 해석(KST 시 보호 구간 9h 오차), 재시작 시 미완료 아카이브 영구 방치
 
 ## 후속 결정 대기
