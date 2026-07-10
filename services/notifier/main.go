@@ -342,8 +342,13 @@ func sendCrisisEmail(cfg Config, contact Contact, alert AlertPayload, cctvLink s
 		subjectPrefix = "[테스트][위기알림]"
 		heading = "[테스트] 위기 알림"
 	}
+	// Subject carries externally-sourced values (Type/Description originate from
+	// the MQTT alert payload). SMTP header injection (CRLF) is defended centrally
+	// in sendEmail via sanitizeHeader; here we only assemble the human-readable line.
 	subject := fmt.Sprintf("%s %s — %s", subjectPrefix, alert.Type, alert.Description)
 
+	// HTML-escape every externally-sourced value before embedding it into the
+	// HTML email body to prevent stored XSS in the recipient's mail client.
 	body := fmt.Sprintf(`<html><body>
 <h2>%s</h2>
 <p><strong>유형:</strong> %s</p>
@@ -352,10 +357,16 @@ func sendCrisisEmail(cfg Config, contact Contact, alert AlertPayload, cctvLink s
 <p><strong>장비:</strong> %s</p>
 <p><strong>심각도:</strong> %s</p>
 <p><strong>시각:</strong> %s</p>`,
-		heading, alert.Type, alert.Description, alert.SiteID, alert.DeviceID, alert.Severity, alert.Timestamp)
+		html.EscapeString(heading),
+		html.EscapeString(alert.Type),
+		html.EscapeString(alert.Description),
+		html.EscapeString(alert.SiteID),
+		html.EscapeString(alert.DeviceID),
+		html.EscapeString(alert.Severity),
+		html.EscapeString(alert.Timestamp))
 
 	if cctvLink != "" {
-		body += fmt.Sprintf(`<p><strong>CCTV:</strong> <a href="%s">실시간 보기</a></p>`, cctvLink)
+		body += fmt.Sprintf(`<p><strong>CCTV:</strong> <a href="%s">실시간 보기</a></p>`, html.EscapeString(cctvLink))
 	}
 	body += `</body></html>`
 
@@ -844,8 +855,24 @@ func sanitizeHTML(input string) string {
 
 // --- Email Sending ---
 
+// sanitizeHeader strips CR, LF and other control characters from a value that
+// will be placed into an SMTP header (To / Subject), preventing header injection
+// (extra recipients/headers or body smuggling) from attacker-controlled input.
+func sanitizeHeader(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 func sendEmail(cfg Config, to, subject, body string) error {
 	addr := fmt.Sprintf("%s:%s", cfg.SMTPHost, cfg.SMTPPort)
+
+	// Defend SMTP header injection centrally for every email path.
+	to = sanitizeHeader(to)
+	subject = sanitizeHeader(subject)
 
 	mime := "MIME-Version: 1.0\r\n" +
 		"Content-Type: text/html; charset=\"UTF-8\"\r\n"
