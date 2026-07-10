@@ -319,39 +319,73 @@ func authMiddleware(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid authorization header format"})
 			return
 		}
+		tokenStr := parts[1]
 
-		claims, err := parseJWT(parts[1])
-		if err == nil {
+		// Identify temp-link tokens FIRST. Both token kinds are signed with the
+		// same secret, so the regular parser (parseJWT) accepts a temp token as a
+		// role-less user (userId=0, role="") — which would bypass both the
+		// revocation (blacklist) check and the temp read-only scope. A temp token
+		// is distinguished by carrying a non-empty linkId claim.
+		if tempClaims, err := parseTempLinkJWT(tokenStr); err == nil && tempClaims.LinkID != "" {
+			// Enforce revocation on every /api/* request (not just verify).
+			linkStore.mu.RLock()
+			_, revoked := linkStore.blacklist[tempClaims.LinkID]
+			linkStore.mu.RUnlock()
+			if revoked {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "link has been revoked"})
+				return
+			}
+			// Temp links are read-only CCTV viewers — restrict scope.
+			if !tempScopeAllowed(r) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "temp link is read-only"})
+				return
+			}
 			ctx := context.WithValue(r.Context(), userContextKey, AuthUser{
-				UserID: claims.UserID,
-				Role:   claims.Role,
+				UserID: 0,
+				Role:   "temp",
 			})
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
-		// Fallback: try temp link JWT for temp access (read-only)
-		tempClaims, tempErr := parseTempLinkJWT(parts[1])
-		if tempErr != nil {
+		// Regular user/admin JWT.
+		claims, err := parseJWT(tokenStr)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired token"})
+			return
+		}
+		// Reject tokens lacking a real user identity or a known role (e.g. a
+		// malformed or temp-shaped token that slipped past detection) so they
+		// cannot ride through user-level routes with role="".
+		if claims.UserID == 0 || (claims.Role != "admin" && claims.Role != "user") {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired token"})
 			return
 		}
 
-		// Check blacklist
-		linkStore.mu.RLock()
-		_, revoked := linkStore.blacklist[tempClaims.LinkID]
-		linkStore.mu.RUnlock()
-		if revoked {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "link has been revoked"})
-			return
-		}
-
 		ctx := context.WithValue(r.Context(), userContextKey, AuthUser{
-			UserID: 0,
-			Role:   "temp",
+			UserID: claims.UserID,
+			Role:   claims.Role,
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// tempScopeAllowed reports whether a temp-link (read-only CCTV viewer) token may
+// access the requested route. Temp viewers may only GET the camera list and
+// recording playback — everything else (incidents, contacts, equipment restart,
+// archives, admin resources, and all mutating methods) is denied.
+func tempScopeAllowed(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	p := r.URL.Path
+	if p == "/api/cameras" {
+		return true
+	}
+	if strings.HasPrefix(p, "/api/recordings/") {
+		return true
+	}
+	return false
 }
 
 func getAuthUser(r *http.Request) AuthUser {

@@ -138,18 +138,11 @@ func handleWebSocket() http.HandlerFunc {
 		var role string
 		var userID int64
 
-		// Try regular JWT first
-		claims, err := parseJWT(tokenStr)
-		if err == nil {
-			role = claims.Role
-			userID = claims.UserID
-		} else {
-			// Try temp link JWT
-			tempClaims, tempErr := parseTempLinkJWT(tokenStr)
-			if tempErr != nil {
-				http.Error(w, "invalid or expired token", http.StatusUnauthorized)
-				return
-			}
+		// Identify temp-link tokens FIRST (non-empty linkId claim). Both token
+		// kinds share the signing secret, so trying parseJWT first would accept a
+		// temp token as a role-less user and skip the revocation check — letting a
+		// revoked temp token keep a live WS connection.
+		if tempClaims, err := parseTempLinkJWT(tokenStr); err == nil && tempClaims.LinkID != "" {
 			// Check blacklist
 			linkStore.mu.RLock()
 			_, revoked := linkStore.blacklist[tempClaims.LinkID]
@@ -160,6 +153,19 @@ func handleWebSocket() http.HandlerFunc {
 			}
 			role = "temp"
 			userID = 0
+		} else {
+			// Regular user/admin JWT.
+			claims, err := parseJWT(tokenStr)
+			if err != nil {
+				http.Error(w, "invalid or expired token", http.StatusUnauthorized)
+				return
+			}
+			if claims.UserID == 0 || (claims.Role != "admin" && claims.Role != "user") {
+				http.Error(w, "invalid or expired token", http.StatusUnauthorized)
+				return
+			}
+			role = claims.Role
+			userID = claims.UserID
 		}
 
 		conn, err := upgrader.Upgrade(w, r, nil)
