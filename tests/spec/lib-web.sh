@@ -61,6 +61,47 @@ ws_observe() {
     python /wslib/ws_client.py web-backend 8080 "$1" "${2:-10}" "${3:-normal}"
 }
 
+# --- Auth rate-limit backoff (harness R3) -------------------------------------
+# SEC-3 fix (704814d) made web-backend clientIP() ignore X-Forwarded-For unless
+# the direct TCP peer is a configured TRUSTED_PROXY — and TRUSTED_PROXIES is
+# UNSET in deployment. Sequential `docker run --rm` curl containers reuse the
+# same recycled Docker RemoteAddr, so every register(5/min)/login(10/min) call
+# across the suite now shares ONE rate-limit bucket. The round-1 unique-XFF
+# isolation trick (c01_7 etc.) is therefore inert.
+#
+# For tests that judge a *successful* auth outcome (register→pending/active,
+# approve→login 200), a 429 caused by a neighbouring rate-limit test's bucket
+# usage is a harness artifact, not a product defect. auth_body/auth_code wait
+# out the 60s window and retry so the real contract is judged. Tests that assert
+# a 429/400 rate-limit contract (c01_5, f_rate_limit, c01_2) must NOT use these —
+# they keep calling bcode/bcurl directly so the genuine limiter stays exercised.
+AUTH_WINDOW=${AUTH_WINDOW:-60}   # web-backend auth rate-limit window (seconds)
+
+# auth_body <curl-args...> : run an auth POST, transparently retrying when the
+# shared bucket returns 429 (waiting out the window). Prints the response body.
+auth_body() {
+  local attempt out code body
+  for attempt in 1 2 3; do
+    out=$(bcurl_code "$@")
+    code=$(printf '%s' "$out" | tail -n1)
+    body=$(printf '%s' "$out" | sed '$d')
+    if [ "$code" != "429" ]; then printf '%s' "$body"; return 0; fi
+    [ "$attempt" -lt 3 ] && sleep "$((AUTH_WINDOW + 1))"
+  done
+  printf '%s' "$body"   # still 429 after retries — return body so the caller NOKs
+}
+
+# auth_code <curl-args...> : same backoff, but prints only the HTTP status code.
+auth_code() {
+  local attempt code
+  for attempt in 1 2 3; do
+    code=$(bcode "$@")
+    if [ "$code" != "429" ]; then printf '%s' "$code"; return 0; fi
+    [ "$attempt" -lt 3 ] && sleep "$((AUTH_WINDOW + 1))"
+  done
+  printf '%s' "$code"   # still 429 after retries — return code so the caller NOKs
+}
+
 ok()   { echo "OK: $*"; exit 0; }
 nok()  { echo "NOK: $*"; exit 1; }
 skip() { echo "SKIPPED $*"; exit 2; }

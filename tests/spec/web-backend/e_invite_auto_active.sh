@@ -8,7 +8,12 @@ T=$(get_token) || exit 1
 tok=$(bcurl -X POST -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
   -d '{"email":"spectdd-e@example.invalid"}' "$BACKEND/api/invitations" | jq -r .token)
 U="spectdd-e-$(date +%s)"
-st=$(bcurl -X POST "$BACKEND/auth/register" -H 'Content-Type: application/json' \
+# NOTE(harness R3): register/login share one recycled-RemoteAddr rate bucket
+#   since SEC-3(704814d) neutralised X-Forwarded-For isolation. We judge the
+#   invite→auto-active *success* contract, so auth_body waits out a neighbouring
+#   test's 429 (60s window) instead of false-NOK. Genuine 429/400 tests
+#   (c01_5/c01_2/f_rate_limit) intentionally keep using bcode/bcurl.
+st=$(auth_body -X POST "$BACKEND/auth/register" -H 'Content-Type: application/json' \
   -d "{\"username\":\"$U\",\"password\":\"secret123\",\"confirmPassword\":\"secret123\",\"name\":\"x\",\"inviteToken\":\"$tok\"}" | jq -r .status)
 inv=$(db_query "SELECT status FROM invitations WHERE token='$tok'")
 echo "user.status=$st invitation.status=$inv"
