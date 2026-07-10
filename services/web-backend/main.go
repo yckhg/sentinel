@@ -31,6 +31,7 @@ func main() {
 	initHWGatewayURL()
 	initServiceURLs()
 	initNotifierURL()
+	initTrustedProxies()
 
 	if err := seedAdminUser(db); err != nil {
 		log.Fatalf("failed to seed admin user: %v", err)

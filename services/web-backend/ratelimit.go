@@ -2,12 +2,65 @@ package main
 
 import (
 	"log"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// trustedProxies holds CIDR networks whose X-Forwarded-For / X-Real-IP headers
+// are trusted. Empty by default: with no trusted proxy configured, forwarding
+// headers are ignored entirely and the TCP peer (RemoteAddr) is used — so a
+// client cannot bypass or weaponize the rate limiter by forging X-Forwarded-For.
+// Set TRUSTED_PROXIES (comma-separated IPs/CIDRs, e.g. the reverse-proxy address)
+// to have the real client IP extracted from forwarding headers behind that proxy.
+var trustedProxies []*net.IPNet
+
+// initTrustedProxies parses the TRUSTED_PROXIES env var into CIDR networks.
+func initTrustedProxies() {
+	trustedProxies = nil
+	raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES"))
+	if raw == "" {
+		return
+	}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if !strings.Contains(part, "/") {
+			if strings.Contains(part, ":") {
+				part += "/128"
+			} else {
+				part += "/32"
+			}
+		}
+		_, ipnet, err := net.ParseCIDR(part)
+		if err != nil {
+			log.Printf("TRUSTED_PROXIES: ignoring invalid entry %q: %v", part, err)
+			continue
+		}
+		trustedProxies = append(trustedProxies, ipnet)
+	}
+	if len(trustedProxies) > 0 {
+		log.Printf("trusted proxies configured: %d network(s)", len(trustedProxies))
+	}
+}
+
+func isTrustedProxy(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	for _, n := range trustedProxies {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
 
 type ipRecord struct {
 	count     atomic.Int64
@@ -71,21 +124,48 @@ func rateLimitMiddleware(limiter *rateLimiter, next http.HandlerFunc) http.Handl
 	}
 }
 
-// clientIP extracts the client IP from the request, checking X-Forwarded-For first
+// clientIP extracts the client IP used for rate limiting. Forwarding headers
+// (X-Forwarded-For / X-Real-IP) are trusted ONLY when the direct TCP peer is a
+// configured trusted proxy — otherwise a client could forge them to bypass the
+// limiter (rotating IPs) or to throttle a victim. With no trusted proxy set, the
+// TCP peer (RemoteAddr) is always used.
 func clientIP(r *http.Request) string {
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		host = h
+	}
+
+	remoteIP := net.ParseIP(host)
+	if !isTrustedProxy(remoteIP) {
+		// Untrusted (or unknown) peer — ignore forwarding headers entirely.
+		return host
+	}
+
+	// Peer is a trusted proxy: derive the real client from X-Forwarded-For,
+	// scanning right-to-left and skipping any addresses that are themselves
+	// trusted proxies (handles proxy chains). The first non-proxy address is the
+	// client as observed by the edge proxy.
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP (original client)
-		if idx := strings.IndexByte(xff, ','); idx != -1 {
-			return strings.TrimSpace(xff[:idx])
+		parts := strings.Split(xff, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			cand := strings.TrimSpace(parts[i])
+			ip := net.ParseIP(cand)
+			if ip == nil {
+				continue
+			}
+			if isTrustedProxy(ip) {
+				continue
+			}
+			return cand
 		}
-		return strings.TrimSpace(xff)
 	}
-	// Fall back to RemoteAddr (strip port)
-	addr := r.RemoteAddr
-	if idx := strings.LastIndex(addr, ":"); idx != -1 {
-		return addr[:idx]
+	// Fall back to X-Real-IP (set by nginx) when no usable XFF entry.
+	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
+		if net.ParseIP(xr) != nil {
+			return xr
+		}
 	}
-	return addr
+	return host
 }
 
 // startRateLimitCleanup starts a goroutine that cleans up stale rate limit entries every 5 minutes
