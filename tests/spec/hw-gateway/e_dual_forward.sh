@@ -19,14 +19,18 @@ if [ "${ALLOW_MUTATING:-0}" != "1" ]; then
   exit 2
 fi
 
+# SINCE = 발행 직전 절대 타임스탬프. `--since 30s` 상대창은 순차 실행 시 직전 테스트의
+# forward 로그가 창에 섞여 계수를 오염(false-NOK)시킨다. FORWARD 로그는 status만 담아
+# deviceId 로 필터할 수 없으므로, 이 테스트 발행 이후의 로그만 보도록 시간창을 고정한다.
+SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ts=$(date -u +%Y-%m-%dT%H:%M:%SZ); aid="T-E1-$(date +%s)"; mark=$(date -u +%H:%M)
 $PUB -q 2 -t "safety/site1/alert" \
   -m "{\"deviceId\":\"T-E1\",\"siteId\":\"site1\",\"type\":\"scream\",\"alertId\":\"$aid\",\"timestamp\":\"$ts\",\"description\":\"spec E\"}"
 sleep 5
-gwlog=$(docker logs sentinel-hw-gateway --since 30s 2>&1)
+gwlog=$(docker logs sentinel-hw-gateway --since "$SINCE" 2>&1)
 echo "$gwlog" | grep -c "Notifier response" | grep -q "^1$" || { echo "NOK: notifier forward != 1"; exit 1; }
 echo "$gwlog" | grep -c "Web-backend response" | grep -q "^1$" || { echo "NOK: web-backend forward != 1"; exit 1; }
-docker logs sentinel-notifier --since 30s 2>&1 | grep -q "Received alert: site=site1 device=T-E1" || { echo "NOK: notifier 미수신"; exit 1; }
+docker logs sentinel-notifier --since "$SINCE" 2>&1 | grep -q "Received alert: site=site1 device=T-E1" || { echo "NOK: notifier 미수신"; exit 1; }
 oa=$(db_query "SELECT occurred_at FROM incidents WHERE alert_id='$aid';")
 echo "occurred_at=$oa (기대 $ts)"
 [ -n "$oa" ] && { echo OK; exit 0; } || { echo "NOK: incident 없음"; exit 1; }

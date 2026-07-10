@@ -19,12 +19,16 @@ if [ "${ALLOW_MUTATING:-0}" != "1" ]; then
   exit 2
 fi
 
+# SINCE = 발행 직전 절대 타임스탬프. `--since 40s` 상대창은 순차 실행 시 직전 테스트의
+# forward 로그를 계수에 섞어 dedup 판정을 오염(false-NOK)시킨다. 이 테스트 발행 이후의
+# 로그만 계수하도록 시간창을 고정한다(incidents COUNT 는 alertId 로 이미 격리됨).
+SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ts=$(date -u +%Y-%m-%dT%H:%M:%SZ); aid="T-F1-$(date +%s)"
 msg="{\"deviceId\":\"T-F1\",\"siteId\":\"site1\",\"type\":\"scream\",\"alertId\":\"$aid\",\"timestamp\":\"$ts\"}"
 $PUB -q 2 -t "safety/site1/alert" -m "$msg"; sleep 3
 $PUB -q 2 -t "safety/site1/alert" -m "$msg"; sleep 5
-n=$(docker logs sentinel-hw-gateway --since 40s 2>&1 | grep -c "Notifier response")
-w=$(docker logs sentinel-hw-gateway --since 40s 2>&1 | grep -c "Web-backend response")
+n=$(docker logs sentinel-hw-gateway --since "$SINCE" 2>&1 | grep -c "Notifier response")
+w=$(docker logs sentinel-hw-gateway --since "$SINCE" 2>&1 | grep -c "Web-backend response")
 inc=$(db_query "SELECT COUNT(*) FROM incidents WHERE alert_id='$aid';")
 echo "notifier=$n web-backend=$w incidents=$inc"
 [ "$n" = 1 ] && [ "$w" = 1 ] && [ "$inc" = 1 ] && { echo OK; exit 0; } || { echo "NOK: 중복 forward"; exit 1; }

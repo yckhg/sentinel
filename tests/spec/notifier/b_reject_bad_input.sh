@@ -18,10 +18,14 @@ if [ "${ALLOW_MUTATING:-0}" != "1" ]; then
 fi
 
 # 주의: 검증 로직이 스펙과 다르면(NOK 케이스) 실제 발송이 일어날 수 있어 mutating으로 분류.
+# SINCE = 주입 직전 절대 타임스탬프. `--since 15s` 상대창은 순차 실행 시 직전 이벤트(A)의
+# [email]/Dispatch 채널 로그를 섞어 "발송 시도 없음" 판정을 오염(false-NOK)시킨다.
+# 채널 로그는 deviceId 를 담지 않으므로 이 주입 이후의 로그만 보도록 시간창을 고정한다.
+SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 code=$(ncurl "-s -o /dev/null -w \"%{http_code}\" -X POST http://notifier:8080/api/notify \
   -H \"Content-Type: application/json\" \
   -d \"{\\\"deviceId\\\":\\\"TEST-01\\\",\\\"type\\\":\\\"gas_leak\\\",\\\"timestamp\\\":\\\"2026-07-02T00:00:00Z\\\"}\"")
 sleep 3
-sent=$(docker logs sentinel-notifier --since 15s 2>&1 | grep -cE "\[email\]|\[sms\]|\[kakao\]|Dispatch")
+sent=$(docker logs sentinel-notifier --since "$SINCE" 2>&1 | grep -cE "\[email\]|\[sms\]|\[kakao\]|Dispatch")
 echo "code=$code 채널로그=$sent"
 [ "$code" = 400 ] && [ "$sent" = 0 ] && { echo OK; exit 0; } || { echo NOK; exit 1; }
