@@ -19,7 +19,7 @@
 ## 의존 도구 · 시스템
 
 - **FFmpeg** (컨테이너 내 필수): RTMP 수신·세그먼트 분할, 세그먼트 병합 모두 FFmpeg 하위 프로세스로 수행한다.
-- **streaming 서비스** (RTMP pull 원천): 이 접면의 계약 소유자는 [docs/spec/interface-streaming.md](interface-streaming.md) §계약 3 (RTMP 라이브 재배포) — push 없는 streamKey의 pull은 데이터 없이 대기/실패하며 재시도 책임은 본 서비스에 있다. RTMP 스트림 규격(코덱, B-frame 금지 등)은 같은 문서 §계약 1이 소유하며 본 스펙은 재정의하지 않는다.
+- **streaming 서비스** (RTMP pull 원천): 이 접면의 계약 소유자는 [docs/spec/interface-streaming.md](interface-streaming.md) §계약 3 (RTMP 라이브 재배포) — push 없는 streamKey의 pull은 데이터 없이 대기/실패하며 재시도 책임은 본 서비스에 있다. RTMP 스트림 규격(코덱 등 — 허브는 B-frame 포함 H.264도 수용)은 같은 문서 §계약 1이 소유하며 본 스펙은 재정의하지 않는다.
 - **web-backend**: 카메라 목록 원천(`GET /internal/cameras` — 계약 소유자 [docs/spec/interface-web-api.md](interface-web-api.md) §계약 13) 및 본 서비스 `/api/*`의 인증 프록시(외부 노출 계약 소유자 [docs/spec/interface-web-api.md](interface-web-api.md) §계약 8).
 - **볼륨 2개**: 롤링 세그먼트 저장소(기본 `/recordings`), 영구 아카이브 저장소(기본 `/archives`). 컨테이너 재시작에도 파일은 유지된다.
 - DB 없음. 아카이브 메타데이터는 아카이브 볼륨 내 단일 JSON 파일로 영속화된다.

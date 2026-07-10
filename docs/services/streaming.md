@@ -52,7 +52,7 @@ docker compose logs -f streaming
 | Method | Path | Response |
 |--------|------|----------|
 | GET | `/healthz` | `200` |
-| GET | `/api/streams` | `[{cameraId, hlsUrl, active, startedAt}]` — active는 playlist mtime < 30s |
+| GET | `/api/streams` | `[{cameraId, streamKey, hlsUrl, active, lastUpdatedAt}]` — active는 playlist mtime < 30s. `lastUpdatedAt` = playlist 최종 갱신 시각(mtime, 시작 시각 아님) |
 | GET | `/live/{streamKey}/index.m3u8` | HLS playlist |
 | GET | `/live/{streamKey}/*.ts` | HLS segment |
 
@@ -60,11 +60,11 @@ docker compose logs -f streaming
 
 ## Constraints / Known Issues
 
-- **B-frame 입력은 절대 금지**. nginx-rtmp v1.2.2가 ~5초 후 audio packet muxing 에러로 connection reset. 증상이 오디오 쪽으로 보이지만 원인은 video B-frame.
+- **B-frame 입력은 수용한다 (거부하지 않음)**. 허브는 remux-only라 코덱을 검사하지 않고 적법한 H.264(B-frame 포함)를 통과·서빙한다. B-frame은 지연을 늘릴 뿐이며, 저지연이 필요한 어댑터가 push 측에서 `-bf 0`으로 제거하는 것은 선택 권고다(허브 계약 아님). 코덱 정규화(비-H.264→H.264, B-frame 제거)는 어댑터 책임 — 허브는 절대 트랜스코딩하지 않는다.
 - 새 adapter 제작 시 [streaming-api.md](../interfaces/streaming-api.md)와 [adapter-checklist.md](../adapter-checklist.md)를 반드시 따를 것.
-- Fragment 2초, playlist 10초(5 segments). 끊김 없는 live 지연 ≈ 4~6초.
-- `/tmp/hls/`는 tmpfs(컨테이너 rootfs). 재시작 시 초기화 (의도된 동작).
+- Fragment 2초, playlist 10초(5 segments). live 지연 일반적으로 5~10초 (HLS 특성).
+- `/tmp/hls/`는 **tmpfs로 마운트**. 재생성(recreate)이든 재시작(`docker compose restart`)이든 기동 시 완전 초기화 — 이전 스트림 잔재·stale mtime에 의한 거짓 alive 없음 (계약: [../spec/interface-streaming.md](../spec/interface-streaming.md) §계약 4 "상태 휘발성").
 
 ## Storage / State
 
-- 영구 저장 없음. HLS 세그먼트는 `/tmp/hls/` (휘발). 녹화는 recording 서비스가 별도로 RTMP를 구독하여 수행.
+- 영구 저장 없음. HLS 세그먼트는 `/tmp/hls/` (tmpfs, 휘발). 녹화는 recording 서비스가 별도로 RTMP를 구독하여 수행.
