@@ -36,6 +36,13 @@ var equipmentStore = struct {
 
 var heartbeatTimeout = 30 * time.Second
 
+// publishTimeout bounds how long a publish HTTP handler waits for the MQTT
+// broker to accept a message. Designer-approved change: when the broker was
+// connected once but then dropped (auto-reconnect in progress), Publish().Wait()
+// would block indefinitely, hanging the HTTP request. We now bound the wait and
+// return 503 on timeout instead of an unbounded hang.
+const publishTimeout = 5 * time.Second
+
 type alertEntry struct {
 	insertedAt time.Time
 }
@@ -728,7 +735,13 @@ func handleRestart(w http.ResponseWriter, r *http.Request, mqttClient mqtt.Clien
 
 	topic := fmt.Sprintf("safety/%s/cmd/restart", req.SiteID)
 	token := mqttClient.Publish(topic, 1, false, body) // QoS 1
-	token.Wait()
+	if !token.WaitTimeout(publishTimeout) {
+		log.Printf("[RESTART] Publish to %s timed out after %v (broker unreachable)", topic, publishTimeout)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "MQTT publish timeout — broker unreachable"})
+		return
+	}
 
 	if token.Error() != nil {
 		log.Printf("[RESTART] Failed to publish to %s: %v", topic, token.Error())
@@ -791,7 +804,13 @@ func handleTestAlert(w http.ResponseWriter, r *http.Request, mqttClient mqtt.Cli
 
 	topic := fmt.Sprintf("safety/%s/alert", req.SiteID)
 	token := mqttClient.Publish(topic, 2, false, body) // QoS 2 — same as real alerts
-	token.Wait()
+	if !token.WaitTimeout(publishTimeout) {
+		log.Printf("[TEST-ALERT] Publish to %s timed out after %v (broker unreachable)", topic, publishTimeout)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "MQTT publish timeout — broker unreachable"})
+		return
+	}
 
 	if token.Error() != nil {
 		log.Printf("[TEST-ALERT] Failed to publish to %s: %v", topic, token.Error())
@@ -851,7 +870,13 @@ func handleAlertResolvedPublish(w http.ResponseWriter, r *http.Request, mqttClie
 
 	topic := fmt.Sprintf("safety/%s/alert/resolved", payload.SiteID)
 	token := mqttClient.Publish(topic, 1, false, body) // QoS 1, retain false
-	token.Wait()
+	if !token.WaitTimeout(publishTimeout) {
+		log.Printf("[ALERT-RESOLVED] Publish to %s timed out after %v (broker unreachable)", topic, publishTimeout)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "MQTT publish timeout — broker unreachable"})
+		return
+	}
 	if token.Error() != nil {
 		log.Printf("[ALERT-RESOLVED] Failed to publish to %s: %v", topic, token.Error())
 		w.Header().Set("Content-Type", "application/json")
