@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,7 +13,60 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	sqlitedrv "modernc.org/sqlite"
 )
+
+// SQLite extended result codes for UNIQUE / PRIMARY KEY constraint violations.
+// (modernc.org/sqlite surfaces these via *sqlite.Error.Code().)
+const (
+	sqliteConstraintUnique     = 2067 // SQLITE_CONSTRAINT_UNIQUE
+	sqliteConstraintPrimaryKey = 1555 // SQLITE_CONSTRAINT_PRIMARYKEY
+)
+
+// isUniqueViolation reports whether err is a SQLite UNIQUE/PK constraint failure.
+// It checks both the driver's structured error code (modernc.org/sqlite errno
+// 2067/1555) and the human-readable message ("UNIQUE constraint failed") so the
+// classification is robust across driver versions and wrapping.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	var serr *sqlitedrv.Error
+	if errors.As(err, &serr) {
+		switch serr.Code() {
+		case sqliteConstraintUnique, sqliteConstraintPrimaryKey:
+			return true
+		}
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
+
+// returnExistingIncidentByAlert looks up the incident already mapped to alertID
+// and, if present, writes it as HTTP 200 and returns handled=true. A missing row
+// yields handled=false with err=nil; any other query failure returns err.
+func returnExistingIncidentByAlert(ctx context.Context, db *sql.DB, w http.ResponseWriter, alertID string) (handled bool, err error) {
+	var existingID int64
+	var existingSiteID, existingDescription, existingOccurredAt string
+	qerr := db.QueryRowContext(ctx,
+		"SELECT id, site_id, description, datetime(occurred_at) FROM incidents WHERE alert_id = ?",
+		alertID,
+	).Scan(&existingID, &existingSiteID, &existingDescription, &existingOccurredAt)
+	if qerr == sql.ErrNoRows {
+		return false, nil
+	}
+	if qerr != nil {
+		return false, qerr
+	}
+	log.Printf("incident dedup: alertId=%s already mapped to incident id=%d", alertID, existingID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":          existingID,
+		"siteId":      existingSiteID,
+		"description": existingDescription,
+		"occurredAt":  existingOccurredAt,
+	})
+	return true, nil
+}
 
 type createIncidentRequest struct {
 	SiteID      string `json:"siteId"`
@@ -40,27 +95,18 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 		ctx, cancel := dbCtx(r.Context())
 		defer cancel()
 
-		// Dedup: if alertId provided, check for existing incident with the same alertId
-		if strings.TrimSpace(req.AlertID) != "" {
-			var existingID int64
-			var existingSiteID, existingDescription, existingOccurredAt string
-			err := db.QueryRowContext(ctx,
-				"SELECT id, site_id, description, datetime(occurred_at) FROM incidents WHERE alert_id = ?",
-				req.AlertID,
-			).Scan(&existingID, &existingSiteID, &existingDescription, &existingOccurredAt)
-			if err == nil {
-				// Already exists — return existing incident without creating a duplicate
-				log.Printf("incident dedup: alertId=%s already mapped to incident id=%d", req.AlertID, existingID)
-				writeJSON(w, http.StatusOK, map[string]any{
-					"id":          existingID,
-					"siteId":      existingSiteID,
-					"description": existingDescription,
-					"occurredAt":  existingOccurredAt,
-				})
-				return
-			} else if err != sql.ErrNoRows {
-				log.Printf("dedup check error: %v", err)
+		hasAlertID := strings.TrimSpace(req.AlertID) != ""
+
+		// Dedup fast path: if alertId provided, return any existing incident with
+		// the same alertId (the common re-post case) without inserting again.
+		if hasAlertID {
+			handled, derr := returnExistingIncidentByAlert(ctx, db, w, req.AlertID)
+			if derr != nil {
+				log.Printf("dedup check error: %v", derr)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+				return
+			}
+			if handled {
 				return
 			}
 		}
@@ -90,12 +136,28 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 			)
 		}
 		if err != nil {
+			// Concurrency: two requests carrying the same alertId can both pass the
+			// dedup SELECT (no row yet) and race into INSERT. The partial UNIQUE
+			// index (idx_incidents_alert_id) lets exactly one win; the loser's
+			// INSERT fails with SQLITE_CONSTRAINT_UNIQUE. Treat that as a dedup hit
+			// (not a 5xx): the winner has committed, so re-select and return 200.
+			// This closes the check-then-insert race window without a transaction.
+			if hasAlertID && isUniqueViolation(err) {
+				handled, selErr := returnExistingIncidentByAlert(ctx, db, w, req.AlertID)
+				if selErr == nil && handled {
+					return
+				}
+				log.Printf("unique-violation re-select failed: alertId=%s handled=%v selErr=%v", req.AlertID, handled, selErr)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+				return
+			}
 			log.Printf("insert incident error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 			return
 		}
 
 		incidentID, _ := result.LastInsertId()
+		markWALDirty()
 
 		// Ensure device is registered/restored if deviceId provided (best-effort)
 		if req.SiteID != "" && strings.TrimSpace(req.DeviceID) != "" {
@@ -308,6 +370,7 @@ func handleAcknowledgeIncident(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		markWALDirty()
 		log.Printf("incident %d acknowledged by %s", id, username)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "acknowledged"})
 	}
@@ -386,6 +449,7 @@ func handleResolveIncident(db *sql.DB) http.HandlerFunc {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "incident is already resolved"})
 			return
 		}
+		markWALDirty()
 
 		// Fetch resolved_at timestamp for archive finalization
 		var resolvedAt string
@@ -558,6 +622,7 @@ func handleResolveIncidentFromSensor(db *sql.DB) http.HandlerFunc {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "incident is already resolved"})
 			return
 		}
+		markWALDirty()
 
 		var resolvedAt string
 		db.QueryRowContext(ctx, "SELECT datetime(resolved_at) FROM incidents WHERE id = ?", incidentID).Scan(&resolvedAt)
