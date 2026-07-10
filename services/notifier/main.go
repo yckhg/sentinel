@@ -199,7 +199,7 @@ func requestTempLink(cfg Config, label string) (*TempLinkResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal temp link request: %w", err)
 	}
-	resp, err := httpClient.Post(cfg.WebBackendURL+"/api/links/temp", "application/json", bytes.NewReader(payload))
+	resp, err := httpClient.Post(cfg.WebBackendURL+"/internal/links/temp", "application/json", bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("request temp link: %w", err)
 	}

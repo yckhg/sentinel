@@ -69,7 +69,10 @@ func main() {
 
 	// Internal service routes (no auth — accessed by other services via Docker network)
 	mux.HandleFunc("GET /internal/contacts", handleListContacts(db))
+	// Temp link issuance: /api/links/temp is admin-only (proxied externally);
+	// /internal/links/temp is the unauthenticated Docker-internal path (notifier).
 	mux.HandleFunc("POST /api/links/temp", handleCreateTempLink(db))
+	mux.HandleFunc("POST /internal/links/temp", handleInternalCreateTempLink(db))
 	mux.HandleFunc("GET /api/links/verify/{token}", handleVerifyTempLink())
 
 	// Internal cameras list (no auth — for cctv-adapter reload)
