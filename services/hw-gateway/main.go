@@ -79,6 +79,7 @@ type AlertPayload struct {
 type IncidentPayload struct {
 	SiteID      string `json:"siteId"`
 	DeviceID    string `json:"deviceId,omitempty"`
+	AlertID     string `json:"alertId,omitempty"`
 	Description string `json:"description"`
 	OccurredAt  string `json:"occurredAt"`
 	IsTest      bool   `json:"isTest,omitempty"`
@@ -309,16 +310,18 @@ func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
 		return
 	}
 
-	// Deduplication: skip already-processed alertIds (in-memory, resets on restart)
+	// Deduplication: skip already-processed alertIds (in-memory, resets on restart).
+	// NOTE: registration happens only AFTER a successful forward (see below), so a
+	// forward that ultimately fails (e.g. web-backend 5xx after retries) does not block
+	// the firmware's retransmit from recovering.
 	if alert.AlertID != "" {
 		processedAlertsMu.Lock()
-		if _, exists := processedAlerts[alert.AlertID]; exists {
-			processedAlertsMu.Unlock()
+		_, exists := processedAlerts[alert.AlertID]
+		processedAlertsMu.Unlock()
+		if exists {
 			log.Printf("[ALERT] Duplicate alertId=%s, skipping", alert.AlertID)
 			return
 		}
-		processedAlerts[alert.AlertID] = alertEntry{insertedAt: time.Now()}
-		processedAlertsMu.Unlock()
 	}
 
 	// Use siteId from topic for consistency
@@ -335,6 +338,7 @@ func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
 
 	// Forward to notifier and web-backend in parallel
 	done := make(chan struct{}, 2)
+	var forwardOK bool
 
 	go func() {
 		defer func() { done <- struct{}{} }()
@@ -343,7 +347,7 @@ func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
 
 	go func() {
 		defer func() { done <- struct{}{} }()
-		forwardToWebBackend(webBackendURL, &alert)
+		forwardOK = forwardToWebBackend(webBackendURL, &alert)
 	}()
 
 	// Best-effort: register device in web-backend (fire-and-forget)
@@ -351,6 +355,16 @@ func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
 
 	<-done
 	<-done
+
+	// Record the alertId for dedup ONLY after the incident was successfully forwarded (2xx).
+	// The two channel receives above establish happens-before on forwardOK (written by the
+	// forward goroutine), so this read is race-free. If the forward ultimately failed, we
+	// leave the alertId unrecorded so a firmware retransmit can retry.
+	if alert.AlertID != "" && forwardOK {
+		processedAlertsMu.Lock()
+		processedAlerts[alert.AlertID] = alertEntry{insertedAt: time.Now()}
+		processedAlertsMu.Unlock()
+	}
 }
 
 func forwardToNotifier(notifierURL string, alert *AlertPayload) {
@@ -413,11 +427,16 @@ func sanitizeTimestamp(raw string, deviceID string) time.Time {
 	return time.Now().UTC()
 }
 
-func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
+// forwardToWebBackend POSTs the incident to web-backend, retrying on transport errors and
+// HTTP 5xx (transient/server-side). A 4xx is a client error and is NOT retried. Returns true
+// only when the incident was accepted (2xx). The 2xx path also covers web-backend's
+// alertId-based dedup (returns the existing incident 200 on a duplicate).
+func forwardToWebBackend(webBackendURL string, alert *AlertPayload) bool {
 	occurredAt := sanitizeTimestamp(alert.Timestamp, alert.DeviceID)
 	incident := IncidentPayload{
 		SiteID:      alert.SiteID,
 		DeviceID:    alert.DeviceID,
+		AlertID:     alert.AlertID,
 		Description: alert.Description,
 		OccurredAt:  occurredAt.Format(time.RFC3339),
 		IsTest:      alert.Test,
@@ -425,7 +444,7 @@ func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
 	body, err := json.Marshal(incident)
 	if err != nil {
 		log.Printf("[FORWARD] Failed to marshal incident for web-backend: %v", err)
-		return
+		return false
 	}
 	url := fmt.Sprintf("%s/api/incidents", webBackendURL)
 
@@ -439,27 +458,40 @@ func forwardToWebBackend(webBackendURL string, alert *AlertPayload) {
 		if reqErr != nil {
 			cancel()
 			log.Printf("[FORWARD] Failed to create web-backend request: %v", reqErr)
-			return
+			return false
 		}
 		req.Header.Set("Content-Type", "application/json")
 
 		resp, doErr := httpClient.Do(req)
 		if doErr == nil {
+			status := resp.StatusCode
+			resp.Body.Close()
 			cancel()
-			defer resp.Body.Close()
-			log.Printf("[FORWARD] Web-backend response: %d", resp.StatusCode)
-			return
+			log.Printf("[FORWARD] Web-backend response: %d", status)
+			// 2xx: accepted (create 201 or dedup 200). 4xx: client error, do not retry.
+			if status < 500 {
+				return status >= 200 && status < 300
+			}
+			// 5xx: fall through to the retry/backoff below.
+		} else {
+			cancel()
 		}
-		cancel()
 
 		if attempt < maxRetries {
 			delay := backoffWithJitter(baseDelay, attempt)
-			log.Printf("[FORWARD] Failed to send incident to web-backend: %v (retry %d/%d in %v)", doErr, attempt+1, maxRetries, delay.Round(time.Millisecond))
+			if doErr != nil {
+				log.Printf("[FORWARD] Failed to send incident to web-backend: %v (retry %d/%d in %v)", doErr, attempt+1, maxRetries, delay.Round(time.Millisecond))
+			} else {
+				log.Printf("[FORWARD] Web-backend returned 5xx (retry %d/%d in %v)", attempt+1, maxRetries, delay.Round(time.Millisecond))
+			}
 			time.Sleep(delay)
-		} else {
+		} else if doErr != nil {
 			log.Printf("[FORWARD] All retries exhausted for web-backend: %v", doErr)
+		} else {
+			log.Printf("[FORWARD] All retries exhausted for web-backend (last response 5xx)")
 		}
 	}
+	return false
 }
 
 func handleHeartbeat(msg mqtt.Message, webBackendURL string) {

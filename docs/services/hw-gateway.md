@@ -64,8 +64,9 @@ docker compose logs -f hw-gateway
    - 페이로드: crisis 이벤트 (siteId, deviceId, timestamp, description)
    - 타임아웃 10s, 실패 시 exponential backoff + jitter 재시도
 2. **web-backend** `POST http://web-backend:8080/api/incidents`
-   - 페이로드: 같은 crisis 이벤트 (incident 기록 + WebSocket push 트리거). `deviceId` 필드 포함 (사고 추적용).
+   - 페이로드: 같은 crisis 이벤트 (incident 기록 + WebSocket push 트리거). `deviceId`(사고 추적용) + `alertId`(web-backend DB dedup 키) 필드 포함.
    - notifier 호출과 **병렬** 실행 (goroutine)
+   - 재시도: 전송 계층 오류 **및 HTTP 5xx**(서버측 일시 오류)에 대해 exponential backoff + jitter 재시도. 4xx(클라이언트 오류)는 재시도하지 않음. 2xx(생성 201 또는 dedup 200)에서만 성공으로 판정.
 3. **web-backend** `POST http://web-backend:8080/api/devices/seen`
    - 페이로드: `{siteId, deviceId, alertState}`
    - `alertState`: heartbeat에서는 수신된 값(`"none"` | `"active"`), alert/candidate에서는 `"none"` 고정
@@ -81,7 +82,7 @@ docker compose logs -f hw-gateway
 ## Constraints / Known Issues
 
 - MQTT 자동 재연결 (exponential backoff). 브로커 다운 시 대기 중인 메시지는 로컬 버퍼 없음 → 유실 가능.
-- crisis forward는 at-most-once가 아니라 재시도 기반. 수신 측(notifier, web-backend)은 멱등 처리가 유리하나 현재는 단순 중복 발생 가능.
+- crisis forward는 at-most-once가 아니라 재시도 기반. web-backend는 `alertId`로 DB dedup하고, 본 서비스도 `alertId` 단위 in-memory dedup을 둔다. in-memory dedup 등록은 web-backend로의 forward가 2xx로 성공한 **이후에만** 이뤄지므로, forward가 최종 실패(5xx 재시도 소진 등)한 이벤트는 dedup에 막히지 않고 펌웨어 재전송으로 복구될 수 있다.
 - 장비 상태는 휘발성. 재시작 시 모두 "unknown" → 첫 heartbeat까지 dead.
 - MQTT 스펙 변경 시 `.claude/hooks/mqtt-spec-sync-check.sh`가 `interfaces/mqtt-publisher-guide.md`와 `main.go` 동시 수정을 강제한다.
 
