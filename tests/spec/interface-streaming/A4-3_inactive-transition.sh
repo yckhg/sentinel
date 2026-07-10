@@ -12,8 +12,8 @@ fi
 KEY="${STREAM_KEY:-spec-test-a1}"
 # 40초 테스트 push 후 자연 종료 → 40초 대기 → 판정
 docker run --rm --network sentinel_sentinel-net --entrypoint ffmpeg linuxserver/ffmpeg \
-  -f lavfi -i "testsrc=size=640x360:rate=15" -f lavfi -i sine \
-  -t 40 -c:v libx264 -profile:v baseline -tune zerolatency -bf 0 -g 30 -c:a aac \
+  -re -f lavfi -i "testsrc=size=640x360:rate=15" -f lavfi -i sine \
+  -t 40 -c:v libx264 -pix_fmt yuv420p -profile:v baseline -tune zerolatency -bf 0 -g 30 -c:a aac \
   -f flv "rtmp://streaming:1935/live/${KEY}" >/dev/null 2>&1
 sleep 40
 docker exec sentinel-cctv-adapter wget -qO- http://streaming:8080/api/streams | \

@@ -60,7 +60,7 @@
 - E. **상대 URL 정책**: `/api/streams` 응답의 모든 `hlsUrl`이 `/live/`로 시작하고 `index.m3u8`으로 끝나는 상대 경로이며, 스킴(`http://`)이나 호스트명을 포함하지 않는다. 또한 각 항목에서 `cameraId == streamKey` 다.
 - F. **HLS 응답 규격**: 단언 C의 m3u8 응답이 [docs/spec/interface-streaming.md](interface-streaming.md) §계약 2의 단언 A2-1(헤더·Content-Type 판정)을 통과한다. 헤더 값은 그 단언이 소유하며 여기서 재정의하지 않는다.
 - G. **휘발성**: 스트림 발행 이력이 있는 상태에서 컨테이너를 **재생성**(예: `docker compose up -d --force-recreate streaming`)하면, 직후 `/api/streams`가 `[]`를 반환한다 (이전 스트림 잔재 없음). 단순 재시작(`docker compose restart streaming`)은 쓰기 레이어를 보존하여 잔존 playlist가 목록에 남으므로 본 단언의 대상이 아니다.
-- H. **규격 위반 입력의 조기 실패 (회귀)**: B-frame이 포함된 RTMP push(예: `-bf 2`)는 지속 가능한 스트림을 만들지 못한다 — push 시작 후 수 초 내 연결이 리셋되거나, 30초 시점에 해당 스트림의 m3u8이 정상 갱신되지 않는다. (규격 위반이 조용히 수용되지 않음을 확인)
+- H. **remux-only 코덱 무검사 (회귀)**: 허브(nginx-rtmp v1.2.2)는 remux 전용이라 코덱/B-frame을 검사·거부하지 않는다. B-frame이 포함된 RTMP push(예: `-bf 2`)도 조기 종료 없이 지속되고 active m3u8을 서빙한다. B-frame 금지는 허브가 아니라 **push 측(어댑터) 계약**이다 — [interface-streaming.md](interface-streaming.md) §계약 1·A1-3 참조. <!-- 정정(코드-실측 타이브레이크, domain3 미디어 감사): `-re -pix_fmt yuv420p -bf 2 -profile:v main` push가 25초 완주(rc=0)하고 active m3u8을 서빙함을 실측. 이전 전제 "허브가 B-frame 포함 FLV를 ~5초 후 연결 종료"는 허위(nginx-rtmp는 코덱 무검사 remux). 허브측 거부 단언을 삭제하고 push측 계약으로 재정의. -->
 
 ## ⚠️ 리뷰 필요 (의도 불확실)
 

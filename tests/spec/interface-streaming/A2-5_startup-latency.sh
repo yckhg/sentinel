@@ -10,8 +10,8 @@ fi
 
 KEY="${STREAM_KEY:-spec-test-a25}"
 docker run -d --rm --name spec-a25-push --network sentinel_sentinel-net --entrypoint ffmpeg linuxserver/ffmpeg \
-  -f lavfi -i "testsrc=size=640x360:rate=15" -f lavfi -i sine \
-  -t 60 -c:v libx264 -profile:v baseline -tune zerolatency -bf 0 -g 30 -c:a aac \
+  -re -f lavfi -i "testsrc=size=640x360:rate=15" -f lavfi -i sine \
+  -t 60 -c:v libx264 -pix_fmt yuv420p -profile:v baseline -tune zerolatency -bf 0 -g 30 -c:a aac \
   -f flv "rtmp://streaming:1935/live/${KEY}" >/dev/null
 trap 'docker rm -f spec-a25-push >/dev/null 2>&1 || true' EXIT
 START=$(date +%s)

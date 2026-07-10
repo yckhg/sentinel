@@ -132,7 +132,7 @@
 
 구독자: hw-gateway (`safety/+/alert`, QoS 2). 유효한 alert 수신 시 발행자는 다음을 기대할 수 있다:
 
-1. **incident 생성** — web-backend에 `{siteId, deviceId, description, occurredAt, isTest}` 기록 + WebSocket으로 웹 UI 실시간 푸시.
+1. **incident 생성** — web-backend에 `{siteId, deviceId, alertId, description, occurredAt, isTest}` 기록 + WebSocket으로 웹 UI 실시간 푸시. `alertId`는 web-backend가 dedup 키로 사용한다(아래 4번 중복 무시의 근거). <!-- 정정(코드-실측): main.go IncidentPayload 가 AlertID 도 전송하며 web-backend incidents.go 가 이를 dedup 키로 사용. 이전 필드 목록은 alertId 누락. -->
 2. **알림 채널 발송** — notifier가 전체 페이로드를 받아 알림 발송.
 3. **device 자동 등록** — 처음 보는 `(siteId, deviceId)`는 devices 테이블에 자동 등록, 기존이면 `last_seen` 갱신, soft-delete 상태면 복원.
 4. **중복 무시** — 동일 `alertId` 재수신 시 추가 incident를 생성하지 않는다 (MQTT ACK만 반환).
@@ -560,7 +560,7 @@ db-query "SELECT resolved_at FROM incidents WHERE site_id='site1' ORDER BY id DE
 | Malformed JSON | 무시 + 에러 로그 |
 | 필수 필드 누락 | 무시 + 경고 로그 |
 | notifier 호출 실패 | 에러 로그, incident 기록은 계속 |
-| web-backend 호출 실패 (incident forward) | **transport 에러(연결 실패/타임아웃)만** 최대 3회 재시도 (지수 백오프 + jitter, base 1s). **HTTP 응답을 받으면 상태 코드와 무관하게(4xx/5xx 포함) 재시도하지 않는다** — 상태 코드는 로그만 남김 |
+| web-backend 호출 실패 (incident forward) | **transport 에러(연결 실패/타임아웃) 및 HTTP 5xx** 최대 3회 재시도 (지수 백오프 + jitter, base 1s). **4xx는 클라이언트 에러로 재시도하지 않음.** 2xx일 때만 수락(생성 201 또는 dedup 200)으로 판정 <!-- 정정(코드-실측 타이브레이크, 근거 main.go:447-511): `if status < 500 { return 2xx }` — 5xx는 return 하지 않고 retry/backoff 루프로 폴스루하여 최대 3회 재시도한다. 이전 표기 "HTTP 응답을 받으면 4xx/5xx 무관 재시도 안 함"은 코드와 정면 모순(stale). web-backend alertId dedup(incidents.go)이 5xx 재시도의 중복 incident 생성을 막으므로 코드 자체는 안전. --> |
 | device 등록 호출 실패 | 무시 (best-effort, 재시도 없음) |
 | Broker 끊김 | 자동 재연결 (지수 백오프, max 60s) |
 

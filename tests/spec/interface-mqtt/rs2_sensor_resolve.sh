@@ -15,7 +15,12 @@ if [ "${ALLOW_MUTATING:-0}" != "1" ]; then
 fi
 
 # 전제: site1에 미해결 incident 존재 (A-1 유형으로 생성). 최근 미해결 incident가 해소됨!
-open_id=$(db_query "SELECT id FROM incidents WHERE site_id='site1' AND resolved_at IS NULL ORDER BY id DESC LIMIT 1;")
+# NOTE(harness fix): incidentId=0 fallback 은 web-backend(incidents.go:512)에서
+#   `status != 'resolved' ORDER BY datetime(occurred_at) DESC LIMIT 1` 로 대상을 고른다.
+#   이전 버전은 `resolved_at IS NULL ORDER BY id DESC` 로 골라, 코드가 실제 해소하는 대상과
+#   다른 incident 를 검사해 false-NOK 를 냈다(id 최신 ≠ occurred_at 최신). 코드와 동일한
+#   기준으로 대상을 선택하도록 정렬/조건을 맞춘다.
+open_id=$(db_query "SELECT id FROM incidents WHERE site_id='site1' AND status != 'resolved' ORDER BY datetime(occurred_at) DESC LIMIT 1;")
 [ -n "$open_id" ] || { echo "SKIPPED: site1 미해결 incident 없음 (전제 미충족)"; exit 2; }
 $PUB -q 1 -t "safety/site1/alert/resolved" \
   -m "{\"incidentId\":0,\"siteId\":\"site1\",\"resolvedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"resolvedBy\":{\"kind\":\"sensor_button\",\"id\":\"SPEC-01\",\"label\":\"SPEC-01 reset 버튼\"}}"

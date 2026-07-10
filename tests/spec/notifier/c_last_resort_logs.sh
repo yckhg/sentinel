@@ -22,9 +22,13 @@ en=$(docker inspect sentinel-notifier --format "{{range .Config.Env}}{{println .
 [ -z "$en" ] || { echo "SKIPPED: 외부 채널 활성 상태 — 전제 불일치"; exit 2; }
 ncontacts=$(db_query "SELECT COUNT(*) FROM contacts WHERE deleted_at IS NULL;" 2>/dev/null || db_query "SELECT COUNT(*) FROM contacts;")
 [ "$ncontacts" -ge 1 ] || { echo "SKIPPED: 연락처 0건 — 전제 미충족"; exit 2; }
+# SINCE = 주입 직전 절대 타임스탬프. `--since 30s` 상대창은 순차 실행 시 직전 이벤트(A/B)의
+# "System alarm" 로그를 계수에 섞어 건수 불일치 오판(false-NOK)을 낸다. 이 주입 이후의
+# 로그만 보도록 시간창을 고정한다.
+SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ncurl "-s -o /dev/null -X POST http://notifier:8080/api/notify -H \"Content-Type: application/json\" \
   -d \"{\\\"siteId\\\":\\\"site1\\\",\\\"deviceId\\\":\\\"TEST-C1\\\",\\\"type\\\":\\\"gas_leak\\\",\\\"timestamp\\\":\\\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\\",\\\"test\\\":true}\""
 sleep 8
-alarms=$(docker logs sentinel-notifier --since 30s 2>&1 | grep -c "System alarm")
+alarms=$(docker logs sentinel-notifier --since "$SINCE" 2>&1 | grep -c "System alarm")
 echo "연락처=$ncontacts 알람시도로그=$alarms"
 [ "$alarms" = "$ncontacts" ] && { echo OK; exit 0; } || { echo "NOK: 건수 불일치"; exit 1; }

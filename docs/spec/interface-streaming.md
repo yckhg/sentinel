@@ -39,9 +39,9 @@
 | Protocol | RTMP (push) |
 | Endpoint | `rtmp://streaming:1935/live/{streamKey}` (내부 네트워크 전용) |
 | Container | FLV (`-f flv`) |
-| Video codec | H.264 — profile은 강제되지 않음 (B-frame 없는 스트림이면 수락. Baseline 권장 — ⚠️ 리뷰 필요 5 참조) |
+| Video codec | H.264 — profile·B-frame 모두 허브에서 강제/검사되지 않음 (remux-only 통과). B-frame 없는 Baseline 권장이나 이는 push 측 책임 — ⚠️ 리뷰 필요 5 참조 |
 | Audio codec | AAC (LC, HE-AAC 등 모든 profile 허용) |
-| **B-frames** | **금지** — nginx-rtmp v1.2.2가 B-frame composition time offset 포함 FLV를 ~5초 후 연결 종료 |
+| **B-frames** | **push 측에서 금지(권장)** — 허브(nginx-rtmp v1.2.2)는 remux 전용이라 B-frame을 거부하지 않고 그대로 통과시킨다. B-frame은 HLS 플레이어 호환성·재생 지연 문제를 유발하므로 어댑터가 `-bf 0`/`-tune zerolatency`로 제거해야 한다(이행 책임은 push 측). <!-- 정정(코드-실측 타이브레이크): 이전 표기 "허브가 B-frame 포함 FLV를 ~5초 후 연결 종료"는 허위. `-bf 2` push 25초 완주·active m3u8 실측(domain3 감사). --> |
 | **키프레임 간격** | **최대 2초 요구** — streaming은 키프레임에서만 HLS fragment를 자르므로(계약 2), 소스 키프레임 간격이 2초를 넘으면 세그먼트 길이·초기 재생 지연이 그만큼 늘어난다. 위반해도 push는 수락되지만(연결 거부 없음) 계약 2의 fragment/지연 수치는 보장되지 않는다. 재인코딩 시 `-g <2×fps>` 지정 (⚠️ 리뷰 필요 6 참조) |
 | streamKey | 영숫자/하이픈 권장, 슬래시 금지. 형식은 강제되지 않음 — `cam-{8hex}`는 web-backend가 카메라 생성 시 발급하는 **생성 기본값(권장)**이며, 다른 형식(예: `yt-cam-1`)도 실존·수락된다 |
 
@@ -52,7 +52,7 @@
 
 ### 핵심 로직 (동작 — 불변식)
 
-- **B-frame 불변식**: 소스에 B-frame 포함 가능성이 있으면 push 측에서 `-tune zerolatency` 또는 `-bf 0`으로 제거해야 한다. 근거는 입력 표의 B-frame 금지 조항(nginx-rtmp v1.2.2가 B-frame 포함 FLV 연결을 조기 종료) — push가 지속되려면 이 불변식이 소스 측에서 보장되어야 한다.
+- **B-frame 불변식 (push 측 책임)**: 소스에 B-frame 포함 가능성이 있으면 push 측에서 `-tune zerolatency` 또는 `-bf 0`으로 제거해야 한다. 허브는 remux 전용이라 B-frame을 거부하지 않고 그대로 통과시키므로(코드-실측), 이 불변식은 **어댑터(push 측)에서만** 보장된다 — 허브가 강제해 주지 않는다. B-frame이 통과하면 HLS 플레이어 호환성/재생 지연이 저하된다. <!-- 정정(코드-실측 타이브레이크): 이전 근거 "허브가 B-frame FLV 연결을 조기 종료"는 허위. -->
 - **copy 우선 원칙**: 소스가 이미 B-frame 없는 H.264 + AAC면 어댑터는 `-c copy`로 push한다 (RTSP 어댑터 표준 패턴). 재인코딩은 B-frame 제거 등 계약 준수를 위해 불가피할 때만 허용.
 - streamKey는 push URL의 마지막 path segment이며, 이후 모든 산출물(HLS 경로, 상태 API의 `streamKey`/`cameraId`)의 식별자가 된다.
 
@@ -80,7 +80,7 @@ ffmpeg -i <source> \
   # exit code 0 → OK / 60초 이전 비정상 종료 → NOK
   ```
 - **A1-2 (HLS 자동 생성)**: A1-1 push 시작 후 10초 이내에 `curl -sf http://streaming:8080/live/spec-test-a1/index.m3u8`이 HTTP 200 + `#EXTM3U`로 시작하는 본문을 반환하면 OK.
-- **A1-3 (B-frame 거부 — 금지 규칙의 실효성)**: 동일 push를 `-bf 2`로 실행하면 약 5초 내 연결이 끊긴다(FFmpeg broken pipe/EOF 종료). 이 동작이 재현되면 B-frame 금지 조항 유지가 타당함이 확인(OK). 정상 지속된다면 nginx-rtmp 버전이 바뀐 것이므로 스펙 재검토(NOK → 스펙 갱신 트리거).
+- **A1-3 (remux-only 코덱 무검사)**: 동일 push를 `-bf 2 -profile:v main`으로 실행하면 허브가 거부하지 않고 지속되며 active m3u8을 서빙한다(OK). 허브(nginx-rtmp v1.2.2)는 remux 전용이라 코덱/B-frame을 검사하지 않는다 — B-frame 금지는 push 측(어댑터) 계약이다(§계약 1). 조기 종료(거부)되면 nginx-rtmp 동작이 바뀐 것이므로 스펙 재검토(NOK → 스펙 갱신 트리거). <!-- 정정(코드-실측 타이브레이크, domain3 감사): 이전 단언 "B-frame push가 ~5초 내 연결 종료(거부)"는 허위. `-re -pix_fmt yuv420p -bf 2` push 25초 완주·active m3u8. 허브측 거부 단언을 "허브가 통과시킴(remux-only)"으로 재정의. -->
 
 ---
 
@@ -188,7 +188,7 @@ ffmpeg -i <source> \
 | `streamKey` | `cameraId`와 항상 동일 |
 | `hlsUrl` | 상대 경로, 정확히 `/live/{streamKey}/index.m3u8` |
 | `active` | boolean — 아래 판정 기준 |
-| `startedAt` | RFC3339 UTC 타임스탬프 |
+| `startedAt` | RFC3339 UTC 타임스탬프 — **실측 의미는 playlist 최종 수정 시각(mtime)**이며 라이브 중 폴링마다 갱신된다. "스트림 시작 시각"이 아니다(이름과 불일치, ⚠️ 리뷰 필요 1). <!-- 정정(코드-실측): services/streaming/main.go 는 info.ModTime() 을 startedAt 으로 반환. 필드명 변경(lastUpdatedAt) vs 시작시각 추적은 설계 판단(리뷰 1). --> |
 
 - 스트림이 하나도 없으면 빈 배열 `[]` (200, null 아님)
 

@@ -11,8 +11,8 @@ fi
 KEY="${STREAM_KEY:-spec-test-a1}"
 START=$(date +%s)
 docker run --rm --network sentinel_sentinel-net --entrypoint ffmpeg linuxserver/ffmpeg \
-  -f lavfi -i "testsrc=size=640x360:rate=15" -f lavfi -i sine \
-  -t 60 -c:v libx264 -profile:v baseline -tune zerolatency -bf 0 -g 30 -c:a aac \
+  -re -f lavfi -i "testsrc=size=640x360:rate=15" -f lavfi -i sine \
+  -t 60 -c:v libx264 -pix_fmt yuv420p -profile:v baseline -tune zerolatency -bf 0 -g 30 -c:a aac \
   -f flv "rtmp://streaming:1935/live/${KEY}"
 RC=$?
 ELAPSED=$(( $(date +%s) - START ))
