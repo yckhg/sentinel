@@ -11,19 +11,36 @@ docs/
 ├── architecture-overview.md           ← 시스템 전체 그림 (orchestrator 전용)
 ├── adapter-checklist.md               ← 새 adapter/video source 추가 절차
 ├── operational-rules.md               ← 네이밍/설정/모니터링 정책
+├── hw/                                 ← 하드웨어 조달 스펙 (orchestrator 전용)
+│   ├── pc-spec.md                     ← 미니 PC + CCTV 카메라 사양 (CCTV 4대 기준)
+│   └── remote-relay-switch.md         ← MQTT 트리거 원격 릴레이 스위치(설비 전원 차단) 사양
 ├── interfaces/                        ← 서비스 간 계약 SSOT
 │   ├── mqtt-publisher-guide.md        ← MQTT 토픽/페이로드 SSOT (펌웨어 진입점)
 │   ├── streaming-api.md               ← CCTV/streaming 어댑터 통합 SSOT
 │   └── web-api.md                     ← web-backend HTTP/WebSocket SSOT
-└── services/                          ← 서비스별 구현 가이드
-    ├── hw-gateway.md                  ← MQTT ↔ DB ↔ notifier 중계
-    ├── cctv-adapter.md                ← RTSP → HLS 변환 어댑터
-    ├── youtube-adapter.md             ← YouTube Live → HLS 어댑터
-    ├── streaming.md                   ← HLS 세그먼트 배포
-    ├── recording.md                   ← 세그먼트 저장/보존
-    ├── notifier.md                    ← 알림 라우팅 (SMS/Kakao/Web)
-    ├── web-backend.md                 ← HTTP API + WebSocket 허브
-    └── web-frontend.md                ← 모바일 우선 React UI
+├── services/                          ← 서비스별 구현 가이드
+│   ├── hw-gateway.md                  ← MQTT ↔ DB ↔ notifier 중계
+│   ├── cctv-adapter.md                ← RTSP → HLS 변환 어댑터
+│   ├── youtube-adapter.md             ← YouTube Live → HLS 어댑터
+│   ├── streaming.md                   ← HLS 세그먼트 배포
+│   ├── recording.md                   ← 세그먼트 저장/보존
+│   ├── notifier.md                    ← 알림 라우팅 (SMS/Kakao/Web)
+│   ├── web-backend.md                 ← HTTP API + WebSocket 허브
+│   └── web-frontend.md                ← 모바일 우선 React UI
+└── spec/                              ← 선언적 계약 스펙 + 검증 (spec-write/spec-tdd 산출물, Designer·Verifier 전용)
+    ├── INDEX.md                       ← spec↔테스트 매핑 + 판정 현황 + SKIP 해제 조건 (진입점)
+    ├── VERIFICATION-REPORT.md         ← 초판 스펙 간 정합성 검증 리포트
+    ├── interface-mqtt.md              ← MQTT 인터페이스 계약 스펙
+    ├── interface-streaming.md         ← streaming 인터페이스 계약 스펙
+    ├── interface-web-api.md           ← web-api 인터페이스 계약 스펙
+    ├── hw-gateway.md                  ← hw-gateway 서비스 계약 스펙
+    ├── cctv-adapter.md                ← cctv-adapter 서비스 계약 스펙
+    ├── youtube-adapter.md             ← youtube-adapter 서비스 계약 스펙
+    ├── streaming.md                   ← streaming 서비스 계약 스펙
+    ├── recording.md                   ← recording 서비스 계약 스펙
+    ├── notifier.md                    ← notifier 서비스 계약 스펙
+    ├── web-backend.md                 ← web-backend 서비스 계약 스펙
+    └── web-frontend.md                ← web-frontend 서비스 계약 스펙
 ```
 
 ## 2. 독자별 진입점 맵
@@ -65,10 +82,20 @@ docs/
 1. `architecture-overview.md` — 시스템 전체 그림
 2. `interfaces/*.md` 3종 — 서비스 간 계약
 3. `services/*.md` — 필요 시 개별 서비스
+4. `hw/*.md` — 필요 시 하드웨어 조달/설비 연동 의사결정 (미니 PC·CCTV 사양, 원격 릴레이 스위치)
+5. `spec/INDEX.md` — spec-orchestrate로 스펙 기반 작업을 디스패치할 때 진입점
 
 > **중요:** `architecture-overview.md`는 **orchestrator 전용**입니다. 하위 Agent/Ralph 세션에 전달 금지.
 > 구현을 위임할 때는 해당 `services/<name>.md` + 닿는 `interfaces/*.md`만 프롬프트에 명시하세요.
 > (`~/projects/sentinel/CLAUDE.md` Doc Orchestration 규칙 참조)
+
+### (e) 스펙 작성/검증 담당자 (Designer·Verifier — spec-write / spec-tdd / spec-orchestrate 워크플로)
+
+1. `spec/INDEX.md` — **필수, 단일 진입점** (spec↔테스트 매핑, 판정 현황, SKIP 해제 조건)
+2. `spec/<대상>.md` — 작업 대상 계약 스펙만 (다른 서비스의 spec은 읽지 않음)
+3. `spec/VERIFICATION-REPORT.md` — 초판 스펙 간 정합성 검증 이력을 확인할 때만
+
+`docs/services/*.md`(구현 가이드)와는 별개 관심사입니다. `spec/`은 "무엇을 보장해야 하는가"(계약), `services/`는 "어떻게 구현했는가"(구현) — 혼동하여 함께 읽지 마세요.
 
 ## 3. 레거시 파일 상태
 
