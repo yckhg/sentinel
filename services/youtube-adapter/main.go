@@ -88,6 +88,7 @@ type StreamManager struct {
 	streams map[string]*streamState
 	sources []YouTubeSource
 	rtmpURL string
+	wg      sync.WaitGroup // tracks running manageStream goroutines for graceful shutdown
 }
 
 func NewStreamManager(sources []YouTubeSource, rtmpURL string) *StreamManager {
@@ -104,11 +105,28 @@ func (m *StreamManager) StartAll() {
 	}
 }
 
+// StopAll signals every stream to stop and blocks until their FFmpeg processes
+// have completed the SIGTERM → 5s grace → SIGKILL sequence, so children receive
+// a genuine graceful shutdown instead of being killed by the caller's immediate
+// os.Exit. The wait is bounded so a stream stuck resolving (yt-dlp) cannot hang
+// shutdown indefinitely.
 func (m *StreamManager) StopAll() {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	for _, state := range m.streams {
 		close(state.stopCh)
+	}
+	m.mu.RUnlock()
+
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Println("All streams stopped gracefully")
+	case <-time.After(10 * time.Second):
+		log.Println("Timed out waiting for streams to stop; proceeding with shutdown")
 	}
 }
 
@@ -167,10 +185,12 @@ func (m *StreamManager) startStream(src YouTubeSource) {
 	m.streams[src.ID] = state
 	m.mu.Unlock()
 
+	m.wg.Add(1)
 	go m.manageStream(src, state)
 }
 
 func (m *StreamManager) manageStream(src YouTubeSource, state *streamState) {
+	defer m.wg.Done()
 	backoff := time.Second
 	maxBackoff := 30 * time.Second
 
