@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -484,6 +485,20 @@ func main() {
 		}
 		defer resp.Body.Close()
 
+		// A non-200 response is a degraded/failed web-backend reply, not an
+		// authoritative "empty camera list". Treat it as an access failure and
+		// preserve the currently running push processes (spec §output: reload
+		// failure → 502, existing processes unchanged). Only an explicit 200
+		// with a valid body is allowed to reconcile/teardown.
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			log.Printf("[reload] web-backend returned non-200 status %d: %s", resp.StatusCode, string(body))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			w.Write([]byte(`{"error":"web-backend returned non-200 status"}`))
+			return
+		}
+
 		var cameras []struct {
 			Name       string `json:"name"`
 			StreamKey  string `json:"streamKey"`
@@ -520,6 +535,19 @@ func main() {
 			"cameras": len(rtspCameras),
 		})
 	})
+
+	// Graceful shutdown: on SIGTERM/SIGINT, terminate ffmpeg children through
+	// the SIGTERM → 5s grace → SIGKILL path (manager.Stop blocks until done)
+	// before exiting, so streaming observes a clean teardown rather than an
+	// abrupt namespace kill of the child processes.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		log.Println("Shutting down, stopping camera streams...")
+		manager.Stop()
+		os.Exit(0)
+	}()
 
 	log.Println("cctv-adapter listening on :8080")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
