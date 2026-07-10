@@ -141,7 +141,8 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
       });
       if (res.ok) {
         const data = await res.json();
-        setIncidents(data.incidents || []);
+        // GET /api/incidents envelope is { data: [...], pagination }, so read data.data.
+        setIncidents(data.data || []);
       }
     } catch {
       // silent — incidents are optional decoration

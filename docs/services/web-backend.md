@@ -14,7 +14,7 @@
 |----------|-----------|------|
 | web-frontend (REST + `/ws`) | inbound | 본 문서 "HTTP API" (공식 카탈로그는 별도 `docs/interfaces/web-api.md` 예정) |
 | hw-gateway (`POST /api/incidents`) | inbound | 본 문서 "HTTP API" |
-| notifier (`GET /api/contacts`, `POST /api/links/temp`, `POST /api/alarms`) | inbound | 본 문서 "HTTP API" |
+| notifier (`GET /api/contacts`, `POST /api/links/temp`, `POST /internal/alarms`) | inbound | 본 문서 "HTTP API" |
 | hw-gateway (restart command forward) | outbound | `POST {HW_GATEWAY_URL}/api/restart` |
 | streaming (stream list) | outbound | `GET {STREAMING_URL}/api/streams` |
 | cctv-adapter / youtube-adapter (reload) | outbound | `POST /api/cameras/reload` |
@@ -32,7 +32,7 @@ Go 파일 분리: `services/web-backend/`
 - `ratelimit.go` — login/register limiter
 
 라우팅 구조:
-- **Public mux**: healthz, `/auth/*`, `/ws`, `/api/contacts`(GET only — notifier용), `/api/links/temp`, `/api/links/verify/{token}`, `/internal/*`(내부 서비스용), `/api/invitations/verify/{token}`, `POST /api/incidents`(hw-gateway용), `POST /api/devices/seen`(hw-gateway용 — device 자동 영속), `POST /api/incidents/{id}/resolve-from-sensor`(hw-gateway용 — 센서 버튼 양방향 해소).
+- **Public mux**: healthz, `/auth/*`, `/ws`, `/api/contacts`(GET only — notifier용), `/api/links/temp`, `/api/links/verify/{token}`, `/internal/*`(내부 서비스용 — `/internal/cameras`·`/internal/settings/{key}`·`POST /internal/alarms`), `/api/invitations/verify/{token}`, `POST /api/incidents`(hw-gateway용), `POST /api/devices/seen`(hw-gateway용 — device 자동 영속), `POST /api/incidents/{id}/resolve-from-sensor`(hw-gateway용 — 센서 버튼 양방향 해소).
 - **`apiMux` (authMiddleware 적용)**: 나머지 `/api/*` 모두 (contacts CRUD, sites, cameras CRUD, incidents list/ack/resolve, equipment restart, recordings/archives proxy, settings, links 관리, devices 관리, `/api/health`, `/api/health/events`).
 
 ## Environment Variables
@@ -75,6 +75,7 @@ docker compose logs -f web-backend
 | POST | `/api/links/temp` | temp JWT link 발급 |
 | GET | `/api/links/verify/{token}` | temp link 검증 |
 | GET | `/internal/cameras`, `/internal/settings/{key}` | 내부 서비스용 (cctv/recording이 카메라 목록 fetch) |
+| POST | `/internal/alarms` | notifier용 시스템 알람 수신 → admin WS `system_alarm` 브로드캐스트 (DB 영속 없음) |
 
 ### Auth 필요 (`/api/*`)
 contacts/sites/cameras CRUD, incidents list/ack/resolve, **devices list/alias/soft-delete/restore**, invitations, settings, links 관리, `POST /api/equipment/restart`(→ hw-gateway forward, devices 테이블 등록+미삭제 검증), `POST /api/test-alert`(→ notifier forward), recordings/archives/storage proxy(→ recording forward).

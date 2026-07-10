@@ -162,9 +162,11 @@ Response `200`:
 
 Request:
 ```json
-{ "siteId": "site-001", "description": "...", "occurredAt": "2026-04-13 10:20:30", "isTest": false }
+{ "siteId": "site-001", "deviceId": "PRESS-01", "alertId": "uuid-optional", "description": "...", "occurredAt": "2026-04-13 10:20:30", "isTest": false }
 ```
 Response `201`: `{id, siteId, description, occurredAt}`. 부작용: 모든 WS 클라이언트에 `crisis_alert` 브로드캐스트.
+
+`alertId`(선택)가 오면 DB dedup 대상이 된다 — 동일 `alertId` 재전송은 신규 생성 없이 기존 incident를 `200`으로 반환한다. hw-gateway는 crisis forward 시 `alertId`를 함께 전달하며, 전송이 전송 계층 오류 또는 HTTP 5xx로 실패하면 재시도한다(4xx는 재시도 안 함). hw-gateway 측 in-memory dedup 등록은 2xx 응답을 받은 후에만 이뤄지므로, 5xx로 유실된 이벤트는 펌웨어 재전송으로 복구된다.
 
 ### PATCH /api/incidents/{id}/acknowledge (admin)
 
@@ -570,6 +572,15 @@ Response `200`:
 | POST | `/api/incidents` | hw-gateway가 crisis 이벤트 기록 (WS broadcast 트리거) |
 | POST | `/api/devices/seen` | hw-gateway가 heartbeat/alert 수신 시 호출 — device UPSERT, soft-deleted면 자동 복원 |
 | POST | `/api/incidents/{id}/resolve-from-sensor` | hw-gateway가 MQTT `safety/+/alert/resolved` 수신(kind=sensor_button) 시 호출 — incident attribution 기록 + WS `incident_resolved` 브로드캐스트 |
+| POST | `/internal/alarms` | notifier가 모든 외부 알림 채널(KakaoTalk/SMS) 실패 시 호출 — 시스템 알람 기록 + WS `system_alarm` 브로드캐스트 |
+
+### POST /internal/alarms (internal)
+
+Request:
+```json
+{ "type": "notification_failure", "message": "...", "details": { "...": "..." } }
+```
+`type` 생략 시 `"system_alarm"`으로 채워진다. Response `200`: `{"status": "ok"}`. 부작용: admin WS 클라이언트에 `system_alarm` 브로드캐스트 (`system_alarm`은 admin 전용). DB 영속 없음 — 보장 동작은 "수신 + admin 브로드캐스트"까지. 외부 노출 금지 — Docker network 격리 전제.
 
 ### POST /api/incidents/{id}/resolve-from-sensor (internal)
 
@@ -652,15 +663,14 @@ Response `200`: `{"status": "ok"}`.
 | `connected` | 본인 | `{userId, role, connectedAt}` |
 | `crisis_alert` | 전체 (admin/user/temp) | `{incidentId, siteId, description, occurredAt, isTest, site:{address,managerName,managerPhone}}` |
 | `incident_resolved` | 전체 (admin/user/temp) | `{incidentId, siteId, resolvedAt, resolvedByKind, resolvedById, resolvedByLabel}` |
-| `system_alarm` | admin 전용 | 임의 payload (코드에 실제 송신 지점 없음 — TBD) |
+| `system_alarm` | admin 전용 | `{type, message, details}` |
 
-`crisis_alert`는 `POST /api/incidents` 생성 시 자동 발생. `incident_resolved`는 `PATCH /api/incidents/{id}/resolve` 또는 `POST /api/incidents/{id}/resolve-from-sensor` 성공 시 발생.
+`crisis_alert`는 `POST /api/incidents` 생성 시 자동 발생. `incident_resolved`는 `PATCH /api/incidents/{id}/resolve` 또는 `POST /api/incidents/{id}/resolve-from-sensor` 성공 시 발생. `system_alarm`은 `POST /internal/alarms`(§12, notifier가 모든 외부 채널 실패 시 호출) 수신 시 발생.
 
 ---
 
 ## 14. TBD / 불확실 항목
 
-- **`system_alarm` WS 메시지**: `BroadcastSystemAlarm` 함수는 정의되어 있으나 web-backend 내부에서 호출 지점 없음. 다른 서비스가 트리거할 가능성 있으나 현재 계약 확정 불가.
 - **Recording/Archives/Storage 응답 스키마**: web-backend는 순수 프록시이므로 본 문서 범위 밖. recording 서비스 문서 필요.
 - **`/api/contacts` GET 중복 등록**: `mux`와 `apiMux` 양쪽 등록. 동작은 `apiMux` (인증 필요) 우선이지만 의도된 설계인지 확인 필요.
 - **`POST /api/incidents` 인증**: 코드상 인증 검사가 없음 (internal 가정). nginx 레벨에서 외부 차단해야 함 — 배포 설정 확인 필요.
