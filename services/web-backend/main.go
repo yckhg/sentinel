@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -189,27 +190,29 @@ func main() {
 }
 
 func initDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	// Apply pragmas via the DSN so they run on EVERY pooled connection. Setting
+	// them once with db.ExecContext only configures a single connection; other
+	// connections in the pool would keep busy_timeout=0 and immediately return
+	// SQLITE_BUSY (HTTP 500, lost writes) under concurrent writes.
+	dsn := fmt.Sprintf(
+		"%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=wal_autocheckpoint(100)",
+		path,
+	)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 
+	// SQLite allows only one writer at a time. Cap the pool at a single
+	// connection so concurrent writes serialize inside Go's sql pool (queued,
+	// not failed) — combined with busy_timeout above this makes concurrent
+	// POST /api/incidents lossless instead of racing to SQLITE_BUSY.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+
 	ctx, cancel := dbCtx(context.Background())
 	defer cancel()
-
-	// SQLite pragmas for performance and safety
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-		"PRAGMA wal_autocheckpoint=100",
-	}
-	for _, p := range pragmas {
-		if _, err := db.ExecContext(ctx, p); err != nil {
-			db.Close()
-			return nil, err
-		}
-	}
 
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
