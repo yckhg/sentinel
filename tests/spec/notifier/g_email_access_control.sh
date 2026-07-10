@@ -19,7 +19,11 @@ fi
 
 # 1) 외부 IP 403: 내부망 컨테이너에서는 시뮬레이션 불가 — 공인 IP 발신점 필요 (MANUAL).
 # 2) sanitize: 실제 메일 발송이 일어나며 수신함 관측 필요.
-: "${TEST_EMAIL:?TEST_EMAIL(수신 확인 가능한 주소) 필요}"
+# 전제 미충족(TEST_EMAIL 미설정)은 실패(NOK)가 아니라 SKIPPED(exit2) — pass/fail 오염 방지.
+if [ -z "${TEST_EMAIL:-}" ]; then
+  echo "SKIPPED (전제 미충족): TEST_EMAIL(수신 확인 가능한 주소) 미설정 — 403/sanitize 단언 검증 불가"
+  exit 2
+fi
 ncurl "-s -w \"|%{http_code}\" -X POST http://notifier:8080/api/send-email -H \"Content-Type: application/json\" \
   -d \"{\\\"to\\\":\\\"$TEST_EMAIL\\\",\\\"subject\\\":\\\"spec G sanitize\\\",\\\"body\\\":\\\"<p>hi</p><script>alert(1)</script>\\\"}\""
 echo

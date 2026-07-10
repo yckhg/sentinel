@@ -18,14 +18,20 @@ if [ "${ALLOW_MUTATING:-0}" != "1" ]; then
 fi
 
 # 주의: 검증 로직이 스펙과 다르면(NOK 케이스) 실제 발송이 일어날 수 있어 mutating으로 분류.
-# SINCE = 주입 직전 절대 타임스탬프. `--since 15s` 상대창은 순차 실행 시 직전 이벤트(A)의
-# [email]/Dispatch 채널 로그를 섞어 "발송 시도 없음" 판정을 오염(false-NOK)시킨다.
-# 채널 로그는 deviceId 를 담지 않으므로 이 주입 이후의 로그만 보도록 시간창을 고정한다.
-SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# 오염 배제 전략: 시간창(1초 해상도 SINCE)은 순차 실행 시 직전 valid-event(A)의 async dispatch
+# 로그를 창에 섞어 false-NOK 를 낸다. 채널 로그는 deviceId 를 안 담으므로 시간창으로 이 이벤트의
+# 효과만 분리하기 어렵다. 대신 **고유 deviceId 마커**로 페이로드를 태그한다:
+#  - siteId 누락 → 400 으로 검증 단계에서 거절되면 dispatch 진입 로그("Received alert ... device=마커")
+#    가 절대 생기지 않는다. 이 마커는 accept 된 이벤트의 진입 로그에만 나타나므로, 전체 로그에서
+#    마커를 grep 하면 시간창/타 이벤트 오염 없이 "이 이벤트가 dispatch 로 진입했는가"만 정확히 관측된다.
+#  - 채널 발송 시도는 accept 된 이벤트에서만 발생하므로, 마커의 dispatch 진입 부재 = 이 이벤트에
+#    기인한 채널 시도 부재. (검증이 회귀해 400 대신 accept 되면 device=마커 진입 로그가 떠 NOK.)
+MARKER="BADIN-$(date -u +%s)-$RANDOM"
 code=$(ncurl "-s -o /dev/null -w \"%{http_code}\" -X POST http://notifier:8080/api/notify \
   -H \"Content-Type: application/json\" \
-  -d \"{\\\"deviceId\\\":\\\"TEST-01\\\",\\\"type\\\":\\\"gas_leak\\\",\\\"timestamp\\\":\\\"2026-07-02T00:00:00Z\\\"}\"")
+  -d \"{\\\"deviceId\\\":\\\"$MARKER\\\",\\\"type\\\":\\\"gas_leak\\\",\\\"timestamp\\\":\\\"2026-07-02T00:00:00Z\\\"}\"")
 sleep 3
-sent=$(docker logs sentinel-notifier --since "$SINCE" 2>&1 | grep -cE "\[email\]|\[sms\]|\[kakao\]|Dispatch")
-echo "code=$code 채널로그=$sent"
-[ "$code" = 400 ] && [ "$sent" = 0 ] && { echo OK; exit 0; } || { echo NOK; exit 1; }
+# 고유 마커로 전체 로그 필터 — 시간창 불필요, 이전 테스트 오염 배제.
+entered=$(docker logs sentinel-notifier 2>&1 | grep -c "device=$MARKER")
+echo "code=$code marker=$MARKER dispatch진입로그=$entered"
+[ "$code" = 400 ] && [ "$entered" = 0 ] && { echo OK; exit 0; } || { echo NOK; exit 1; }
