@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -592,14 +593,9 @@ func (rm *RecordingManager) GeneratePlaylist(streamKey string, from, to time.Tim
 		return "", err
 	}
 
-	const segDuration = 10 // seconds
+	const segDuration = 10 * time.Second
 
-	type segment struct {
-		t    time.Time
-		name string
-	}
-
-	var segments []segment
+	var segments []playlistSeg
 	for _, f := range files {
 		if f.IsDir() || !strings.HasSuffix(f.Name(), ".ts") {
 			continue
@@ -609,10 +605,10 @@ func (rm *RecordingManager) GeneratePlaylist(streamKey string, from, to time.Tim
 		if err != nil {
 			continue
 		}
-		segEnd := t.Add(segDuration * time.Second)
+		segEnd := t.Add(segDuration)
 		// Include segment if it overlaps with [from, to]
 		if segEnd.After(from) && t.Before(to) {
-			segments = append(segments, segment{t: t, name: f.Name()})
+			segments = append(segments, playlistSeg{t: t, name: f.Name()})
 		}
 	}
 
@@ -622,21 +618,60 @@ func (rm *RecordingManager) GeneratePlaylist(streamKey string, from, to time.Tim
 
 	sort.Slice(segments, func(i, j int) bool { return segments[i].t.Before(segments[j].t) })
 
-	// Build M3U8 playlist
+	return buildPlaylist(streamKey, segments), nil
+}
+
+type playlistSeg struct {
+	t    time.Time
+	name string
+}
+
+// buildPlaylist renders a VOD M3U8 from time-sorted segments. Instead of a flat
+// #EXTINF:10.0 for every entry, it derives each segment's real duration from the
+// gap to the next segment (segments are clock-aligned, so this equals the wall
+// time actually covered), and inserts #EXT-X-DISCONTINUITY where a gap exceeds
+// the tolerance. This avoids timeline drift over long ranges and decoder
+// artifacts at gap boundaries. (#78)
+func buildPlaylist(streamKey string, segs []playlistSeg) string {
+	const nominal = 10.0 // seconds; target/last-segment fallback length
+	const gapTolerance = 15 * time.Second
+
+	durs := make([]float64, len(segs))
+	maxDur := nominal
+	for i := range segs {
+		dur := nominal
+		if i < len(segs)-1 {
+			diff := segs[i+1].t.Sub(segs[i].t)
+			// A diff within tolerance is the segment's real covered duration
+			// (including minor drift). A larger diff is a gap: the true length is
+			// unknown, so fall back to nominal and emit a discontinuity below.
+			if diff > 0 && diff <= gapTolerance {
+				dur = diff.Seconds()
+			}
+		}
+		durs[i] = dur
+		if dur > maxDur {
+			maxDur = dur
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n")
 	b.WriteString("#EXT-X-VERSION:3\n")
-	b.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", segDuration))
+	b.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(math.Ceil(maxDur))))
 	b.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
 	b.WriteString("#EXT-X-PLAYLIST-TYPE:VOD\n")
 
-	for _, seg := range segments {
-		b.WriteString(fmt.Sprintf("#EXTINF:%d.0,\n", segDuration))
+	for i, seg := range segs {
+		if i > 0 && segs[i].t.Sub(segs[i-1].t) > gapTolerance {
+			b.WriteString("#EXT-X-DISCONTINUITY\n")
+		}
+		b.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", durs[i]))
 		b.WriteString(fmt.Sprintf("/api/recordings/%s/segments/%s\n", streamKey, seg.name))
 	}
 	b.WriteString("#EXT-X-ENDLIST\n")
 
-	return b.String(), nil
+	return b.String()
 }
 
 // --- Archive Management ---
