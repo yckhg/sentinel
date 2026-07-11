@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"time"
 )
 
 type migration struct {
@@ -221,55 +222,73 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_alert_id ON incidents(alert_id) 
 	},
 }
 
-func runMigrations(db *sql.DB) error {
-	ctx, cancel := dbCtx(context.Background())
-	defer cancel()
+// migrationTimeout bounds each individual migration (and the bookkeeping steps)
+// on its own deadline, rather than sharing a single short deadline across the
+// whole batch. A future data-backfill migration can take longer than the 5s
+// per-statement dbCtx; giving each migration a fresh, generous deadline keeps
+// startup from failing spuriously as more migrations accumulate.
+const migrationTimeout = 5 * time.Minute
 
-	// Create migrations tracking table
-	_, err := db.ExecContext(ctx, `
+func runMigrations(db *sql.DB) error {
+	// Create migrations tracking table (its own short-lived context).
+	setupCtx, setupCancel := dbCtx(context.Background())
+	_, err := db.ExecContext(setupCtx, `
 		CREATE TABLE IF NOT EXISTS _migrations (
 			version INTEGER PRIMARY KEY,
 			name TEXT NOT NULL,
 			applied_at DATETIME NOT NULL DEFAULT (datetime('now'))
 		)
 	`)
+	setupCancel()
 	if err != nil {
 		return fmt.Errorf("create migrations table: %w", err)
 	}
 
 	for _, m := range migrations {
-		var exists int
-		err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM _migrations WHERE version = ?", m.version).Scan(&exists)
-		if err != nil {
-			return fmt.Errorf("check migration %d: %w", m.version, err)
+		if err := applyMigration(db, m); err != nil {
+			return err
 		}
-		if exists > 0 {
-			continue
-		}
-
-		log.Printf("applying migration %d: %s", m.version, m.name)
-
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin migration %d: %w", m.version, err)
-		}
-
-		if _, err := tx.ExecContext(ctx, m.sql); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("execute migration %d: %w", m.version, err)
-		}
-
-		if _, err := tx.ExecContext(ctx, "INSERT INTO _migrations (version, name) VALUES (?, ?)", m.version, m.name); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("record migration %d: %w", m.version, err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %d: %w", m.version, err)
-		}
-
-		log.Printf("migration %d applied successfully", m.version)
 	}
 
+	return nil
+}
+
+// applyMigration applies a single migration under its own deadline so one
+// long-running migration cannot exhaust a batch-wide timeout.
+func applyMigration(db *sql.DB, m migration) error {
+	// Each migration gets a fresh, generous deadline of its own.
+	ctx, cancel := context.WithTimeout(context.Background(), migrationTimeout)
+	defer cancel()
+
+	var exists int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM _migrations WHERE version = ?", m.version).Scan(&exists); err != nil {
+		return fmt.Errorf("check migration %d: %w", m.version, err)
+	}
+	if exists > 0 {
+		return nil
+	}
+
+	log.Printf("applying migration %d: %s", m.version, m.name)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %d: %w", m.version, err)
+	}
+
+	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("execute migration %d: %w", m.version, err)
+	}
+
+	if _, err := tx.ExecContext(ctx, "INSERT INTO _migrations (version, name) VALUES (?, ?)", m.version, m.name); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("record migration %d: %w", m.version, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %d: %w", m.version, err)
+	}
+
+	log.Printf("migration %d applied successfully", m.version)
 	return nil
 }

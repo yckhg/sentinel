@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,12 +38,57 @@ var hub = &wsHub{
 	clients: make(map[*wsClient]struct{}),
 }
 
+// allowedWSOrigins holds Origin values (scheme+host) explicitly permitted for
+// WebSocket upgrades beyond same-origin. Populated from ALLOWED_WS_ORIGINS
+// (comma-separated) via initWSOrigins.
+var allowedWSOrigins []string
+
+// initWSOrigins parses the ALLOWED_WS_ORIGINS env var into the allow list.
+func initWSOrigins() {
+	allowedWSOrigins = nil
+	raw := strings.TrimSpace(os.Getenv("ALLOWED_WS_ORIGINS"))
+	if raw == "" {
+		return
+	}
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			allowedWSOrigins = append(allowedWSOrigins, strings.TrimRight(p, "/"))
+		}
+	}
+	if len(allowedWSOrigins) > 0 {
+		log.Printf("ws: %d additional allowed origin(s) configured", len(allowedWSOrigins))
+	}
+}
+
+// checkWSOrigin blunts cross-site WebSocket hijacking. It permits: requests with
+// no Origin header (non-browser clients — native apps, internal tooling), same
+// -origin requests (Origin host matches the Host the request targeted), and any
+// Origin explicitly whitelisted via ALLOWED_WS_ORIGINS. Everything else is denied.
+func checkWSOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+	for _, allowed := range allowedWSOrigins {
+		if strings.EqualFold(origin, allowed) {
+			return true
+		}
+	}
+	log.Printf("ws: rejected origin %q (host=%q)", origin, r.Host)
+	return false
+}
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins (CORS handled elsewhere)
-	},
+	CheckOrigin:     checkWSOrigin,
 }
 
 func (h *wsHub) register(c *wsClient) {

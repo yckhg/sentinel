@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -206,8 +207,8 @@ func handleDeleteInvitation(db *sql.DB) http.HandlerFunc {
 		}
 
 		idStr := r.PathValue("id")
-		var id int64
-		if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
 			return
 		}

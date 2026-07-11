@@ -6,10 +6,10 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -289,9 +289,13 @@ func generateJWT(userID int64, role string) (string, error) {
 }
 
 func parseJWT(tokenString string) (*Claims, error) {
+	// Pin the accepted signing algorithm to HS256 (the algorithm generateJWT
+	// uses). Without WithValidMethods the parser trusts the token header's alg,
+	// which is the classic algorithm-confusion foothold; pinning it is defensive
+	// best practice even with a symmetric key.
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (any, error) {
 		return jwtSecret, nil
-	})
+	}, jwt.WithValidMethods([]string{"HS256"}))
 	if err != nil {
 		return nil, err
 	}
@@ -531,8 +535,8 @@ func handleApproveUser(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		var parsedID int64
-		if _, err := fmt.Sscanf(userId, "%d", &parsedID); err != nil {
+		parsedID, err := strconv.ParseInt(userId, 10, 64)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid userId"})
 			return
 		}
@@ -574,8 +578,8 @@ func handleRejectUser(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		var parsedID int64
-		if _, err := fmt.Sscanf(userId, "%d", &parsedID); err != nil {
+		parsedID, err := strconv.ParseInt(userId, 10, 64)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid userId"})
 			return
 		}
