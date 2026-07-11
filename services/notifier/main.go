@@ -12,6 +12,7 @@ import (
 	"net/smtp"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -105,6 +106,9 @@ type Config struct {
 	SMTPUser          string
 	SMTPPass          string
 	SMTPFrom          string
+
+	// DedupWindow is the incident dedup window (§출력 12). <=0 disables dedup.
+	DedupWindow time.Duration
 }
 
 func loadConfig() Config {
@@ -124,12 +128,27 @@ func loadConfig() Config {
 		SMTPUser:          getEnv("SMTP_USER", ""),
 		SMTPPass:          getEnv("SMTP_PASS", ""),
 		SMTPFrom:          getEnv("SMTP_FROM", ""),
+
+		// §출력 12: default a conservative short window (60s); 0 disables dedup.
+		DedupWindow: time.Duration(getEnvInt("DEDUP_WINDOW_SECONDS", 60)) * time.Second,
 	}
 }
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+// getEnvInt reads an integer env var, falling back on unset/unparseable values.
+// A literal "0" is honored (returns 0), which is how the dedup/retry knobs are
+// explicitly disabled.
+func getEnvInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return n
+		}
 	}
 	return fallback
 }
@@ -212,6 +231,54 @@ var httpClient = &http.Client{
 	Transport: &http.Transport{
 		ResponseHeaderTimeout: 5 * time.Second,
 	},
+}
+
+// --- Incident Dedup (§출력 12 / assertion N) ---
+//
+// Same incident key (siteId,deviceId,type) re-received within DEDUP_WINDOW_SECONDS
+// is suppressed: no contact dispatch, no system alarm, no archive-protect. The very
+// first event of a key is never suppressed, test:true events are excluded entirely
+// (never judged, never recorded — so a test injection cannot poison the cache and
+// swallow a real crisis right after), the check-and-record is atomic under a mutex,
+// and expired entries are evicted so the cache cannot grow without bound.
+
+type dedupCache struct {
+	mu      sync.Mutex
+	entries map[string]time.Time
+}
+
+func newDedupCache() *dedupCache {
+	return &dedupCache{entries: make(map[string]time.Time)}
+}
+
+// dedupKey builds the incident dedup key from the alert.
+func dedupKey(alert AlertPayload) string {
+	return alert.SiteID + "\x1f" + alert.DeviceID + "\x1f" + alert.Type
+}
+
+// checkAndRecord atomically decides whether key is a duplicate within window and,
+// if not, records now as its latest sighting. Returns true when the event must be
+// suppressed (a live entry already exists), false for the first/expired sighting.
+// window <= 0 disables dedup (always returns false, records nothing). Expired
+// entries are evicted on every call so the map stays bounded.
+func (d *dedupCache) checkAndRecord(key string, window time.Duration, now time.Time) bool {
+	if window <= 0 {
+		return false // dedup disabled — every event is a "first"
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Evict everything outside the window first; whatever remains is a live hit.
+	for k, t := range d.entries {
+		if now.Sub(t) >= window {
+			delete(d.entries, k)
+		}
+	}
+	if _, live := d.entries[key]; live {
+		return true // duplicate inside window → suppress
+	}
+	d.entries[key] = now
+	return false
 }
 
 // --- Settings Fetching ---
@@ -706,7 +773,7 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 
 // --- HTTP Handlers ---
 
-func handleNotify(cfg Config) http.HandlerFunc {
+func handleNotify(cfg Config, dedup *dedupCache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var alert AlertPayload
 		if err := json.NewDecoder(r.Body).Decode(&alert); err != nil {
@@ -745,6 +812,23 @@ func handleNotify(cfg Config) http.HandlerFunc {
 
 		logf("[notify] Received alert: site=%s device=%s type=%s severity=%s",
 			alert.SiteID, alert.DeviceID, alert.Type, alert.Severity)
+
+		// §출력 12 / assertion N: dedup. test:true events are excluded entirely (never
+		// judged, never recorded), so a test injection cannot poison the cache and
+		// swallow the real crisis that follows. A duplicate inside the window is still
+		// accepted (200) but its whole dispatch — contact sends, system alarm AND the
+		// §출력 6 archive-protect — is suppressed; only the first event proceeds.
+		if !alert.Test && dedup.checkAndRecord(dedupKey(alert), cfg.DedupWindow, time.Now()) {
+			logf("[dedup] Suppressed duplicate crisis event (site=%s device=%s type=%s) within %s window — no dispatch, no protect",
+				alert.SiteID, alert.DeviceID, alert.Type, cfg.DedupWindow)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":     "accepted",
+				"suppressed": true,
+			})
+			return
+		}
 
 		// Dispatch notifications asynchronously
 		go func() {
@@ -1034,6 +1118,7 @@ func handleSendEmail(cfg Config) http.HandlerFunc {
 func main() {
 	cfg := loadConfig()
 	initSecretScrubber(cfg)
+	dedup := newDedupCache()
 
 	mux := http.NewServeMux()
 
@@ -1043,11 +1128,11 @@ func main() {
 		w.Write([]byte(`{"status":"ok","service":"notifier"}`))
 	})
 
-	mux.HandleFunc("POST /api/notify", handleNotify(cfg))
+	mux.HandleFunc("POST /api/notify", handleNotify(cfg, dedup))
 	mux.HandleFunc("POST /api/send-email", handleSendEmail(cfg))
 
-	logf("notifier listening on :8080 (kakao configured: %v, sms configured: %v, smtp configured: %v, frontend: %s)",
-		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "", cfg.SMTPHost != "", cfg.FrontendURL)
+	logf("notifier listening on :8080 (kakao configured: %v, sms configured: %v, smtp configured: %v, frontend: %s, dedup: %s)",
+		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "", cfg.SMTPHost != "", cfg.FrontendURL, cfg.DedupWindow)
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatal(err)
 	}
