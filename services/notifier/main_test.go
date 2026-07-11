@@ -1,8 +1,16 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // TestMaskSecret proves the masking transform actually redacts: the original
@@ -213,5 +221,346 @@ func TestScrub(t *testing.T) {
 				t.Errorf("scrub of %s did not emit masked form %q in %q", name, val[:4]+"***", out)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #60 dedup (§출력 12 / assertion N)
+// ---------------------------------------------------------------------------
+
+// TestDedupCache locks the incident-dedup contract: first event passes, a second
+// inside the window is suppressed, a window of 0 disables suppression, and an entry
+// re-appears as "first" once its window has expired (eviction).
+func TestDedupCache(t *testing.T) {
+	base := time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC)
+	key := "site1\x1fDEV\x1fgas"
+
+	t.Run("first passes, second within window suppressed", func(t *testing.T) {
+		d := newDedupCache()
+		if d.checkAndRecord(key, 60*time.Second, base) {
+			t.Fatal("first event must NOT be suppressed")
+		}
+		if !d.checkAndRecord(key, 60*time.Second, base.Add(30*time.Second)) {
+			t.Fatal("second event within window MUST be suppressed")
+		}
+	})
+
+	t.Run("window=0 disables dedup", func(t *testing.T) {
+		d := newDedupCache()
+		if d.checkAndRecord(key, 0, base) {
+			t.Fatal("window=0: first must pass")
+		}
+		if d.checkAndRecord(key, 0, base) {
+			t.Fatal("window=0: no suppression — second must pass too")
+		}
+	})
+
+	t.Run("expired entry is evicted and treated as first again", func(t *testing.T) {
+		d := newDedupCache()
+		if d.checkAndRecord(key, 60*time.Second, base) {
+			t.Fatal("first must pass")
+		}
+		// 61s later — outside the 60s window: must pass as a fresh "first".
+		if d.checkAndRecord(key, 60*time.Second, base.Add(61*time.Second)) {
+			t.Fatal("post-window event must be treated as first (not suppressed)")
+		}
+		if len(d.entries) != 1 {
+			t.Fatalf("cache must stay bounded after eviction, got %d entries", len(d.entries))
+		}
+	})
+
+	t.Run("distinct keys are independent", func(t *testing.T) {
+		d := newDedupCache()
+		if d.checkAndRecord("site1\x1fA\x1fgas", 60*time.Second, base) {
+			t.Fatal("key A first must pass")
+		}
+		if d.checkAndRecord("site1\x1fB\x1fgas", 60*time.Second, base) {
+			t.Fatal("key B (distinct) first must pass")
+		}
+	})
+}
+
+// TestDedupCacheAtomicity proves the check-and-record is atomic: when the SAME key
+// is presented concurrently by many goroutines, exactly ONE is allowed through as
+// "first" and every other is suppressed (no race-induced double pass).
+func TestDedupCacheAtomicity(t *testing.T) {
+	d := newDedupCache()
+	const goroutines = 200
+	now := time.Now()
+	var allowed int64
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if !d.checkAndRecord("site1\x1fRACE\x1fgas", time.Minute, now) {
+				mu.Lock()
+				allowed++
+				mu.Unlock()
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if allowed != 1 {
+		t.Fatalf("exactly one goroutine must pass as first, got %d", allowed)
+	}
+}
+
+// TestDedupTestEventExclusion documents (at the key/handler-contract level) that
+// test:true events are excluded from dedup — the handler skips checkAndRecord for
+// them, so they neither get suppressed nor pollute the cache. Here we assert the
+// cache itself never auto-excludes (exclusion is the caller's job) AND that a real
+// event with the same key is unaffected by any prior test-event handling (since the
+// test event was never recorded).
+func TestDedupTestEventExclusion(t *testing.T) {
+	d := newDedupCache()
+	now := time.Now()
+	key := dedupKey(AlertPayload{SiteID: "s", DeviceID: "d", Type: "gas", Test: true})
+	// A test event is NEVER passed to checkAndRecord by the handler, so the cache
+	// stays empty and the subsequent REAL event of the same key passes as first.
+	realKey := dedupKey(AlertPayload{SiteID: "s", DeviceID: "d", Type: "gas"})
+	if key != realKey {
+		t.Fatalf("dedupKey must ignore the test flag: %q vs %q", key, realKey)
+	}
+	if d.checkAndRecord(realKey, time.Minute, now) {
+		t.Fatal("real event after an (excluded) test event must pass as first")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #61 channel retry vs timeout (§출력 13 / assertion O)
+// ---------------------------------------------------------------------------
+
+type fakeNetErr struct{ timeout bool }
+
+func (e fakeNetErr) Error() string   { return "fake net error" }
+func (e fakeNetErr) Timeout() bool   { return e.timeout }
+func (e fakeNetErr) Temporary() bool { return false }
+
+// TestIsTimeoutErr locks the timeout classifier that decides retry-vs-immediate-fallback.
+func TestIsTimeoutErr(t *testing.T) {
+	if !isTimeoutErr(fakeNetErr{timeout: true}) {
+		t.Error("net.Error with Timeout()=true must be a timeout")
+	}
+	if isTimeoutErr(fakeNetErr{timeout: false}) {
+		t.Error("net.Error with Timeout()=false (e.g. conn refused) must NOT be a timeout")
+	}
+	if !isTimeoutErr(context.DeadlineExceeded) {
+		t.Error("context.DeadlineExceeded must be a timeout")
+	}
+	if isTimeoutErr(errors.New("some other error")) {
+		t.Error("a generic error must NOT be classified as a timeout")
+	}
+	if isTimeoutErr(nil) {
+		t.Error("nil must not be a timeout")
+	}
+}
+
+// TestSendChannelWithRetry locks the retry driver: fast transient (retryable) errors
+// are retried up to max; timeouts/permanent (non-retryable) fall back immediately;
+// max=0 means no retry; a mid-sequence success stops early.
+func TestSendChannelWithRetry(t *testing.T) {
+	cases := []struct {
+		name        string
+		max         int
+		results     []struct {
+			retryable bool
+			err       error
+		}
+		wantCalls int
+		wantErr   bool
+	}{
+		{
+			name: "retryable error retried up to max then falls back",
+			max:  1,
+			results: []struct {
+				retryable bool
+				err       error
+			}{
+				{true, errors.New("5xx")}, {true, errors.New("5xx")},
+			},
+			wantCalls: 2, // initial + 1 retry
+			wantErr:   true,
+		},
+		{
+			name: "max=0 -> immediate fallback, no retry",
+			max:  0,
+			results: []struct {
+				retryable bool
+				err       error
+			}{
+				{true, errors.New("5xx")},
+			},
+			wantCalls: 1,
+			wantErr:   true,
+		},
+		{
+			name: "timeout (non-retryable) -> immediate fallback even with max>=1",
+			max:  1,
+			results: []struct {
+				retryable bool
+				err       error
+			}{
+				{false, errors.New("timeout")},
+			},
+			wantCalls: 1,
+			wantErr:   true,
+		},
+		{
+			name: "retry succeeds on second attempt",
+			max:  1,
+			results: []struct {
+				retryable bool
+				err       error
+			}{
+				{true, errors.New("5xx")}, {false, nil},
+			},
+			wantCalls: 2,
+			wantErr:   false,
+		},
+		{
+			name: "max=2 retryable retried twice (3 attempts)",
+			max:  2,
+			results: []struct {
+				retryable bool
+				err       error
+			}{
+				{true, errors.New("5xx")}, {true, errors.New("5xx")}, {true, errors.New("5xx")},
+			},
+			wantCalls: 3,
+			wantErr:   true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			calls := 0
+			err := sendChannelWithRetry("test", "n", "p", c.max, 0, func() (bool, error) {
+				r := c.results[calls]
+				calls++
+				return r.retryable, r.err
+			})
+			if calls != c.wantCalls {
+				t.Errorf("attempts = %d, want %d", calls, c.wantCalls)
+			}
+			if (err != nil) != c.wantErr {
+				t.Errorf("err = %v, wantErr = %v", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #65 site-scoped camera filter (§출력 6 / assertion I)
+// ---------------------------------------------------------------------------
+
+// TestFilterProtectedStreamKeys proves protection is scoped to the event's site:
+// only enabled, non-empty-key cameras of the SAME siteId are included; other sites'
+// cameras are never protected.
+func TestFilterProtectedStreamKeys(t *testing.T) {
+	cameras := []cameraInfo{
+		{StreamKey: "a1", Enabled: true, SiteID: "site-A"},
+		{StreamKey: "a2", Enabled: true, SiteID: "site-A"},
+		{StreamKey: "b1", Enabled: true, SiteID: "site-B"},
+		{StreamKey: "a3", Enabled: false, SiteID: "site-A"}, // disabled → excluded
+		{StreamKey: "", Enabled: true, SiteID: "site-A"},    // empty key → excluded
+	}
+
+	gotA := filterProtectedStreamKeys(cameras, "site-A")
+	if strings.Join(gotA, ",") != "a1,a2" {
+		t.Errorf("site-A protection = %v, want [a1 a2] (no site-B, no disabled, no empty)", gotA)
+	}
+	for _, k := range gotA {
+		if k == "b1" {
+			t.Fatal("site-A event must NOT protect a site-B camera (cross-site contamination)")
+		}
+	}
+
+	gotB := filterProtectedStreamKeys(cameras, "site-B")
+	if strings.Join(gotB, ",") != "b1" {
+		t.Errorf("site-B protection = %v, want [b1]", gotB)
+	}
+
+	if got := filterProtectedStreamKeys(cameras, "site-C"); len(got) != 0 {
+		t.Errorf("site with no cameras must protect nothing, got %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #59 silent-fail: target_unavailable emission (§출력 11 / assertions M, J)
+// ---------------------------------------------------------------------------
+
+// TestDispatchTargetUnavailable proves that when the contact list is empty OR the
+// contact fetch fails, dispatchNotifications still emits at least one
+// target_unavailable system-alarm attempt and performs ZERO external-channel sends.
+func TestDispatchTargetUnavailable(t *testing.T) {
+	cases := []struct {
+		name           string
+		contactsStatus int
+		contactsBody   string
+	}{
+		{"zero contacts", http.StatusOK, "[]"},
+		{"contact fetch fails", http.StatusInternalServerError, "boom"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var alarms []AlarmPayload
+			var kakaoHits, smsHits int
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/internal/contacts":
+					w.WriteHeader(c.contactsStatus)
+					_, _ = io.WriteString(w, c.contactsBody)
+				case r.URL.Path == "/internal/alarms":
+					b, _ := io.ReadAll(r.Body)
+					var a AlarmPayload
+					_ = json.Unmarshal(b, &a)
+					mu.Lock()
+					alarms = append(alarms, a)
+					mu.Unlock()
+					w.WriteHeader(http.StatusOK)
+				case strings.Contains(r.URL.Path, "alimtalk"):
+					mu.Lock()
+					kakaoHits++
+					mu.Unlock()
+					w.WriteHeader(http.StatusOK)
+				case strings.Contains(r.URL.Path, "sms"):
+					mu.Lock()
+					smsHits++
+					mu.Unlock()
+					w.WriteHeader(http.StatusOK)
+				default:
+					w.WriteHeader(http.StatusOK)
+				}
+			}))
+			defer srv.Close()
+
+			cfg := Config{WebBackendURL: srv.URL, RecordingURL: ""}
+			initSecretScrubber(cfg)
+
+			count, results := dispatchNotifications(cfg, AlertPayload{
+				SiteID: "site1", DeviceID: "DEV-1", Type: "gas_leak", Timestamp: "2026-07-11T00:00:00Z",
+			})
+
+			if count != 0 || len(results) != 0 {
+				t.Errorf("no-target path must return zero contacts/results, got count=%d results=%d", count, len(results))
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(alarms) < 1 {
+				t.Fatalf("expected >=1 target_unavailable system-alarm attempt, got %d", len(alarms))
+			}
+			if alarms[0].Type != "target_unavailable" {
+				t.Errorf("alarm type = %q, want target_unavailable", alarms[0].Type)
+			}
+			if kakaoHits != 0 || smsHits != 0 {
+				t.Errorf("no-target path must NOT send external channels, got kakao=%d sms=%d", kakaoHits, smsHits)
+			}
+		})
 	}
 }
