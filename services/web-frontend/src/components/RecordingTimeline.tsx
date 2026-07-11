@@ -94,6 +94,26 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
 
   const timelineRef = useRef<HTMLDivElement>(null);
 
+  // Archive-completion polling handles. Kept in refs so the unmount cleanup can
+  // stop them — otherwise collapsing the camera (unmounting) while an archive
+  // is in flight leaves the 3s poll + 5min safety timeout running and calling
+  // setState on an unmounted component (#93).
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollIntervalRef.current !== null) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (pollTimeoutRef.current !== null) {
+      clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => stopPolling, [stopPolling]);
+
   const token = localStorage.getItem("token");
 
   const fetchTimeRanges = useCallback(async () => {
@@ -326,8 +346,10 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
           message: `보관 요청 완료: ${formatTime(from)} ~ ${formatTime(to)} (${formatDuration(from, to)})`,
           archiveId: archive?.id,
         });
-        // Poll for archive completion
-        const pollInterval = setInterval(async () => {
+        // Poll for archive completion. Handles live in refs so the component's
+        // unmount cleanup can stop them (#93).
+        stopPolling();
+        pollIntervalRef.current = setInterval(async () => {
           try {
             const pollRes = await fetchWithTimeout("/api/archives", {
               headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -338,7 +360,7 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
               setArchives(myArchives);
               const target = myArchives.find((a) => a.id === archive?.id);
               if (!target || target.status === "completed" || target.status === "failed") {
-                clearInterval(pollInterval);
+                stopPolling();
                 if (target?.status === "failed") {
                   setArchiveResult({
                     success: false,
@@ -348,11 +370,11 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
               }
             }
           } catch {
-            clearInterval(pollInterval);
+            stopPolling();
           }
         }, 3000);
         // Safety: stop polling after 5 minutes
-        setTimeout(() => clearInterval(pollInterval), 5 * 60 * 1000);
+        pollTimeoutRef.current = setTimeout(() => stopPolling(), 5 * 60 * 1000);
       } else {
         const data = await res.json().catch(() => ({}));
         setArchiveResult({
