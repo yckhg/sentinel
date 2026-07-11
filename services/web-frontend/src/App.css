@@ -188,6 +188,26 @@ body {
   background: rgba(211, 47, 47, 0.8);
 }
 
+/* Manual retry button shown when a fatal HLS error is surfaced (#96). The
+   overlay is pointer-events:none, so the button must opt back in. */
+.camera-retry-btn {
+  margin-top: 8px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.4);
+  color: #fff;
+  font-size: 0.8rem;
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.camera-retry-btn:hover {
+  background: rgba(255, 152, 0, 0.85);
+}
+
 /* Crisis Alert Banner */
 .crisis-banner-container {
   position: fixed;
