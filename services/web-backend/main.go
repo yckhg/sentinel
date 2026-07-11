@@ -41,6 +41,7 @@ func main() {
 
 	// Start unified health monitor (services + sensors).
 	healthMonitor := newHealthMonitor(db)
+	healthMon = healthMonitor // expose for WS reconnect snapshot (O4)
 	monitorCtx, monitorCancel := context.WithCancel(context.Background())
 	defer monitorCancel()
 	healthMonitor.Start(monitorCtx)
@@ -57,8 +58,8 @@ func main() {
 	})
 
 	// Rate limiters for public auth endpoints
-	loginLimiter := newRateLimiter(10, time.Minute)    // 10 req/min per IP
-	registerLimiter := newRateLimiter(5, time.Minute)  // 5 req/min per IP
+	loginLimiter := newRateLimiter(10, time.Minute)   // 10 req/min per IP
+	registerLimiter := newRateLimiter(5, time.Minute) // 5 req/min per IP
 	startRateLimitCleanup(loginLimiter, registerLimiter)
 
 	// Auth routes (public — rate limited)
@@ -72,7 +73,7 @@ func main() {
 	mux.HandleFunc("GET /auth/users", handleActiveUsers(db))
 
 	// WebSocket endpoint (JWT via query param)
-	mux.HandleFunc("/ws", handleWebSocket())
+	mux.HandleFunc("/ws", handleWebSocket(db))
 
 	// Internal service routes (no auth — accessed by other services via Docker network)
 	mux.HandleFunc("GET /internal/contacts", handleListContacts(db))
@@ -140,6 +141,7 @@ func main() {
 
 	// Incidents (any authenticated user)
 	apiMux.HandleFunc("GET /api/incidents", handleListIncidents(db))
+	apiMux.HandleFunc("GET /api/incidents/active", handleActiveIncidents(db))
 	apiMux.HandleFunc("PATCH /api/incidents/{id}/acknowledge", handleAcknowledgeIncident(db))
 	apiMux.HandleFunc("PATCH /api/incidents/{id}/resolve", handleResolveIncident(db))
 
@@ -173,6 +175,7 @@ func main() {
 
 	// System settings (admin only)
 	apiMux.HandleFunc("GET /api/settings", handleListSettings(db))
+	apiMux.HandleFunc("PUT /api/settings", handleBulkUpdateSettings(db))
 	apiMux.HandleFunc("PUT /api/settings/{key}", handleUpdateSetting(db))
 
 	// Unified health monitoring (any authenticated user)
@@ -184,7 +187,7 @@ func main() {
 	apiMux.HandleFunc("DELETE /api/links/{id}", handleRevokeTempLink())
 
 	// Mount protected routes behind auth middleware
-	mux.Handle("/api/", authMiddleware(apiMux))
+	mux.Handle("/api/", authMiddleware(db, apiMux))
 
 	startLinkCleanup()
 
