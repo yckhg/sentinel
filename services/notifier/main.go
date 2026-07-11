@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -244,6 +245,17 @@ func scrub(s string) string {
 // before it is written, so no credential can leak into the notifier logs.
 func logf(format string, args ...interface{}) {
 	log.Print(scrub(fmt.Sprintf(format, args...)))
+}
+
+// recoverGoroutine is a deferred guard for background goroutines (#58). An
+// unrecovered panic in any goroutine (e.g. a nil map/pointer in the dispatch,
+// per-contact, or email paths) crashes the entire notifier process, after which
+// every subsequent crisis alert is lost. Recovering keeps this safety-critical
+// daemon alive; the panic value and stack are logged (scrubbed) for diagnosis.
+func recoverGoroutine(label string) {
+	if r := recover(); r != nil {
+		logf("[panic] recovered in %s: %v\n%s", label, r, debug.Stack())
+	}
 }
 
 // --- HTTP Client ---
@@ -665,6 +677,7 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 			wg.Add(1)
 			go func(c Contact) {
 				defer wg.Done()
+				defer recoverGoroutine("email dispatch")
 				if err := sendCrisisEmail(cfg, c, alert, cctvLink); err != nil {
 					logf("[notify] Email FAILED for %s (%s): %v", c.Name, maskEmail(c.Email), err)
 				} else {
@@ -677,6 +690,7 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 		wg.Add(1)
 		go func(idx int, c Contact) {
 			defer wg.Done()
+			defer recoverGoroutine("contact dispatch")
 			result := NotifyResult{
 				ContactID:   c.ID,
 				ContactName: c.Name,
@@ -793,6 +807,7 @@ func handleNotify(cfg Config) http.HandlerFunc {
 		inflightDispatch.Add(1)
 		go func() {
 			defer inflightDispatch.Done()
+			defer recoverGoroutine("notify handler dispatch")
 			contactCount, results := dispatchNotifications(cfg, alert)
 			successCount := 0
 			channels := map[string]int{}
