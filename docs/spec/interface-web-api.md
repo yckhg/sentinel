@@ -77,6 +77,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 - JWT 유효기간 24h, HS256. 토큰에 `role` 클레임 포함
 - `/auth/pending|approve|reject|users`는 인증 미들웨어 밖 — 핸들러가 직접 admin JWT 검증 (프리픽스 `/api/` 아님이 계약)
 - 레이트 리밋은 IP 단위, `/auth/login` 10/min, `/auth/register` 5/min — 다른 엔드포인트에는 적용하지 않음
+- **비밀번호 변경은 기존 발급 토큰을 무효화** — `POST /api/auth/change-password` 성공 시 해당 사용자에게 변경 이전에 발급된 모든 로그인 JWT가 즉시 `401`이 된다(관측 가능한 자격증명 변경 경계 이후 재로그인 토큰만 유효 — 구현 방식은 계약 아님). 변경에 사용한 토큰 자신도 이후 무효가 되어 클라이언트는 재로그인해야 한다. 비밀번호 미변경 사용자의 토큰은 만료(24h)까지 유효
 
 ### 검증 단언 (TDD)
 
@@ -96,6 +97,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 - [ ] 같은 IP에서 `/auth/login` 11회 연속 → 11번째 `429`
 - [ ] user 토큰으로 `GET /auth/pending` → `401` 또는 `403` (200 아님)
 - [ ] `POST /auth/approve/{id}` 후 해당 계정 로그인 → `200`
+- [ ] 로그인 토큰 `t`로 `GET /api/incidents` → `200`; `POST /api/auth/change-password` 성공 후 **같은 `t`**로 `GET /api/incidents` → `401`; 변경 후 재로그인으로 얻은 새 토큰 → `200`
 
 ---
 
@@ -414,9 +416,9 @@ Device object:
 
 ### 핵심 로직 (불변식)
 
-- 만료 24시간 고정. temp JWT는 `role` 클레임 없이 링크 id 클레임으로 식별되는 별도 토큰 종류 — 서버가 temp 전용 파서로 인식해 role `temp`(read-only)를 부여하는 것이 의도이나, WS/미들웨어 접면에서는 현재 보장되지 않음 (⚠️ 리뷰 항목 2)
+- 만료 24시간 고정. temp JWT는 `role` 클레임 없이 링크 id 클레임으로 식별되는 별도 토큰 종류 — 서버가 temp 전용 파서로 인식해 role `temp`(read-only)를 부여한다. **WS 접면(계약 14)도 temp 종류를 식별해 role `temp`를 부여한다.** `/api/*` 인증 미들웨어 접면의 temp 식별·회수 차단은 별도 추적(web-backend 스펙 ⚠1)
 - `url`의 호스트: system_settings `site_url` 우선, 없으면 `FRONTEND_URL` env
-- 회수(DELETE)는 **블랙리스트 방식** — JWT 서명 자체는 유효하지만 서버가 거부. 블랙리스트가 실제로 강제되는 접면은 `GET /api/links/verify/{token}`(회수 후 `401`)과 링크 목록 제외 — WS 접속(계약 14)에서의 회수 차단은 현재 보장되지 않음 (⚠️ 리뷰 항목 2 참조)
+- 회수(DELETE)는 **블랙리스트 방식** — JWT 서명 자체는 유효하지만 서버가 거부. 블랙리스트가 강제되는 접면: `GET /api/links/verify/{token}`(회수 후 `401`), 링크 목록 제외, **그리고 WS 접속(계약 14) — 접속 시점 차단 + 수립된 연결의 주기적 재검증으로 회수 후 능동 종료**
 - Authorization 헤더가 **있으면** 반드시 유효한 admin JWT — 잘못된 헤더는 internal로 폴백되지 않고 거절
 
 ### 검증 단언 (TDD)
@@ -474,24 +476,29 @@ Device object:
 | Method | Path | Auth | 바디 |
 |--------|------|------|------|
 | GET | `/api/settings` | admin | — |
-| PUT | `/api/settings/{key}` | admin | `{value: string}` |
+| PUT | `/api/settings/{key}` | admin | `{value: string}` (단건) |
+| PUT | `/api/settings` | admin | `{ "<key>": "<value>", ... }` (다건 원자 저장) |
 
 ### 출력 (계약)
 
 - GET → `200` `[{"key":"site_url","value":"https://...","updatedAt":"..."}]`
-- PUT → `200` `{key, value, updatedAt}` · 없는 key `404`
+- PUT `/api/settings/{key}` (단건) → `200` `{key, value, updatedAt}` · 없는 key `404`
+- PUT `/api/settings` (벌크) → `200` `[{key, value, updatedAt}, ...]`(갱신된 전체) · 요청 내 **하나라도** 미지의 key면 `404`(아무 것도 저장 안 됨) · 값 검증 실패면 `400`(아무 것도 저장 안 됨)
 
 ### 핵심 로직 (불변식)
 
 - PUT은 **기존 key만** 갱신 — 새 key 생성 불가 (`404`)
 - 알려진 key: `site_url` · `health.service_check_interval_sec`(def 30) · `health.service_down_threshold_sec`(def 90) · `health.sensor_alive_threshold_sec`(def 60)
 - `site_url` 변경은 임시 링크 URL(계약 9)과 초대 이메일 링크(계약 10)에 즉시 반영
+- **벌크 저장은 원자적** — `PUT /api/settings`로 다건을 저장하면 단일 트랜잭션으로 **전부 성공 또는 전부 롤백**된다. 미지의 key/값 검증 실패가 하나라도 있으면 어떤 key도 변경되지 않는다(부분 저장 없음 — 순차 개별 PUT의 중간 실패로 인한 부분 반영을 대체). 단건 `PUT /api/settings/{key}`는 하위호환으로 유지
 
 ### 검증 단언 (TDD)
 
 - [ ] `PUT /api/settings/nonexistent_key` → `404`
 - [ ] `PUT /api/settings/site_url` `{"value":"https://x.example"}` → `200` · 이후 temp link 생성 시 `url`이 `https://x.example/view/...`
 - [ ] user 토큰으로 GET → `403`
+- [ ] `PUT /api/settings`에 유효 `health.*` key 2개 + 미지의 key 1개 → `404`, 이후 `GET /api/settings`에서 그 2개 값도 **변경 전 그대로**(부분 저장 0)
+- [ ] `PUT /api/settings`에 `health.*` 임계 3건을 모두 유효값으로 → `200`, 세 값 전부 반영
 
 ---
 
@@ -529,6 +536,7 @@ Device object:
 - sensor `id`는 `siteId:deviceId`, `name`은 alias 우선(없으면 device_id)
 - 모니터 제외: web-backend 자기 자신, mosquitto(HTTP healthz 없음)
 - events는 **상태 전이 시점에만** 기록 (무변화 미기록 — 테이블 폭증 방지)
+- **unhealthy 전이의 능동 통지**: 감시 대상(서비스/센서)이 `healthy→unhealthy`로 전이하면 `health_events` 기록에 더해 admin에게 능동 push된다 — 접속 중 admin WS 클라이언트에 `system_alarm`(계약 14) 브로드캐스트. `unhealthy→healthy` 복귀도 동일. 통지 실패는 감시 루프를 막지 않음(best-effort). 폴링형 `GET /api/health`만으로는 관제 인프라 자체의 무응답이 조용히 방치될 수 있으므로 전이는 push로 표면화되어야 한다. (notifier 외부 팬아웃·자동 컨테이너 재시작은 인프라 경계로 결정 — 앱 계약에서 제외, 리뷰 항목 5 해소)
 
 ### 검증 단언 (TDD)
 
@@ -540,6 +548,7 @@ Device object:
 - [ ] 응답에 `id == "web-backend"`인 service 항목 없음
 - [ ] `entity_kind=sensor` 필터 → 모든 `entityKind == "sensor"`
 - [ ] 임의 서비스 컨테이너 중지 → threshold 경과 후 해당 항목 `unhealthy` + events에 전이 1행 추가 · 재시작 → healthy 전이 1행 추가 (전이당 정확히 1행)
+- [ ] admin WS 접속 상태에서 서비스 컨테이너 중지 → threshold 경과 후 그 admin WS가 `type=system_alarm` 메시지 1건 수신(unhealthy 전이 표면화); user(비-admin) WS는 미수신
 
 ---
 
@@ -650,20 +659,24 @@ Device object:
 | `connected` | 접속 본인 | `{userId, role, connectedAt}` |
 | `crisis_alert` | 전체 (admin/user/temp) | `{incidentId, siteId, description, occurredAt, isTest, site:{address,managerName,managerPhone}}` |
 | `incident_resolved` | 전체 (admin/user/temp) | `{incidentId, siteId, resolvedAt, resolvedByKind, resolvedById, resolvedByLabel}` |
-| `system_alarm` | admin 전용 | `{type, message, details}` — `POST /internal/alarms`(계약 13) 수신 시 발생 |
+| `system_alarm` | admin 전용 | `{type, message, details}` — `POST /internal/alarms`(계약 13) 수신 시, **또는 HealthMonitor의 healthy↔unhealthy 전이 시**(계약 12) 발생 |
 
 ### 핵심 로직 (불변식)
 
-- 인증 실패(토큰 없음/서명 불일치/만료) 시 업그레이드 자체를 `401`로 거절 — 단, **회수된 temp 토큰의 차단은 현재 보장되지 않음** (⚠️ 리뷰 항목 2 참조)
+- 인증 실패(토큰 없음/서명 불일치/만료) 시 업그레이드 자체를 `401`로 거절. **회수(blacklist)된 temp 토큰의 업그레이드도 `401`로 거절된다** — WS 접면은 temp 토큰을 temp 종류로 식별해 접속 시점에 blacklist를 확인한다
+- **접속 후 주기적 재검증(회수·만료·자격변경 반영)**: 수립된 WS 연결은 최소 `N`초(계약 상한 `N ≤ 60`)마다 토큰 유효성을 재평가한다. (a) temp 토큰이 그 사이 폐기(`DELETE /api/links/{id}`)되었거나, (b) 토큰이 만료(`exp` 경과)되었거나, (c) 소유 사용자의 비밀번호 변경으로 자격증명 경계(계약 1)를 넘긴 경우 중 하나라도 성립하면 서버가 해당 연결을 능동 종료한다. → 폐기된 뷰어의 WS가 토큰 만료(최대 24h)까지 `crisis_alert`/`incident_resolved`를 계속 수신하는 일이 발생하지 않는다
 - 서버가 30초마다 ping — 클라이언트는 40초 내 pong 없으면 연결 종료
-- role은 JWT의 `role` 클레임에서 추출 (`admin`/`user`) — `system_alarm`은 admin에게만 전달. temp link 토큰에는 role 클레임이 없어 접속은 성립하지만 role이 `"temp"`로 식별되는 것은 현재 보장되지 않음 (⚠️ 리뷰 항목 2 참조)
-- `crisis_alert`는 `POST /api/incidents`(계약 13) 성공 시, `incident_resolved`는 웹 resolve(계약 2) 또는 센서 resolve(계약 13) 성공 시 발생. `system_alarm`은 `POST /internal/alarms`(계약 13, notifier가 모든 외부 채널 실패 시 호출) 수신 시 admin에게만 발생
+- role은 JWT의 `role` 클레임에서 추출 (`admin`/`user`). temp link 토큰은 role 클레임이 없으나 WS 접면이 temp 종류로 식별해 role `"temp"`(read-only)를 부여한다 — `system_alarm`은 admin에게만 전달되고 temp/user에는 전달되지 않는다
+- `crisis_alert`는 `POST /api/incidents`(계약 13) 성공 시, `incident_resolved`는 웹 resolve(계약 2) 또는 센서 resolve(계약 13) 성공 시 발생. `system_alarm`은 (i) `POST /internal/alarms`(계약 13, notifier가 모든 외부 채널 실패 시 호출) 수신 시, 또는 (ii) 감시 대상(서비스/센서)의 healthy↔unhealthy 상태 전이 시(계약 12) admin에게만 발생
 
 ### 검증 단언 (TDD)
 
 - [ ] 토큰 없이 `/ws` 업그레이드 시도 → `401` (연결 수립 안 됨)
 - [ ] 유효 JWT로 접속 → 첫 메시지 `type == "connected"`, `payload.role`이 토큰 role과 일치
-- [ ] temp link 토큰으로 접속 → 연결 성립, 첫 메시지 `type == "connected"` (role 식별·회수 차단은 ⚠️ 리뷰 항목 2)
+- [ ] temp link 토큰으로 접속 → 연결 성립, 첫 메시지 `type == "connected"`, `payload.role == "temp"`
+- [ ] 회수(`DELETE /api/links/{id}`)된 temp 토큰으로 `/ws` 업그레이드 시도 → `401` (접속 시점 차단)
+- [ ] temp 토큰으로 접속 성립 후 admin이 그 링크를 `DELETE` → `N`초(≤60) + 여유 내에 서버가 연결을 능동 종료(close 프레임/연결 끊김 관측), 이후 `crisis_alert` 미수신
+- [ ] 로그인 JWT로 접속 성립 후 소유 사용자가 비밀번호 변경 → `N`초(≤60) + 여유 내에 서버가 연결을 능동 종료
 - [ ] `POST /api/incidents` → 접속 중인 admin/user/temp 클라이언트 **모두** `crisis_alert` 수신
 - [ ] user 클라이언트는 `system_alarm`을 수신하지 않음
 - [ ] pong 미응답 클라이언트가 약 40초 후 서버에 의해 연결 종료
@@ -722,6 +735,7 @@ MQTT 발행 페이로드 스키마의 SSOT는 `docs/spec/interface-mqtt.md` — 
 실제 라우트/핸들러 대조에서 발견된 어긋남. 본 스펙 본문에는 반영하지 않고 여기에만 기록한다.
 
 1. **~~notifier의 시스템 알람 최후 보루 수신측 부재~~ (해소됨)** — 무인증 internal 라우트 `POST /internal/alarms`가 신설되어 notifier가 이 경로로 호출하고, web-backend가 수신해 WS `system_alarm`(계약 14)을 admin에게 브로드캐스트한다. 계약 13(입력/출력)과 계약 14(WS 발생 경로)에 반영됨. DB 영속은 없으며 보장 동작은 "수신 + admin 브로드캐스트"까지. (번호는 항목 2~4의 교차참조 안정성을 위해 유지)
-2. **temp link JWT가 일반 JWT 파서를 먼저 통과해 WS에서 temp role 식별·회수(blacklist) 차단이 모두 무력화됨 (알려진 시스템 갭, web-backend 스펙 ⚠️1과 동일 사안)** — 두 토큰 종류가 동일 secret·동일 HS256으로 서명되고, 일반 JWT 파서가 temp 토큰의 payload(`linkId`만 있고 `userId`/`role` 없음)도 관대하게 수용한다. `/ws`와 인증 미들웨어 모두 일반 파서를 **먼저** 시도해 성공하면 temp 분기(role=`temp` 부여 + blacklist 확인)에 도달하지 않는다. 실측 결과: temp 토큰으로 WS 접속 시 `role=""`로 접속이 성립하고, 회수된 temp 토큰도 WS 접속이 거절되지 않는다 (`GET /api/links/verify`는 temp 전용 파서 + blacklist를 직접 확인하므로 회수 후 `401` 정상 동작). → 의도(temp role read-only + 회수 즉시 차단)를 회복하려면 토큰 종류 판별 순서/클레임 검증 강화가 필요. 결정 전까지 "WS에서 `payload.role == "temp"`"·"회수 토큰 WS 접속 `401`"을 계약 단언으로 두지 않는다.
+2. **~~temp link JWT가 WS에서 temp role 식별·회수 차단·만료 재검증을 우회~~ (WS 접면 해소됨 — 계약 14, 이슈 #82)** — WS 접면은 이제 접속 시점에 temp 토큰을 temp 종류로 식별해 role `temp`를 부여하고 blacklist를 확인하며(회수 토큰 업그레이드 `401`), 수립된 연결은 주기적(≤60초) 재검증(회수·`exp` 만료·비밀번호 변경 경계, 계약 1)으로 무효 토큰 연결을 능동 종료한다. 관련 단언("WS `payload.role == "temp"`"·"회수 토큰 WS 접속 `401`"·"회수/비번변경 후 능동 종료")을 계약 14에 추가했다. **남은 사안(미해소)**: `/api/*` 인증 미들웨어 접면에서 temp 토큰이 일반 JWT 파서를 먼저 통과해 blacklist 확인 없이 `role=""`로 통과하는 문제는 web-backend 스펙 ⚠️1(authz 범위)로 별도 추적한다 — WS 재검증 계약과는 접면이 다르다.
 3. **무인증 internal 엔드포인트가 리버스 프록시를 그대로 통과해 외부 노출됨 (알려진 시스템 갭)** — 현 스택의 유일한 리버스 프록시인 web-frontend nginx는 `/api/` 전체를 web-backend로 무차별 프록시하고, docker-compose가 web-frontend:80을 호스트 `3080`으로 노출한다. 따라서 외부에서 무인증 internal 엔드포인트(계약 13의 `POST /api/incidents`, `POST /api/devices/seen`, `POST /api/incidents/{id}/resolve-from-sensor`와 계약 9의 internal 폴백 `POST /api/links/temp`)가 인증 없이 그대로 호출된다(200/201). 차단 구성이 repo 내 어디에도 없다. → 의도 결정 필요: (a) 리버스 프록시에서 해당 경로 차단(location 규칙), (b) internal 엔드포인트를 `/internal/*` 프리픽스로 이동 + 프록시 미노출, 또는 (c) 내부 호출 인증 도입. 결정 전까지 "외부에서 internal 엔드포인트 `4xx`" 배포 게이트 단언은 계약에 두지 않는다.
 4. **`PUT /api/contacts/{id}`의 email만 partial 시맨틱에서 벗어남 (실측 — web-backend 스펙 ⚠️5와 동일 사안)** — name/phone은 빈 값 무시, notifyEmail은 생략 시 유지인데 email은 요청값으로 무조건 덮어써서, email을 생략한 partial PUT이 기존 email을 NULL로 삭제한다. 본문(계약 5)은 이 실측 동작을 계약으로 기술했다. → 의도 결정 필요: (a) email도 생략 시 유지(partial 통일 — email 삭제는 별도 신호 필요), 또는 (b) 현 덮어쓰기 동작 유지. (a)로 결정되면 계약 5 입력 표·불변식·단언을 함께 갱신해야 한다.
+5. **[해소 — 설계자 결정] unhealthy 자동 복구 범위.** unhealthy 상태 전이의 admin 통지(계약 12 → 계약 14 `system_alarm`)까지만 앱이 계약한다. hang 상태 서비스의 자동 컨테이너 재시작은 인프라 계층(docker compose restart policy / healthcheck 연동) 책임으로 두어 앱 계약에서 제외하며, unhealthy 전이의 notifier 외부 채널 팬아웃도 채택하지 않는다.
