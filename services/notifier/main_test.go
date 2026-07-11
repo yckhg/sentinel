@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +14,25 @@ import (
 	"testing"
 	"time"
 )
+
+// syncBuffer is a goroutine-safe log sink used to observe log ordering while a
+// background goroutine may also be writing.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
 
 // TestMaskSecret proves the masking transform actually redacts: the original
 // plaintext must not survive, and a diagnostic marker ("***") must remain.
@@ -520,6 +541,72 @@ func TestFilterProtectedStreamKeysFallback(t *testing.T) {
 	}
 	if got := filterProtectedStreamKeys(mixed, "site1"); strings.Join(got, ",") != "s1" {
 		t.Errorf("mixed list must be site-scoped = %v, want [s1] (untagged excluded)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #64 parallel protect ordering (§출력 6 / assertion P)
+// ---------------------------------------------------------------------------
+
+// TestArchiveProtectLogIsSynchronous proves the protect-request log is emitted
+// SYNCHRONOUSLY by requestArchiveProtect — before the recording delivery HTTP can
+// complete — so it deterministically precedes channel dispatch/summary regardless of
+// goroutine scheduling. We block the recording endpoint and assert the "Protect
+// request accepted" log already exists the moment requestArchiveProtect returns,
+// while the "delivered" outcome log does NOT yet exist (delivery still in flight).
+func TestArchiveProtectLogIsSynchronous(t *testing.T) {
+	recordingHit := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/internal/cameras":
+			// No siteId → fallback protects all enabled cameras (non-regression path).
+			_, _ = io.WriteString(w, `[{"streamKey":"cam1","enabled":true}]`)
+		case strings.Contains(r.URL.Path, "/api/archives/protect"):
+			once.Do(func() { close(recordingHit) })
+			<-release // block delivery so it cannot complete before we assert
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	var buf syncBuffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(orig)
+
+	cfg := Config{WebBackendURL: srv.URL, RecordingURL: srv.URL}
+	initSecretScrubber(cfg)
+
+	requestArchiveProtect(cfg, AlertPayload{
+		SiteID: "site1", DeviceID: "d", Type: "gas", Timestamp: "2026-07-11T00:00:00Z",
+	})
+
+	// requestArchiveProtect has returned; delivery is backgrounded and blocked on
+	// `release`. The protect-accept record MUST already be present (synchronous).
+	if !strings.Contains(buf.String(), "[archive] Protect request accepted for incident incident_site1_") {
+		t.Fatalf("protect-accept log must be emitted synchronously; got:\n%s", buf.String())
+	}
+	// And it must carry the camera count (assertion I record shape).
+	if !strings.Contains(buf.String(), "(1 cameras)") {
+		t.Fatalf("protect record must include camera count; got:\n%s", buf.String())
+	}
+	// The delivery outcome must NOT be logged yet — proving the HTTP is not gated in
+	// front of the accept log (it is still blocked).
+	if strings.Contains(buf.String(), "Protect request delivered") {
+		t.Fatalf("delivery outcome logged before release — accept log is not synchronous-first")
+	}
+
+	// Release the blocked delivery and confirm the background HTTP actually fired.
+	close(release)
+	select {
+	case <-recordingHit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recording delivery endpoint was never hit")
 	}
 }
 

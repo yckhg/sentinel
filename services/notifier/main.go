@@ -795,19 +795,33 @@ func requestArchiveProtect(cfg Config, alert AlertPayload) {
 		return
 	}
 
-	protectResp, err := httpClient.Post(cfg.RecordingURL+"/api/archives/protect", "application/json", bytes.NewReader(payload))
-	if err != nil {
-		logf("[archive] Failed to send protect request: %v", err)
-		return
-	}
-	defer protectResp.Body.Close()
+	// Emit the protect-request record SYNCHRONOUSLY here — the caller invokes
+	// requestArchiveProtect before it launches channel dispatch, so this log's
+	// timestamp deterministically precedes the first channel-attempt completion AND
+	// the dispatch-complete summary (§출력 6 / assertion P). Ordering is guaranteed by
+	// structure, not by a goroutine scheduling race, so it holds even when channels
+	// are unconfigured and dispatch finishes almost instantly.
+	logf("[archive] Protect request accepted for incident %s (%d cameras)", incidentID, len(streamKeys))
 
-	if protectResp.StatusCode >= 200 && protectResp.StatusCode < 300 {
-		logf("[archive] Protect request accepted for incident %s (%d cameras)", incidentID, len(streamKeys))
-	} else {
-		body, _ := io.ReadAll(protectResp.Body)
-		logf("[archive] Protect request failed: status %d, body: %s", protectResp.StatusCode, string(body))
-	}
+	// Deliver the actual protect request to recording CONCURRENTLY (best-effort):
+	// this is fire-and-forget and is never joined by the caller, so it cannot gate or
+	// delay dispatch, and recording being down only produces a log line — the alert
+	// outcome is unaffected.
+	go func() {
+		protectResp, err := httpClient.Post(cfg.RecordingURL+"/api/archives/protect", "application/json", bytes.NewReader(payload))
+		if err != nil {
+			logf("[archive] Protect request delivery failed for incident %s: %v", incidentID, err)
+			return
+		}
+		defer protectResp.Body.Close()
+
+		if protectResp.StatusCode >= 200 && protectResp.StatusCode < 300 {
+			logf("[archive] Protect request delivered for incident %s (%d cameras)", incidentID, len(streamKeys))
+		} else {
+			body, _ := io.ReadAll(protectResp.Body)
+			logf("[archive] Protect request rejected for incident %s: status %d, body: %s", incidentID, protectResp.StatusCode, string(body))
+		}
+	}()
 }
 
 // --- Notification Dispatch ---
@@ -1010,17 +1024,13 @@ func handleNotify(cfg Config, dedup *dedupCache) http.HandlerFunc {
 
 		// Dispatch notifications asynchronously.
 		go func() {
-			// §출력 6 / assertion P: archive protection runs CONCURRENTLY with the
-			// contact dispatch and is NOT gated on channel completion — it must be
-			// triggered immediately so its log precedes the first channel-attempt
-			// completion (and the dispatch summary). Start it before blocking on
-			// dispatch, then join both.
-			var pwg sync.WaitGroup
-			pwg.Add(1)
-			go func() {
-				defer pwg.Done()
-				requestArchiveProtect(cfg, alert)
-			}()
+			// §출력 6 / assertion P: trigger archive protection FIRST. requestArchiveProtect
+			// prepares the request and emits the protect-request log SYNCHRONOUSLY here,
+			// then delivers the actual HTTP to recording concurrently in the background.
+			// Because the protect log is emitted before channel dispatch even begins, its
+			// timestamp deterministically precedes the first channel-attempt completion and
+			// the dispatch-complete summary — ordering by structure, not by a goroutine race.
+			requestArchiveProtect(cfg, alert)
 
 			contactCount, results := dispatchNotifications(cfg, alert)
 			successCount := 0
@@ -1033,8 +1043,6 @@ func handleNotify(cfg Config, dedup *dedupCache) http.HandlerFunc {
 			}
 			logf("[notify] Dispatch complete: %d/%d contacts notified (kakao:%d sms:%d failed:%d)",
 				successCount, contactCount, channels["kakaotalk"], channels["sms"], contactCount-successCount)
-
-			pwg.Wait()
 		}()
 
 		// Return immediately (accepted, processing async)
