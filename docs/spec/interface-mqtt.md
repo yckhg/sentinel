@@ -37,8 +37,9 @@
 | 인증 | 없음 (no-auth 설정, anonymous 허용) | 없음 |
 | TLS | 미사용 | 미사용 |
 
-- 클라이언트 권장 옵션: 디바이스별 유일한 Client ID, clean session `true`, keep-alive `60s`, 자동 재연결(지수 백오프, max 60s).
-- Sentinel 측 클라이언트 ID는 `sentinel-hw-gateway`로 고정.
+- H/W 디바이스 권장 옵션: 디바이스별 유일한 Client ID, clean session `true`, keep-alive `60s`, 자동 재연결(지수 백오프, max 60s).
+- **Sentinel(hw-gateway)는 예외 — persistent session(clean session=`false`) + 고정 client ID `sentinel-hw-gateway`.** H/W 발행자에게 권장하는 `clean session=true`와 달리, gateway는 재연결 경계에서 브로커 세션 큐가 QoS1/2 미확인 메시지를 재전송하여 **수신측(gateway) 경보 유실을 방지**하기 위해 persistent session을 채택한다(설계자 승인). 이 보장은 브로커(mosquitto)의 세션 지속성 설정에 의존하며, 그 대가로 재연결 경계에서 QoS1 메시지의 **중복 수신**이 늘 수 있으므로 구독자(gateway) 처리는 idempotent해야 한다(`alert/resolved` 계약 §핵심 로직 참조). 상세는 `docs/spec/hw-gateway.md` §회복력·단언 S.
+- **세션 지속성 (계약 산출물):** gateway의 persistent session 유실 방지 보장(§hw-gateway 단언 S)이 성립하려면, mosquitto는 gateway 오프라인 구간의 QoS1/2 in-flight 메시지를 세션 큐에 보관해야 한다. 최소 요건은 **브로커 상시 가동**이며(세션 큐는 메모리에 유지되므로 gateway만 재기동하는 시나리오는 이것으로 충분), 브로커 재기동에도 세션을 살리려면 mosquitto `persistence true` + persistence 볼륨 마운트를 함께 구성한다. 이 mosquitto 설정(persistence/볼륨)은 본 계약의 **산출물**이며, 미구성 시 단언 S는 실측 불가·미보장 상태다.
 - ⚠️ 인증/화이트리스트가 없으므로 누구나 발행 가능 — 인터넷 노출 시 방화벽/포트포워딩 수준에서 접근 통제.
 
 ### 검증 도구
@@ -143,6 +144,7 @@
 - **발행 조건:** 위급 상황 감지 시 즉시. 주기 발행 아님.
 - **재전송 정책:** MQTT 재연결 후 미확인 alert는 재전송해야 하며, 이때 `alertId`·`timestamp`는 최초 감지 시점 값을 유지한다. 서버는 `alertId`로 dedup한다.
 - **dedup은 in-memory** — hw-gateway 재시작 시 초기화되고, 24시간 후 만료된다. `alertId` 누락 시 incident는 생성되되 dedup은 건너뛴다.
+- **alertId 부재 alert의 중복 안전성 (계약):** 서버 dedup은 `alertId`가 있는 alert에만 적용되므로, `alertId`가 없는 테스트 alert는 dedup 대상이 아니다. 이들의 중복 방지는 **토픽 QoS 2(exactly-once)**에 의존한다 — gateway가 persistent session이어도 QoS 2 흐름은 재연결 경계에서 정확히 한 번 전달되어 test alert가 중복 forward되지 않는다. (QoS 1 흐름인 `alert/resolved`는 재전송될 수 있어 별도 idempotency 계약을 둔다 — 해당 계약 참조.)
 - **siteId 일관성:** 서버는 페이로드의 `siteId`를 토픽의 `{siteId}`로 덮어쓴다. 토픽이 진실이다.
 - **필수 필드 누락 시:** `deviceId`/`siteId`/`type`/`timestamp` 중 하나라도 비어 있으면 서버는 메시지를 무시하고 경고 로그만 남긴다.
 - **다운스트림 격리:** notifier 호출 실패는 incident 기록에 영향을 주지 않는다 (두 호출은 병렬, 각 10초 타임아웃).
@@ -478,6 +480,7 @@ docker compose exec mosquitto mosquitto_sub -v -q 1 -t 'safety/site1/cmd/restart
 ### 핵심 로직 (QoS, retain, 발행 주기/조건 등 불변식)
 
 - **QoS 1 (at-least-once), retain false.** 중복 수신 전제 → 모든 구독자 동작이 idempotent해야 한다.
+- **재연결 중복과 idempotency (계약):** gateway는 persistent session으로 접속하므로(§브로커 접속 계약), 재연결 경계에서 브로커 세션 큐가 이 QoS1 메시지를 재전송할 수 있다. 따라서 sensor_button resolve의 다운스트림 forward(`resolve-from-sensor`)는 **idempotent**해야 한다 — 이미 해소된 incident를 재수신하면 no-op으로 처리하고 중복 해소·중복 부수효과를 만들지 않는다. `incidentId==0` fallback도 이미 해소된 대상에는 재적용하지 않는다. web-kind echo는 무시되므로 재전송돼도 무해하다.
 - **사람 게이트 원칙:** alert는 자동 해제되지 않는다. 반드시 사람(웹 클릭 또는 물리 버튼)이 트리거한다.
 - **Echo 가드:** 브로커는 QoS 1에서 자기 발행 메시지를 자신에게 echo한다. 발행자는 `resolvedBy.kind`(서버: `"web"` 무시) 또는 `resolvedBy.id == 내 deviceId`(펌웨어)로 자기 echo를 무시한다.
 - **디바이스 측 발행은 optional, 구독+4단계는 필수.** 버튼 없는 디바이스도 수신 동작은 구현해야 한다.
