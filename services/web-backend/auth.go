@@ -196,7 +196,7 @@ func handleRegister(db *sql.DB) http.HandlerFunc {
 		if email != nil {
 			emailStr = *email
 		}
-		log.Printf("user registered: id=%d username=%s name=%s status=%s email=%s", id, req.Username, req.Name, status, emailStr)
+		log.Printf("user registered: id=%d username=%s name=%s status=%s email=%s", id, req.Username, req.Name, status, maskEmail(emailStr))
 
 		writeJSON(w, http.StatusCreated, registerResponse{
 			ID:       id,

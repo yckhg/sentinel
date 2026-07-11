@@ -1,8 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // TestMaskSecret proves the masking transform actually redacts: the original
@@ -212,6 +218,119 @@ func TestScrub(t *testing.T) {
 			if !strings.Contains(out, val[:4]+"***") {
 				t.Errorf("scrub of %s did not emit masked form %q in %q", name, val[:4]+"***", out)
 			}
+		}
+	}
+}
+
+// TestNewHTTPServerTimeouts guards the anti-Slowloris hardening (#39): the
+// server must never fall back to Go's default 0 (unlimited) header/read/idle
+// timeouts, otherwise a slow client can pin goroutines and sockets forever.
+func TestNewHTTPServerTimeouts(t *testing.T) {
+	srv := newHTTPServer(nil)
+
+	cases := []struct {
+		name string
+		got  time.Duration
+	}{
+		{"ReadHeaderTimeout", srv.ReadHeaderTimeout},
+		{"ReadTimeout", srv.ReadTimeout},
+		{"WriteTimeout", srv.WriteTimeout},
+		{"IdleTimeout", srv.IdleTimeout},
+	}
+	for _, c := range cases {
+		if c.got <= 0 {
+			t.Errorf("%s must be > 0 to defend against Slowloris, got %v", c.name, c.got)
+		}
+	}
+}
+
+// TestWaitTimeout covers the graceful-shutdown drain primitive (#40): it must
+// return true once the tracked dispatch goroutines finish, and false when they
+// exceed the deadline so shutdown cannot block forever.
+func TestWaitTimeout(t *testing.T) {
+	t.Run("completes before deadline", func(t *testing.T) {
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			wg.Done()
+		}()
+		if !waitTimeout(&wg, time.Second) {
+			t.Fatal("expected waitTimeout to report completion")
+		}
+	})
+
+	t.Run("times out when work outlives deadline", func(t *testing.T) {
+		var wg sync.WaitGroup
+		wg.Add(1)
+		defer wg.Done() // release after the assertion so the helper goroutine exits
+		if waitTimeout(&wg, 20*time.Millisecond) {
+			t.Fatal("expected waitTimeout to report a timeout")
+		}
+	})
+}
+
+// TestMaxBytesMiddleware locks the request-body cap (#41): /api/notify now shares
+// the 1 MB limit that only /api/send-email previously had. A body over the limit
+// must fail the read; bodies at/under the limit pass through.
+func TestMaxBytesMiddleware(t *testing.T) {
+	handler := maxBytesMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.ReadAll(r.Body); err != nil {
+			http.Error(w, "too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	cases := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{"under limit", maxRequestBodyBytes - 1, false},
+		{"at limit", maxRequestBodyBytes, false},
+		{"over limit", maxRequestBodyBytes + 1, true},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(make([]byte, c.size)))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		gotErr := rr.Code == http.StatusRequestEntityTooLarge
+		if gotErr != c.wantErr {
+			t.Errorf("%s: size=%d got413=%v want=%v (code=%d)", c.name, c.size, gotErr, c.wantErr, rr.Code)
+		}
+	}
+}
+
+// TestMaskPhone locks the PII phone-masking used in logs (#43): the middle
+// digits must never survive, while a correlatable head/tail remains.
+func TestMaskPhone(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"010-1234-5678", "010-****-5678"},
+		{"01012345678", "010-****-5678"},
+		{"123456", "****"},
+		{"+82 10 9876 5432", "821-****-5432"},
+	}
+	for _, c := range cases {
+		if got := maskPhone(c.in); got != c.want {
+			t.Errorf("maskPhone(%q)=%q want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestMaskEmail locks the PII email-masking used in logs (#43): the local part
+// is reduced to its first character; the domain is preserved for diagnostics.
+func TestMaskEmail(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"john@example.com", "j***@example.com"},
+		{"a@b.com", "*@b.com"},
+		{"noatsign", "***"},
+	}
+	for _, c := range cases {
+		if got := maskEmail(c.in); got != c.want {
+			t.Errorf("maskEmail(%q)=%q want %q", c.in, got, c.want)
 		}
 	}
 }

@@ -101,7 +101,7 @@ func handleCreateInvitation(db *sql.DB) http.HandlerFunc {
 		}
 
 		id, _ := result.LastInsertId()
-		log.Printf("invitation created: id=%d email=%s by user=%d", id, req.Email, user.UserID)
+		log.Printf("invitation created: id=%d email=%s by user=%d", id, maskEmail(req.Email), user.UserID)
 
 		// Send invitation email via notifier (async)
 		go sendInvitationEmail(db, req.Email, token)
@@ -150,9 +150,9 @@ func sendInvitationEmail(db *sql.DB, email, token string) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
-		log.Printf("invitation email sent to %s", email)
+		log.Printf("invitation email sent to %s", maskEmail(email))
 	} else {
-		log.Printf("invitation email: notifier returned status %d for %s", resp.StatusCode, email)
+		log.Printf("invitation email: notifier returned status %d for %s", resp.StatusCode, maskEmail(email))
 	}
 }
 

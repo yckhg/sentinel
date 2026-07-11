@@ -177,6 +177,12 @@ services:
       - NOTIFIER_URL=http://notifier:8080
       - RECORDING_URL=http://recording:8080
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3080}
+      # Admin seed + JWT signing key. Without these the documented .env values
+      # never reached web-backend, so it always seeded the default password and
+      # regenerated the JWT secret on every restart (invalidating sessions). (#46)
+      - JWT_SECRET=${JWT_SECRET:-}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 30s

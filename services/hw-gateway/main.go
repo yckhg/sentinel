@@ -228,9 +228,40 @@ func main() {
 		handleAlertResolvedPublish(w, r, mqttClient)
 	})
 
+	srv := newHTTPServer(maxBytesMiddleware(mux))
+
 	log.Println("hw-gateway listening on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// maxRequestBodyBytes caps request bodies (#41): the control endpoints accept
+// only small JSON, so 1 MB prevents memory exhaustion from oversized bodies.
+const maxRequestBodyBytes = 1 << 20 // 1 MB
+
+// maxBytesMiddleware wraps every request body in an http.MaxBytesReader so a
+// handler that decodes an oversized body gets an error (→ 400) instead of
+// buffering unbounded data. GET/HEAD requests without a body are unaffected.
+func maxBytesMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// newHTTPServer builds the service HTTP server with hardened timeouts. Without
+// them ReadHeaderTimeout/ReadTimeout/IdleTimeout default to 0 (unlimited) and a
+// slow/malicious client can trickle headers or body to hold goroutines/sockets
+// open indefinitely (Slowloris) — critical for a safety control entrypoint.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ":8080",
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -337,14 +339,18 @@ func (rm *RecordingManager) Reload(newCameras []CameraInfo) {
 	rm.cameras = newCameras
 	rm.mu.Unlock()
 
-	// Kill stopped FFmpeg processes
+	// Terminate removed FFmpeg processes in parallel: SIGTERM every process,
+	// wait a single grace period, then SIGKILL any survivors. Previously this
+	// slept 3s per process serially, so removing N recorders blocked the reload
+	// handler for N×3s and could race reload retries into duplicate reloads.
+	// This mirrors Stop()'s one-shot grace. (#44)
+	var stopProcs []*os.Process
 	for _, s := range toStop {
 		if s.state.cmd != nil && s.state.cmd.Process != nil {
-			s.state.cmd.Process.Signal(syscall.SIGTERM)
-			time.Sleep(3 * time.Second)
-			s.state.cmd.Process.Kill()
+			stopProcs = append(stopProcs, s.state.cmd.Process)
 		}
 	}
+	terminateProcesses(stopProcs, 3*time.Second)
 
 	// Start new recorders
 	for _, cam := range toStart {
@@ -352,6 +358,23 @@ func (rm *RecordingManager) Reload(newCameras []CameraInfo) {
 	}
 
 	log.Printf("[reload] Reconciled: %d cameras recording", len(newMap))
+}
+
+// terminateProcesses sends SIGTERM to every process, waits a single grace
+// period, then SIGKILLs any that remain. The grace wait runs once for the whole
+// batch (not per process), so teardown time does not scale with the process
+// count. Kill on an already-exited process is harmless.
+func terminateProcesses(procs []*os.Process, grace time.Duration) {
+	if len(procs) == 0 {
+		return
+	}
+	for _, p := range procs {
+		p.Signal(syscall.SIGTERM)
+	}
+	time.Sleep(grace)
+	for _, p := range procs {
+		p.Kill()
+	}
 }
 
 // Stop terminates all recording processes.
@@ -1621,10 +1644,46 @@ func main() {
 		json.NewEncoder(w).Encode(stats)
 	})
 
+	srv := newHTTPServer(mux)
+
+	// Graceful shutdown (#40): on SIGTERM/SIGINT terminate the ffmpeg recorder
+	// children through manager.Stop() (SIGTERM → grace → SIGKILL) so in-progress
+	// segments are flushed rather than truncated/left 0-byte, then drain in-flight
+	// HTTP downloads via srv.Shutdown. Without this, docker stop kills the process
+	// immediately and orphans partial segments.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		log.Println("shutting down: stopping recorders and draining HTTP...")
+		manager.Stop()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("http shutdown: %v", err)
+		}
+	}()
+
 	log.Println("recording service listening on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		manager.Stop()
 		log.Fatal(err)
+	}
+}
+
+// newHTTPServer builds the service HTTP server with hardened timeouts. Without
+// them ReadHeaderTimeout/ReadTimeout/IdleTimeout default to 0 (unlimited) and a
+// slow/malicious client can trickle headers or body to hold goroutines/sockets
+// open indefinitely (Slowloris). WriteTimeout is deliberately left at 0
+// (unlimited): this service streams large archive/segment downloads via
+// http.ServeFile and a hard write deadline would truncate legitimate transfers.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ":8080",
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 
