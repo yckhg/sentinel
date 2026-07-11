@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
+import Modal from "./Modal";
 
 interface RestartDialogProps {
   cameraName: string;
@@ -54,12 +55,11 @@ export default function RestartDialog({
   };
 
   return (
-    <div className="mgmt-modal-overlay" onClick={onClose}>
-      <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
-        {result ? (
-          <>
-            <p
-              className="mgmt-modal-text"
+    <Modal onClose={onClose} ariaLabel="장비 재시작">
+      {result ? (
+        <>
+          <p
+            className="mgmt-modal-text"
               style={{ color: result.success ? "#2e7d32" : "#d32f2f" }}
             >
               {result.message}
@@ -119,7 +119,6 @@ export default function RestartDialog({
             </div>
           </>
         )}
-      </div>
-    </div>
+    </Modal>
   );
 }

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { fetchWithTimeout } from "../utils/fetchWithTimeout";
+import Modal from "./Modal";
 
 interface EmergencyCallButtonProps {
   className?: string;
@@ -85,8 +86,7 @@ export default function EmergencyCallButton({
       </button>
 
       {showDialog && (
-        <div className="mgmt-modal-overlay" onClick={handleClose}>
-          <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+        <Modal onClose={handleClose} ariaLabel="119 긴급 신고">
             <div className="emergency-dialog-header">119 긴급 신고</div>
             <div className="emergency-dialog-address">
               <span className="emergency-dialog-label">현재 위치</span>
@@ -103,8 +103,7 @@ export default function EmergencyCallButton({
                 119 전화 걸기
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </>
   );

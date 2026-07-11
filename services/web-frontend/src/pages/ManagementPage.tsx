@@ -3,6 +3,7 @@ import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetch
 import { formatKstDateTime, formatKstDate } from "../utils/datetime";
 import DevicesSection from "../components/DevicesSection";
 import HealthPanel from "../components/HealthPanel";
+import Modal from "../components/Modal";
 import { isAdmin } from "../utils/jwt";
 
 interface Contact {
@@ -1802,8 +1803,7 @@ export default function ManagementPage() {
 
       {/* Cancel invitation confirmation dialog */}
       {cancelInviteTarget && (
-        <div className="mgmt-modal-overlay" onClick={() => setCancelInviteTarget(null)}>
-          <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+        <Modal onClose={() => setCancelInviteTarget(null)} ariaLabel="초대 취소 확인">
             <p className="mgmt-modal-text">
               <strong>{cancelInviteTarget.email}</strong> 초대를 취소하시겠습니까?
             </p>
@@ -1822,14 +1822,12 @@ export default function ManagementPage() {
                 닫기
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Revoke confirmation dialog */}
       {revokeTarget && (
-        <div className="mgmt-modal-overlay" onClick={() => setRevokeTarget(null)}>
-          <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+        <Modal onClose={() => setRevokeTarget(null)} ariaLabel="임시 링크 폐기 확인">
             <p className="mgmt-modal-text">
               이 임시 링크를 폐기하시겠습니까?<br />
               <small>폐기 후에는 해당 링크로 접속할 수 없습니다.</small>
@@ -1849,14 +1847,12 @@ export default function ManagementPage() {
                 취소
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Camera delete confirmation dialog */}
       {camDeleteTarget && (
-        <div className="mgmt-modal-overlay" onClick={() => setCamDeleteTarget(null)}>
-          <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+        <Modal onClose={() => setCamDeleteTarget(null)} ariaLabel="카메라 삭제 확인">
             <p className="mgmt-modal-text">
               <strong>{camDeleteTarget.name}</strong> 카메라를 삭제하시겠습니까?
             </p>
@@ -1866,14 +1862,12 @@ export default function ManagementPage() {
               </button>
               <button className="mgmt-btn mgmt-btn-secondary" onClick={() => setCamDeleteTarget(null)}>취소</button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Archive delete confirmation dialog */}
       {archiveDeleteTarget && (
-        <div className="mgmt-modal-overlay" onClick={() => setArchiveDeleteTarget(null)}>
-          <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+        <Modal onClose={() => setArchiveDeleteTarget(null)} ariaLabel="보관 영상 삭제 확인">
             <p className="mgmt-modal-text">
               <strong>{archiveDeleteTarget.streamKey}</strong> 보관 영상을 삭제하시겠습니까?<br />
               <small>{archiveDeleteTarget.sizeBytes > 0 ? formatBytes(archiveDeleteTarget.sizeBytes) : ""} 디스크 공간이 확보됩니다.</small>
@@ -1893,14 +1887,12 @@ export default function ManagementPage() {
                 취소
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Incident archive delete confirmation dialog */}
       {incidentDeleteTarget && (
-        <div className="mgmt-modal-overlay" onClick={() => setIncidentDeleteTarget(null)}>
-          <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+        <Modal onClose={() => setIncidentDeleteTarget(null)} ariaLabel="사건 보관 영상 삭제 확인">
             <p className="mgmt-modal-text">
               <strong>{incidentDeleteTarget}</strong> 사건의 모든 보관 영상을 삭제하시겠습니까?<br />
               <small>해당 사건의 모든 카메라 영상이 삭제됩니다.</small>
@@ -1920,14 +1912,12 @@ export default function ManagementPage() {
                 취소
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Delete confirmation dialog */}
       {deleteTarget && (
-        <div className="mgmt-modal-overlay" onClick={() => setDeleteTarget(null)}>
-          <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+        <Modal onClose={() => setDeleteTarget(null)} ariaLabel="연락처 삭제 확인">
             <p className="mgmt-modal-text">
               <strong>{deleteTarget.name}</strong> 연락처를 삭제하시겠습니까?
             </p>
@@ -1946,8 +1936,7 @@ export default function ManagementPage() {
                 취소
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

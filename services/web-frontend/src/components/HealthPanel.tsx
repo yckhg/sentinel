@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 import { parseServerTimeMs, formatKstDateTimeSec } from "../utils/datetime";
+import Modal from "./Modal";
 
 interface HealthEntry {
   kind: "service" | "sensor";
@@ -184,12 +185,11 @@ export default function HealthPanel() {
       )}
 
       {historyOpen && (
-        <div className="mgmt-modal-overlay" onClick={() => setHistoryOpen(false)}>
-          <div
-            className="mgmt-modal"
-            onClick={(ev) => ev.stopPropagation()}
-            style={{ maxWidth: "560px", width: "92vw", maxHeight: "80vh", overflow: "auto" }}
-          >
+        <Modal
+          onClose={() => setHistoryOpen(false)}
+          ariaLabel="최근 Health 이력"
+          style={{ maxWidth: "560px", width: "92vw", maxHeight: "80vh", overflow: "auto" }}
+        >
             <h3 style={{ marginTop: 0 }}>최근 Health 이력 (20건)</h3>
             {historyLoading ? (
               <p className="mgmt-loading">로딩 중...</p>
@@ -232,8 +232,7 @@ export default function HealthPanel() {
                 닫기
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </>
   );

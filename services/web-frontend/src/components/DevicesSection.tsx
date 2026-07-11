@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 import { parseServerTimeMs, formatKstDateTimeSec } from "../utils/datetime";
+import Modal from "./Modal";
 
 interface Device {
   id: number;
@@ -354,8 +355,7 @@ export default function DevicesSection() {
       )}
 
       {deleteTarget && (
-        <div className="mgmt-modal-overlay" onClick={() => setDeleteTarget(null)}>
-          <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+        <Modal onClose={() => setDeleteTarget(null)} ariaLabel="장비 삭제 확인">
             <p className="mgmt-modal-text">
               <strong>{deleteTarget.alias || deleteTarget.deviceId}</strong> 장비를 삭제하시겠습니까?
               <br />
@@ -378,8 +378,7 @@ export default function DevicesSection() {
                 취소
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </>
   );

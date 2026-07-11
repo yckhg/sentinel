@@ -3,6 +3,7 @@ import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetch
 import { formatKstDateTime } from "../utils/datetime";
 import { isAdmin } from "../utils/jwt";
 import DualCalendar from "../components/DualCalendar";
+import Modal from "../components/Modal";
 
 interface Incident {
   id: number;
@@ -115,8 +116,7 @@ function ResolveModal({ incident, onClose, onResolved }: ResolveModalProps) {
   };
 
   return (
-    <div className="mgmt-modal-overlay" onClick={onClose}>
-      <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+    <Modal onClose={onClose} ariaLabel="조치 완료 처리">
         <p className="mgmt-modal-text">
           <strong>조치 완료 처리</strong>
         </p>
@@ -143,8 +143,7 @@ function ResolveModal({ incident, onClose, onResolved }: ResolveModalProps) {
             {sending ? "처리 중..." : "조치 완료"}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
