@@ -6,7 +6,7 @@ import SettingsPage from "./pages/SettingsPage";
 import ViewerPage from "./pages/ViewerPage";
 import LoginPage from "./pages/LoginPage";
 import CrisisAlertBanner from "./components/CrisisAlertBanner";
-import { isTokenExpired } from "./utils/isTokenExpired";
+import { isTokenExpired } from "./utils/jwt";
 import "./App.css";
 
 type Tab = "cctv" | "incidents" | "management" | "settings";

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
+import { isAdmin } from "../utils/jwt";
 
 interface SettingsPageProps {
   onLogout: () => void;
@@ -10,21 +11,6 @@ function getAuthHeaders(): HeadersInit {
   return token
     ? { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
     : { "Content-Type": "application/json" };
-}
-
-function isAdmin(): boolean {
-  const token = localStorage.getItem("token");
-  if (!token) return false;
-  try {
-    const parts = token.split(".");
-    if (parts.length < 2) return false;
-    const encoded = parts[1];
-    if (!encoded) return false;
-    const payload = JSON.parse(atob(encoded));
-    return payload.role === "admin";
-  } catch {
-    return false;
-  }
 }
 
 const HEALTH_KEYS = [
@@ -41,7 +27,7 @@ export default function SettingsPage({ onLogout }: SettingsPageProps) {
   const [pwError, setPwError] = useState<string | null>(null);
   const [pwSuccess, setPwSuccess] = useState<string | null>(null);
 
-  const admin = isAdmin();
+  const admin = isAdmin(localStorage.getItem("token"));
   const [healthValues, setHealthValues] = useState<Record<string, string>>({});
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthSaving, setHealthSaving] = useState(false);

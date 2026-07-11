@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 import { formatKstDateTime } from "../utils/datetime";
+import { isAdmin } from "../utils/jwt";
 import DualCalendar from "../components/DualCalendar";
 
 interface Incident {
@@ -47,21 +48,6 @@ function getAuthHeaders(): Record<string, string> {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   };
-}
-
-function isAdmin(): boolean {
-  const token = localStorage.getItem("token");
-  if (!token) return false;
-  try {
-    const parts = token.split(".");
-    if (parts.length < 2) return false;
-    const encoded = parts[1];
-    if (!encoded) return false;
-    const payload = JSON.parse(atob(encoded));
-    return payload.role === "admin";
-  } catch {
-    return false;
-  }
 }
 
 function formatDateTime(iso: string): string {
@@ -174,7 +160,7 @@ export default function IncidentsPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("");
   const [resolveTarget, setResolveTarget] = useState<Incident | null>(null);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
-  const admin = useState(() => isAdmin())[0];
+  const admin = useState(() => isAdmin(localStorage.getItem("token")))[0];
 
   const fetchIncidents = useCallback(async (page: number, from: string, to: string, status: StatusFilter, append: boolean) => {
     if (append) {

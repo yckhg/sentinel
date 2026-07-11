@@ -3,6 +3,7 @@ import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetch
 import { formatKstDateTime, formatKstDate } from "../utils/datetime";
 import DevicesSection from "../components/DevicesSection";
 import HealthPanel from "../components/HealthPanel";
+import { isAdmin } from "../utils/jwt";
 
 interface Contact {
   id: number;
@@ -63,21 +64,6 @@ interface ActiveUser {
   name: string;
   role: string;
   createdAt: string;
-}
-
-function isAdmin(): boolean {
-  const token = localStorage.getItem("token");
-  if (!token) return false;
-  try {
-    const parts = token.split(".");
-    if (parts.length < 2) return false;
-    const encoded = parts[1];
-    if (!encoded) return false;
-    const payload = JSON.parse(atob(encoded));
-    return payload.role === "admin";
-  } catch {
-    return false;
-  }
 }
 
 const PHONE_REGEX = /^01[016789]-\d{3,4}-\d{4}$/;
@@ -153,7 +139,7 @@ export default function ManagementPage() {
   const [revokeLoading, setRevokeLoading] = useState(false);
 
   // Account management state
-  const [showAccounts] = useState(isAdmin());
+  const [showAccounts] = useState(isAdmin(localStorage.getItem("token")));
   const [pendingUsers, setPendingUsers] = useState<PendingUser[]>([]);
   const [activeUsers, setActiveUsers] = useState<ActiveUser[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(true);
