@@ -700,15 +700,41 @@ type cameraInfo struct {
 }
 
 // filterProtectedStreamKeys returns the streamKeys eligible for protection for a
-// given event site: enabled, non-empty key, and belonging to that exact siteId.
-// Cameras of other sites are excluded so a site-A incident never protects site-B
-// segments (multi-site contamination guard, §출력 6).
+// given event site (§출력 6 / assertion I). It is site-aware ONLY when the camera
+// list actually carries site information:
+//
+//   - If at least one returned camera exposes a non-empty siteId, the list is
+//     treated as site-tagged and protection is scoped to the event's site: enabled,
+//     non-empty key, and siteId == event site. Other sites' cameras are excluded so
+//     a site-A incident never protects site-B segments (multi-site contamination
+//     guard). This is the target behavior once the camera contract exposes siteId.
+//
+//   - If NO camera exposes a siteId (the current single-deployment camera contract —
+//     interface-web-api §계약13 returns no per-camera siteId, and web-backend has no
+//     camera↔site association), site-scoping is undecidable, so we FALL BACK to
+//     protecting all enabled cameras (a safe superset = the prior behavior). This
+//     prevents silently protecting ZERO cameras and losing archive protection
+//     entirely — a non-regression guarantee for the safety feature.
 func filterProtectedStreamKeys(cameras []cameraInfo, siteID string) []string {
+	siteTagged := false
+	for _, c := range cameras {
+		if c.SiteID != "" {
+			siteTagged = true
+			break
+		}
+	}
+
 	var streamKeys []string
 	for _, c := range cameras {
-		if c.Enabled && c.StreamKey != "" && c.SiteID == siteID {
-			streamKeys = append(streamKeys, c.StreamKey)
+		if !c.Enabled || c.StreamKey == "" {
+			continue
 		}
+		// Site-scope only when the list is site-tagged; otherwise fall back to all
+		// enabled cameras so protection is never silently lost.
+		if siteTagged && c.SiteID != siteID {
+			continue
+		}
+		streamKeys = append(streamKeys, c.StreamKey)
 	}
 	return streamKeys
 }

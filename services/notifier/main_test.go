@@ -489,6 +489,40 @@ func TestFilterProtectedStreamKeys(t *testing.T) {
 	}
 }
 
+// TestFilterProtectedStreamKeysFallback locks the non-regression fallback: under the
+// CURRENT camera contract (no per-camera siteId — interface-web-api §계약13), every
+// camera decodes with an empty siteId. Site-scoping is then undecidable, so the
+// filter must fall back to protecting ALL enabled cameras (a safe superset = prior
+// behavior) rather than silently protecting ZERO and losing archive protection.
+func TestFilterProtectedStreamKeysFallback(t *testing.T) {
+	// No camera carries a siteId (the real single-deployment contract today).
+	cameras := []cameraInfo{
+		{StreamKey: "c1", Enabled: true},
+		{StreamKey: "c2", Enabled: true},
+		{StreamKey: "c3", Enabled: false}, // disabled → still excluded
+		{StreamKey: "", Enabled: true},    // empty key → still excluded
+	}
+
+	// Regardless of the event's siteId, all enabled non-empty-key cameras are
+	// protected — the fallback must NOT be empty.
+	for _, site := range []string{"site1", "anything", ""} {
+		got := filterProtectedStreamKeys(cameras, site)
+		if strings.Join(got, ",") != "c1,c2" {
+			t.Errorf("fallback (no siteId) for event site %q = %v, want [c1 c2] (all enabled protected)", site, got)
+		}
+	}
+
+	// Mixed: as soon as ANY camera is site-tagged, the list is treated as site-aware
+	// and cameras WITHOUT a matching siteId (incl. untagged ones) are excluded.
+	mixed := []cameraInfo{
+		{StreamKey: "s1", Enabled: true, SiteID: "site1"},
+		{StreamKey: "u1", Enabled: true}, // untagged — excluded once list is site-aware
+	}
+	if got := filterProtectedStreamKeys(mixed, "site1"); strings.Join(got, ",") != "s1" {
+		t.Errorf("mixed list must be site-scoped = %v, want [s1] (untagged excluded)", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // #59 silent-fail: target_unavailable emission (§출력 11 / assertions M, J)
 // ---------------------------------------------------------------------------
