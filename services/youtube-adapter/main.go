@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -80,6 +81,14 @@ type streamState struct {
 	startedAt time.Time
 	loopCount int
 	stopCh    chan struct{}
+	stopOnce  sync.Once
+}
+
+// stop closes stopCh at most once. StopAll and Reload can both target the same
+// stream (e.g. a reload arriving during SIGTERM shutdown); without this guard the
+// second close panics. (#70)
+func (s *streamState) stop() {
+	s.stopOnce.Do(func() { close(s.stopCh) })
 }
 
 // StreamManager manages all YouTube stream processes
@@ -111,11 +120,11 @@ func (m *StreamManager) StartAll() {
 // os.Exit. The wait is bounded so a stream stuck resolving (yt-dlp) cannot hang
 // shutdown indefinitely.
 func (m *StreamManager) StopAll() {
-	m.mu.RLock()
+	m.mu.Lock()
 	for _, state := range m.streams {
-		close(state.stopCh)
+		state.stop()
 	}
-	m.mu.RUnlock()
+	m.mu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
@@ -151,7 +160,7 @@ func (m *StreamManager) Reload(newSources []YouTubeSource) {
 		if !exists || newSrc.YouTubeURL != old.YouTubeURL {
 			if state, ok := m.streams[id]; ok {
 				log.Printf("[%s] Stopping stream (removed or changed)", id)
-				close(state.stopCh)
+				state.stop()
 				delete(m.streams, id)
 			}
 		}
@@ -206,13 +215,23 @@ func (m *StreamManager) manageStream(src YouTubeSource, state *streamState) {
 
 		var streamURL string
 		if src.LocalFile != "" {
-			// Use local file — no yt-dlp needed
+			// Use local file — no yt-dlp needed. The doc contract restricts local
+			// file paths to /media/ (youtube-adapter.md:85); reject anything that
+			// escapes it rather than passing it straight to ffmpeg -i. (#71)
+			if err := validateLocalFile(src.LocalFile); err != nil {
+				log.Printf("[%s] Rejecting local file %q: %v", src.ID, src.LocalFile, err)
+				state.Lock()
+				state.status = "error"
+				state.lastError = fmt.Sprintf("localFile: %v", err)
+				state.Unlock()
+				return // config-level error; a fixed config arrives via Reload
+			}
 			log.Printf("[%s] Using local file: %s", src.ID, src.LocalFile)
 			streamURL = src.LocalFile
 		} else {
 			log.Printf("[%s] Resolving stream URL via yt-dlp for %s", src.ID, src.YouTubeURL)
 			var err error
-			streamURL, err = resolveStreamURL(src.YouTubeURL)
+			streamURL, err = resolveStreamURL(src.YouTubeURL, state.stopCh)
 			if err != nil {
 				log.Printf("[%s] yt-dlp error: %v", src.ID, err)
 				state.Lock()
@@ -267,15 +286,64 @@ func (m *StreamManager) manageStream(src YouTubeSource, state *streamState) {
 		}
 
 		// FFmpeg exited cleanly — re-resolve URL and restart
-		// (local files with -stream_loop -1 won't reach here; only YouTube URLs)
-		log.Printf("[%s] Stream ended (URL source), re-resolving and restarting...", src.ID)
+		// (local files with -stream_loop -1 won't reach here; only YouTube URLs).
+		// Apply a minimum delay before re-resolving: a source that EOFs immediately
+		// would otherwise spin yt-dlp in a tight loop and trip its IP rate-limit
+		// (youtube-adapter.md:83). cctv already sleeps on clean exit; this matches. (#67)
 		backoff = time.Second // reset backoff on clean exit
+		log.Printf("[%s] Stream ended (URL source), re-resolving in %v...", src.ID, cleanExitDelay)
+		if waitOrStop(state.stopCh, cleanExitDelay) {
+			state.Lock()
+			state.status = "stopped"
+			state.Unlock()
+			return
+		}
 	}
+}
+
+// cleanExitDelay is the minimum wait before re-resolving a URL source that
+// exited cleanly, throttling yt-dlp re-invocation for immediate-EOF sources.
+var cleanExitDelay = time.Second
+
+// waitOrStop blocks for d, returning true early if stopCh is closed first.
+func waitOrStop(stopCh <-chan struct{}, d time.Duration) (stopped bool) {
+	select {
+	case <-stopCh:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// mediaDir is the only directory local source files may live under (doc contract).
+const mediaDir = "/media"
+
+// validateLocalFile enforces that a configured local file resolves to a path
+// under mediaDir, rejecting traversal (e.g. /media/../etc/passwd). (#71)
+func validateLocalFile(path string) error {
+	cleaned := filepath.Clean(path)
+	if !strings.HasPrefix(cleaned, mediaDir+"/") {
+		return fmt.Errorf("local file must be under %s/ (resolved to %q)", mediaDir, cleaned)
+	}
+	return nil
+}
+
+// resolveCommand builds the yt-dlp resolve command. It is a var so tests can
+// substitute a stand-in binary to exercise cancellation.
+var resolveCommand = func(ctx context.Context, youtubeURL string) *exec.Cmd {
+	return exec.CommandContext(ctx, "yt-dlp",
+		"--no-warnings",
+		"-f", "best[ext=mp4]/best",
+		"--get-url",
+		youtubeURL,
+	)
 }
 
 // resolveStreamURL uses yt-dlp to get the direct stream URL.
 // It validates the YouTube URL before execution and enforces a 30s timeout.
-func resolveStreamURL(youtubeURL string) (string, error) {
+// stopCh cancels the resolve early so a Reload/StopAll is not blocked for up to
+// 30s and does not leave a yt-dlp child running as an orphan. (#69)
+func resolveStreamURL(youtubeURL string, stopCh <-chan struct{}) (string, error) {
 	if err := validateYouTubeURL(youtubeURL); err != nil {
 		return "", fmt.Errorf("invalid YouTube URL: %w", err)
 	}
@@ -283,16 +351,25 @@ func resolveStreamURL(youtubeURL string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "yt-dlp",
-		"--no-warnings",
-		"-f", "best[ext=mp4]/best",
-		"--get-url",
-		youtubeURL,
-	)
+	// Cancel the exec context when a stop is requested (or when resolve finishes).
+	go func() {
+		select {
+		case <-stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	cmd := resolveCommand(ctx, youtubeURL)
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("yt-dlp timed out after 30s")
+		}
+		select {
+		case <-stopCh:
+			return "", fmt.Errorf("yt-dlp canceled: shutdown/reload requested")
+		default:
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return "", fmt.Errorf("%v: %s", err, string(exitErr.Stderr))

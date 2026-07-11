@@ -55,6 +55,11 @@ type CameraManager struct {
 	statuses  map[string]*cameraState
 	streamURL string
 	timeout   time.Duration
+
+	// newCmd builds the ffmpeg command for a camera. It is a field so tests can
+	// substitute a stand-in binary (e.g. sleep) and exercise the lifecycle/race
+	// paths without a real ffmpeg.
+	newCmd func(cam CameraConfig, destURL string) *exec.Cmd
 }
 
 type cameraState struct {
@@ -71,7 +76,23 @@ func NewCameraManager(cameras []CameraConfig, streamURL string, timeout time.Dur
 		statuses:  make(map[string]*cameraState),
 		streamURL: streamURL,
 		timeout:   timeout,
+		newCmd:    defaultFFmpegCmd,
 	}
+}
+
+// defaultFFmpegCmd builds the real ffmpeg pull-RTSP / push-RTMP command.
+// -c copy ensures no transcoding (raw H.264 pass-through).
+func defaultFFmpegCmd(cam CameraConfig, destURL string) *exec.Cmd {
+	return exec.Command("ffmpeg",
+		"-hide_banner",
+		"-loglevel", "warning",
+		"-rtsp_transport", "tcp",
+		"-i", cam.RtspURL,
+		"-c", "copy",
+		"-f", "flv",
+		"-flvflags", "no_duration_filesize",
+		destURL,
+	)
 }
 
 // Start launches FFmpeg processes for all configured cameras.
@@ -107,24 +128,24 @@ func (cm *CameraManager) manageCameraStream(cam CameraConfig, state *cameraState
 
 		log.Printf("[%s] Connecting to RTSP: %s", cam.CameraID, cam.RtspURL)
 
-		// Build FFmpeg command: pull RTSP, push RTMP to streaming server
-		// -c copy ensures no transcoding (raw H.264 pass-through)
+		// Build FFmpeg command: pull RTSP, push RTMP to streaming server.
 		destURL := fmt.Sprintf("%s/%s", cm.streamURL, cam.CameraID)
-		cmd := exec.Command("ffmpeg",
-			"-hide_banner",
-			"-loglevel", "warning",
-			"-rtsp_transport", "tcp",
-			"-i", cam.RtspURL,
-			"-c", "copy",
-			"-f", "flv",
-			"-flvflags", "no_duration_filesize",
-			destURL,
-		)
+		cmd := cm.newCmd(cam, destURL)
 		// Wrap stdout/stderr with watchdog writers to detect hung FFmpeg
 		stdoutWatcher := newWatchdogWriter(os.Stdout)
 		stderrWatcher := newWatchdogWriter(os.Stderr)
 		cmd.Stdout = stdoutWatcher
 		cmd.Stderr = stderrWatcher
+
+		// Re-check stopCh right before starting: Reload/Stop close stopCh and kill
+		// the process they snapshotted, but a goroutine sitting between the loop
+		// top and here would otherwise spawn a fresh ffmpeg nobody tracked. Bail
+		// out before starting if a stop was requested. (#66)
+		select {
+		case <-state.stopCh:
+			return
+		default:
+		}
 
 		cm.mu.Lock()
 		state.cmd = cmd
@@ -156,7 +177,10 @@ func (cm *CameraManager) manageCameraStream(cam CameraConfig, state *cameraState
 		log.Printf("[%s] Connected, streaming to %s", cam.CameraID, destURL)
 		backoff = time.Second // reset backoff on successful connect
 
-		// Start watchdog goroutine to kill FFmpeg if no output for timeout duration
+		// Start watchdog goroutine to kill FFmpeg if no output for timeout duration.
+		// It also owns terminating *this* goroutine's process when a stop is
+		// requested (stopCh), so an ffmpeg started after Reload/Stop snapshotted
+		// the process set can never survive as an orphan. (#66)
 		processDone := make(chan struct{})
 		go func() {
 			ticker := time.NewTicker(cm.timeout / 2)
@@ -172,21 +196,15 @@ func (cm *CameraManager) manageCameraStream(cam CameraConfig, state *cameraState
 					}
 					if time.Since(lastOutput) > cm.timeout {
 						log.Printf("[%s] FFmpeg output timeout (%v since last output), stopping process gracefully", cam.CameraID, cm.timeout)
-						if cmd.Process != nil {
-							cmd.Process.Signal(syscall.SIGTERM)
-							select {
-							case <-time.After(5 * time.Second):
-								log.Printf("[%s] FFmpeg did not exit after 5s SIGTERM, sending SIGKILL", cam.CameraID)
-								cmd.Process.Kill()
-							case <-processDone:
-								// Process exited gracefully after SIGTERM
-							}
-						}
+						terminateProcess(cam.CameraID, cmd.Process, processDone)
 						return
 					}
 				case <-processDone:
 					return
 				case <-state.stopCh:
+					// Stop/Reload requested: terminate our own process so it cannot
+					// leak as an orphan (the loop will then observe stopCh and exit).
+					terminateProcess(cam.CameraID, cmd.Process, processDone)
 					return
 				}
 			}
@@ -252,37 +270,6 @@ func (cm *CameraManager) GetStatuses() []CameraStatus {
 	return result
 }
 
-// StopCamera stops a single camera's stream gracefully.
-func (cm *CameraManager) StopCamera(cameraID string) {
-	cm.mu.Lock()
-	state, ok := cm.statuses[cameraID]
-	if ok {
-		close(state.stopCh)
-		delete(cm.statuses, cameraID)
-	}
-	cm.mu.Unlock()
-
-	if ok && state.cmd != nil && state.cmd.Process != nil {
-		log.Printf("[%s] Sending SIGTERM to FFmpeg process", cameraID)
-		state.cmd.Process.Signal(syscall.SIGTERM)
-		time.Sleep(3 * time.Second)
-		state.cmd.Process.Kill()
-	}
-}
-
-// StartCamera starts streaming for a single camera.
-func (cm *CameraManager) StartCamera(cam CameraConfig) {
-	state := &cameraState{
-		status: "disconnected",
-		stopCh: make(chan struct{}),
-	}
-	cm.mu.Lock()
-	cm.statuses[cam.CameraID] = state
-	cm.mu.Unlock()
-
-	go cm.manageCameraStream(cam, state)
-}
-
 // Reload reconciles the running cameras with a new config list.
 // Unchanged cameras (same cameraID + rtspUrl) are not interrupted.
 // Removed cameras are stopped. New/changed cameras are (re)started.
@@ -302,10 +289,12 @@ func (cm *CameraManager) Reload(newCameras []CameraConfig) {
 		newMap[cam.CameraID] = cam
 	}
 
-	// Collect cameras to stop (removed or changed)
+	// Collect cameras to stop (removed or changed). Snapshot the *os.Process
+	// while still holding the lock — reading state.cmd after Unlock would race
+	// with manageCameraStream writing state.cmd under the same lock. (#66)
 	type stoppedCamera struct {
-		id    string
-		state *cameraState
+		id   string
+		proc *os.Process
 	}
 	var toStop []stoppedCamera
 	for id, oldURL := range oldMap {
@@ -314,8 +303,12 @@ func (cm *CameraManager) Reload(newCameras []CameraConfig) {
 			log.Printf("[reload] Stopping camera %s (removed or changed)", id)
 			if state, ok := cm.statuses[id]; ok {
 				close(state.stopCh)
+				var proc *os.Process
+				if state.cmd != nil {
+					proc = state.cmd.Process
+				}
 				delete(cm.statuses, id)
-				toStop = append(toStop, stoppedCamera{id, state})
+				toStop = append(toStop, stoppedCamera{id, proc})
 			}
 		}
 	}
@@ -353,9 +346,9 @@ func (cm *CameraManager) Reload(newCameras []CameraConfig) {
 	// duplicate reloads. This mirrors Stop()'s one-shot grace. (#44)
 	var stopProcs []*os.Process
 	for _, s := range toStop {
-		if s.state.cmd != nil && s.state.cmd.Process != nil {
+		if s.proc != nil {
 			log.Printf("[%s] Sending SIGTERM to FFmpeg process", s.id)
-			stopProcs = append(stopProcs, s.state.cmd.Process)
+			stopProcs = append(stopProcs, s.proc)
 		}
 	}
 	terminateProcesses(stopProcs, 3*time.Second)
@@ -366,6 +359,23 @@ func (cm *CameraManager) Reload(newCameras []CameraConfig) {
 	}
 
 	log.Printf("[reload] Reconciled: %d cameras active", len(newCameras))
+}
+
+// terminateProcess sends SIGTERM to a single process and waits up to 5s for it
+// to exit (observed via processDone), then SIGKILLs. Used by the per-stream
+// watchdog so a goroutine always kills its own ffmpeg on stop. (#66)
+func terminateProcess(id string, proc *os.Process, processDone <-chan struct{}) {
+	if proc == nil {
+		return
+	}
+	proc.Signal(syscall.SIGTERM)
+	select {
+	case <-time.After(5 * time.Second):
+		log.Printf("[%s] FFmpeg did not exit after 5s SIGTERM, sending SIGKILL", id)
+		proc.Kill()
+	case <-processDone:
+		// Process exited gracefully after SIGTERM.
+	}
 }
 
 // terminateProcesses sends SIGTERM to every process, waits a single grace
