@@ -774,16 +774,6 @@ func (am *ArchiveManager) CreateArchive(incidentID, streamKey string, from, to t
 
 	archiveID := fmt.Sprintf("%s_%s_%s", incidentID, streamKey, from.UTC().Format("20060102_150405"))
 
-	// Check for duplicate
-	am.mu.RLock()
-	for _, a := range am.archives {
-		if a.ID == archiveID {
-			am.mu.RUnlock()
-			return &a, nil // Already exists
-		}
-	}
-	am.mu.RUnlock()
-
 	meta := ArchiveMetadata{
 		ID:         archiveID,
 		IncidentID: incidentID,
@@ -794,7 +784,17 @@ func (am *ArchiveManager) CreateArchive(incidentID, streamKey string, from, to t
 		Status:     "pending",
 	}
 
+	// Duplicate check and append must happen under a single write lock: two
+	// concurrent requests for the same incident/stream/time both passing an
+	// RLock check and then appending would insert the same archiveID twice. (#79)
 	am.mu.Lock()
+	for _, a := range am.archives {
+		if a.ID == archiveID {
+			existing := a
+			am.mu.Unlock()
+			return &existing, nil // Already exists
+		}
+	}
 	am.archives = append(am.archives, meta)
 	am.saveMetadata()
 	am.mu.Unlock()
@@ -1037,21 +1037,6 @@ func (am *ArchiveManager) ProtectIncidentSegments(incidentID string, streamKeys 
 		}
 		archiveID := fmt.Sprintf("%s_%s_%s", incidentID, streamKey, protectFrom.UTC().Format("20060102_150405"))
 
-		// Check for duplicate
-		am.mu.RLock()
-		exists := false
-		for _, a := range am.archives {
-			if a.ID == archiveID {
-				exists = true
-				created = append(created, a)
-				break
-			}
-		}
-		am.mu.RUnlock()
-		if exists {
-			continue
-		}
-
 		meta := ArchiveMetadata{
 			ID:           archiveID,
 			IncidentID:   incidentID,
@@ -1063,7 +1048,23 @@ func (am *ArchiveManager) ProtectIncidentSegments(incidentID string, streamKeys 
 			IncidentTime: incidentTime.UTC().Format(time.RFC3339),
 		}
 
+		// Duplicate check + append under one write lock: concurrent protect
+		// requests for the same incident must not insert the same archiveID
+		// twice (which would corrupt later index-based status/delete logic). (#79)
 		am.mu.Lock()
+		var existing *ArchiveMetadata
+		for i := range am.archives {
+			if am.archives[i].ID == archiveID {
+				dup := am.archives[i]
+				existing = &dup
+				break
+			}
+		}
+		if existing != nil {
+			am.mu.Unlock()
+			created = append(created, *existing)
+			continue
+		}
 		am.archives = append(am.archives, meta)
 		am.saveMetadata()
 		am.mu.Unlock()
