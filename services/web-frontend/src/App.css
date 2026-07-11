@@ -748,6 +748,16 @@ body {
   word-break: break-all;
 }
 
+.emergency-dialog-fallback {
+  font-size: 0.8rem;
+  color: #b71c1c;
+  background: #fdecea;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  text-align: center;
+}
+
 /* Desktop: wider layout */
 @media (min-width: 768px) {
   .content {
