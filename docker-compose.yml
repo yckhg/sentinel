@@ -2,6 +2,21 @@
 # Industrial safety real-time monitoring system
 
 services:
+  # Base image builder: produces sentinel-ffmpeg-base for the ffmpeg-dependent
+  # adapters (recording, cctv-adapter, youtube-adapter). One-shot helper — runs
+  # `true` and exits; adapters gate on its completion so the image exists before
+  # they build. Lets a clean host come up with a single `docker compose up -d`. (#45)
+  ffmpeg-base:
+    build:
+      context: .
+      dockerfile: docker/ffmpeg-base.Dockerfile
+    image: sentinel-ffmpeg-base
+    pull_policy: build
+    command: ["true"]
+    restart: "no"
+    networks:
+      - sentinel-net
+
   mosquitto:
     image: eclipse-mosquitto:2
     container_name: sentinel-mosquitto
@@ -63,7 +78,10 @@ services:
     volumes:
       - ./config/cameras.json:/config/cameras.json:ro
     depends_on:
-      - streaming
+      streaming:
+        condition: service_started
+      ffmpeg-base:
+        condition: service_completed_successfully
     networks:
       - sentinel-net
     # ports: internal only
@@ -157,6 +175,8 @@ services:
         condition: service_started
       web-backend:
         condition: service_healthy
+      ffmpeg-base:
+        condition: service_completed_successfully
     networks:
       - sentinel-net
     # ports: internal only
@@ -233,8 +253,12 @@ services:
       - ./config/youtube-sources.json:/config/youtube-sources.json:ro
       - ./media:/media:ro
     depends_on:
-      - streaming
-      - web-backend
+      streaming:
+        condition: service_started
+      web-backend:
+        condition: service_started
+      ffmpeg-base:
+        condition: service_completed_successfully
     networks:
       - sentinel-net
     # ports: internal only
