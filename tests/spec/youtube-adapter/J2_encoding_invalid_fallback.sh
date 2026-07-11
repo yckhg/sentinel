@@ -32,7 +32,9 @@ docker run --rm -v "$TMPD":/media --network none "$IMG" \
   ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc=size=320x240:rate=15 \
   -f lavfi -i sine=frequency=440 -t 3 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest /media/src.mp4 \
   || skip "테스트 소스 생성 실패 (ffmpeg lavfi 부재?)"
-printf '[{"id":"enc","streamKey":"spec-enc-inv","localFile":"/media/src.mp4"}]' > "$TMPD/cfg.json"
+# 유효 소스: loadConfig 의 youtubeUrl 검증(⚠#2)을 통과시키되 localFile 우선 오프라인 재생으로
+#   실 ffmpeg 을 네트워크 없이 기동. (localFile-only 면 기동 시 탈락 → ffmpeg 미실행 → false-NOK)
+printf '[{"id":"enc","youtubeUrl":"https://youtu.be/specencinv","streamKey":"spec-enc-inv","localFile":"/media/src.mp4"}]' > "$TMPD/cfg.json"
 
 docker run -d --rm --name "$SINK" --network "$NET" "$SINK_IMG" >/dev/null 2>&1 \
   && info "격리 RTMP 싱크 $SINK 기동" || info "싱크 기동 실패 — ffmpeg 재시도 창에서 관측 시도"
@@ -53,9 +55,10 @@ for i in $(seq 1 11); do
   [ "$RUNNING" = "true" ] || RUN_OK=0
   H=$(docker exec "$AC" wget -qO- http://localhost:8080/healthz 2>/dev/null)
   printf '%s' "$H" | grep -q '"status":"ok"' || HEALTH_OK=0
+  # 실 ffmpeg 프로세스 인자만 수집(busybox ps = 전체 cmdline). 로그 라인 grep 은
+  #   실행 여부와 무관한 위양성이라 제거 — 폴백은 실프로세스의 -g/-preset 으로만 판정.
   BLOB="$BLOB
-$(docker exec "$AC" ps 2>/dev/null | grep -i ffmpeg | grep -v grep)
-$(docker logs "$AC" 2>&1 | grep -- '-b:v' | tail -3)"
+$(docker exec "$AC" ps 2>/dev/null | grep -i ffmpeg | grep -v grep)"
   sleep 3
 done
 RCOUNT=$(docker inspect "$AC" --format '{{.RestartCount}}' 2>/dev/null)
@@ -65,11 +68,13 @@ RCOUNT=$(docker inspect "$AC" --format '{{.RestartCount}}' 2>/dev/null)
 
 # (b) 폴백 + 경고 로그
 chk() { if printf '%s' "$2" | grep -qE -- "$1"; then ok "$3"; else nok "$3 (미관측)"; fi; }
-printf '%s' "$BLOB" | grep -qiE 'ffmpeg|-b:v' || nok "(b) ffmpeg 프로세스/명령 미관측 — 스트림 미구동"
+printf '%s' "$BLOB" | grep -qi 'ffmpeg' || nok "(b) ffmpeg 실프로세스 미관측 — 스트림 미구동"
 chk ' -g 60( |$)'            "$BLOB" "(b) 무효 GOP → 기본 -g 60 폴백"
 chk ' -preset ultrafast( |$)' "$BLOB" "(b) 무효 preset → 기본 -preset ultrafast 폴백"
-WARN=$(docker logs "$AC" 2>&1 | grep -iE 'warn|invalid|폴백|fallback|기본값|default' | head -3)
-[ -n "$WARN" ] && ok "(b) 경고 로그 존재: $(printf '%s' "$WARN" | head -1)" || nok "(b) 폴백 경고 로그 부재"
+# 인코딩 폴백 경고만 정확 매칭 — 소스거부 경고("Skipping source ... invalid YouTube URL")와 구별.
+#   코드 문구: "invalid ENCODE_GOP ... falling back to default", "invalid ENCODE_PRESET ... falling back to default".
+WARN=$(docker logs "$AC" 2>&1 | grep -iE 'invalid ENCODE_(GOP|PRESET).*falling back to default' | grep -vi 'Skipping source' | head -3)
+[ -n "$WARN" ] && ok "(b) 인코딩 폴백 경고 로그 존재: $(printf '%s' "$WARN" | head -1)" || nok "(b) 인코딩 폴백 경고 로그 부재(소스거부 경고 오탐 배제)"
 
 # (c) 30초 이상 송출 유지 + E(libx264+aac)
 chk ' -c:v libx264( |$)' "$BLOB" "(c) E: -c:v libx264"

@@ -33,8 +33,12 @@ docker run --rm -v "$TMPD":/media --network none "$IMG" \
   -f lavfi -i sine=frequency=440 -t 3 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest /media/src.mp4 \
   || skip "테스트 소스 생성 실패 (ffmpeg lavfi 부재?)"
 
-printf '[{"id":"enc","streamKey":"spec-enc-set","localFile":"/media/src.mp4"}]' > "$TMPD/cfg-set.json"
-printf '[{"id":"enc","streamKey":"spec-enc-def","localFile":"/media/src.mp4"}]' > "$TMPD/cfg-def.json"
+# 유효 소스: config-load 검증(loadConfig)은 모든 소스의 youtubeUrl 을 validateYouTubeURL 로
+#   검사하므로(⚠#2), localFile-only 소스는 기동 시 탈락해 ffmpeg 이 아예 안 뜬다.
+#   유효 youtubeUrl + localFile 조합으로 검증을 통과시키되, 실행 경로는 localFile 우선
+#   (main.go: src.LocalFile != "" 이면 yt-dlp 미사용·오프라인 재생)이라 네트워크 없이 실 ffmpeg 기동.
+printf '[{"id":"enc","youtubeUrl":"https://youtu.be/specencset","streamKey":"spec-enc-set","localFile":"/media/src.mp4"}]' > "$TMPD/cfg-set.json"
+printf '[{"id":"enc","youtubeUrl":"https://youtu.be/specencdef","streamKey":"spec-enc-def","localFile":"/media/src.mp4"}]' > "$TMPD/cfg-def.json"
 
 # 2) 격리 RTMP 싱크 (harmless — 프로덕션 streaming 과 무관한 throwaway 인스턴스)
 docker run -d --rm --name "$SINK" --network "$NET" "$SINK_IMG" >/dev/null 2>&1 \
@@ -54,13 +58,14 @@ docker run -d --rm --name "$ADEF" --network "$NET" \
   -v "$TMPD/src.mp4":/media/src.mp4:ro -v "$TMPD/cfg-def.json":/config/youtube-sources.json:ro \
   "$IMG" >/dev/null || nok "기본값 컨테이너 기동 실패"
 
-# 4) 실행 중 ffmpeg 인자 수집 (ps 프로세스 목록 + ffmpeg-cmd 로그) — ~24초 폴링
+# 4) 실행 중 ffmpeg **실프로세스**의 인자 수집 — busybox ps 는 전체 cmdline 을 노출한다.
+#   (로그 라인 "Encoding params: ..." grep 은 실행 여부와 무관한 1회성 출력이라 위양성 —
+#    제거하고 오직 실 ffmpeg 프로세스 인자만으로 판정한다.)
 collect() { # <container>
   local c="$1" blob="" i
   for i in $(seq 1 12); do
     blob="$blob
-$(docker exec "$c" ps 2>/dev/null | grep -i ffmpeg | grep -v grep)
-$(docker logs "$c" 2>&1 | grep -- '-b:v' | tail -3)"
+$(docker exec "$c" ps 2>/dev/null | grep -i ffmpeg | grep -v grep)"
     sleep 2
   done
   printf '%s' "$blob"
@@ -72,9 +77,9 @@ chk() { # <label> <ere> <blob>
   if printf '%s' "$3" | grep -qE -- "$2"; then ok "$1"; else nok "$1 (미관측)"; fi
 }
 
-# ffmpeg 프로세스 자체가 관측되지 않으면 판정 근거 부재(false-green 방지 위해 명시적 NOK)
-printf '%s' "$BSET" | grep -qiE 'ffmpeg|-b:v' || nok "[주입] ffmpeg 프로세스/명령 미관측 — 스트림 미구동"
-printf '%s' "$BDEF" | grep -qiE 'ffmpeg|-b:v' || nok "[기본] ffmpeg 프로세스/명령 미관측 — 스트림 미구동"
+# ffmpeg 실프로세스 자체가 관측되지 않으면 판정 근거 부재(false-green 방지 위해 명시적 NOK)
+printf '%s' "$BSET" | grep -qi 'ffmpeg' || nok "[주입] ffmpeg 실프로세스 미관측 — 스트림 미구동"
+printf '%s' "$BDEF" | grep -qi 'ffmpeg' || nok "[기본] ffmpeg 실프로세스 미관측 — 스트림 미구동"
 
 echo "  -- ENCODE_* 주입 반영 --"
 chk "[주입] -b:v 500k"       ' -b:v 500k( |$)'        "$BSET"
