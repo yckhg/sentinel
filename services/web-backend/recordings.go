@@ -4,7 +4,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -33,18 +32,6 @@ func handleRecordingsProxy() http.HandlerFunc {
 			for _, v := range values {
 				w.Header().Add(key, v)
 			}
-		}
-
-		// Rewrite segment URLs in playlist to go through web-backend proxy
-		if strings.Contains(resp.Header.Get("Content-Type"), "mpegurl") {
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read recording response"})
-				return
-			}
-			w.WriteHeader(resp.StatusCode)
-			w.Write(body)
-			return
 		}
 
 		w.WriteHeader(resp.StatusCode)
