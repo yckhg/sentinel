@@ -225,12 +225,12 @@ incidents 응답 필드:
   "sourceType": "rtsp | youtube",
   "sourceUrl": "rtsp://... or https://youtube.com/...",
   "enabled": true,
-  "hlsUrl": "http://streaming/.../index.m3u8",
+  "hlsUrl": "/live/cam-a1b2c3d4/index.m3u8",
   "status": "connected | disconnected"
 }
 ```
 
-`hlsUrl`과 `status`는 streaming 서비스에서 10초 캐시로 조회해 병합.
+`hlsUrl`과 `status`는 streaming 서비스에서 10초 캐시로 조회해 병합. **계약: `hlsUrl` 등 모든 스트리밍 경로는 항상 `/live/{streamKey}/index.m3u8` 형태의 상대 경로로 제공하며, Docker 내부 절대 URL(`http://streaming/...`)은 어떤 경로로도 노출되지 않는다** (상대 URL 정책 SSOT: `docs/spec/interface-streaming.md`; 계약 명세는 `docs/spec/interface-web-api.md`). 비활성 스트림이면 `hlsUrl: ""`.
 
 ### POST/PUT 요청 바디
 

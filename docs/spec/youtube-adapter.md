@@ -25,6 +25,12 @@ YouTube 영상 URL 또는 로컬 비디오 파일을 소스로 삼아, streaming
   - `YOUTUBE_CONFIG_PATH` (기본 `/config/youtube-sources.json`)
   - `STREAMING_RTMP_URL` (기본 `rtmp://streaming:1935/live`)
   - `WEB_BACKEND_URL` (기본 `http://web-backend:8080`)
+  - **인코딩 파라미터** (모두 기본값이 현재 하드코딩 값과 동일 — 미설정 시 기존 동작 불변). 소스 해상도·회선에 따라 재빌드 없이 조정 가능해야 한다:
+    - `ENCODE_VIDEO_BITRATE` (기본 `300k`) → FFmpeg `-b:v`
+    - `ENCODE_GOP` (기본 `60`) → FFmpeg `-g` (키프레임 간격, 프레임 수)
+    - `ENCODE_AUDIO_BITRATE` (기본 `48k`) → FFmpeg `-b:a`
+    - `ENCODE_PRESET` (기본 `ultrafast`) → FFmpeg `-preset`
+    - 계약: 이 값들은 코드에 고정되지 않고 위 환경변수로 주입되며, 미설정 시 기본값이 적용된다. 값 변경은 재빌드 없이 컨테이너 재기동만으로 반영된다. 코덱 정규화(H.264 + AAC) 자체는 이 값들과 무관하게 항상 유지된다(§핵심 로직 "재인코딩 필수").
 - **설정 파일**: JSON 배열. 각 원소 = `{id, youtubeUrl, streamKey, localFile?}`.
   - `localFile`이 있으면 로컬 파일이 소스가 된다. 없으면 `youtubeUrl`을 yt-dlp로 해석한다.
 - **YouTube URL 제약**: https 필수, 최대 200자, `youtube.com/watch?v=…`, `youtube.com/live/…`, `youtu.be/…` 형태만 허용. 이를 위반하는 소스는 기동 시 건너뛰고(경고 로그) 나머지 소스는 정상 기동한다.
@@ -62,6 +68,7 @@ YouTube 영상 URL 또는 로컬 비디오 파일을 소스로 삼아, streaming
 - G. **reload 재조정**: (1) web-backend가 유효 YouTube 카메라 N개를 반환하는 상태에서 `curl -s -X POST http://youtube-adapter:8080/api/cameras/reload` → 200 `{"status":"ok","count":N}`, 이후 status 목록이 그 N개와 일치하면 OK. (2) `sourceType`이 youtube가 아니거나 `enabled=false`이거나 `streamKey`가 빈 카메라는 count와 목록에서 제외되면 OK. (3) 동일 streamKey·동일 URL 카메라는 reload 전후 `startedAt`이 변하지 않으면(재시작 안 됨) OK. (4) web-backend가 다운된 상태에서 reload → 500 응답이고 기존 스트림의 status·`startedAt`이 그대로면 OK.
 - H. **설정 결함 내성**: config 파일 없이(또는 깨진 JSON으로) 기동 → 컨테이너가 크래시하지 않고 `/healthz` 200, `/api/streams/status`가 빈 배열이면 OK.
 - I. **정상 종료**: 스트림 1개 송출 중 컨테이너에 SIGTERM → 컨테이너 종료 후 호스트/컨테이너에 잔존 ffmpeg 프로세스가 없으면 OK.
+- J. **인코딩 파라미터 주입**: `ENCODE_VIDEO_BITRATE=500k`, `ENCODE_GOP=30`, `ENCODE_AUDIO_BITRATE=64k`, `ENCODE_PRESET=veryfast`로 기동해 스트림 1개 송출 → 실행 중인 FFmpeg 프로세스의 인자에 `-b:v 500k`, `-g 30`, `-b:a 64k`, `-preset veryfast`가 그대로 반영되어 있으면 OK. 네 변수를 모두 미설정으로 기동하면 각각 `-b:v 300k`, `-g 60`, `-b:a 48k`, `-preset ultrafast`가 사용되면(기본값 불변) OK. 두 경우 모두 §단언 E(H.264+AAC 정규화)는 계속 성립해야 한다.
 
 ## ⚠️ 리뷰 필요 (의도 불확실)
 
