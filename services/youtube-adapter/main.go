@@ -267,9 +267,32 @@ func (m *StreamManager) manageStream(src YouTubeSource, state *streamState) {
 		}
 
 		// FFmpeg exited cleanly — re-resolve URL and restart
-		// (local files with -stream_loop -1 won't reach here; only YouTube URLs)
-		log.Printf("[%s] Stream ended (URL source), re-resolving and restarting...", src.ID)
+		// (local files with -stream_loop -1 won't reach here; only YouTube URLs).
+		// Apply a minimum delay before re-resolving: a source that EOFs immediately
+		// would otherwise spin yt-dlp in a tight loop and trip its IP rate-limit
+		// (youtube-adapter.md:83). cctv already sleeps on clean exit; this matches. (#67)
 		backoff = time.Second // reset backoff on clean exit
+		log.Printf("[%s] Stream ended (URL source), re-resolving in %v...", src.ID, cleanExitDelay)
+		if waitOrStop(state.stopCh, cleanExitDelay) {
+			state.Lock()
+			state.status = "stopped"
+			state.Unlock()
+			return
+		}
+	}
+}
+
+// cleanExitDelay is the minimum wait before re-resolving a URL source that
+// exited cleanly, throttling yt-dlp re-invocation for immediate-EOF sources.
+var cleanExitDelay = time.Second
+
+// waitOrStop blocks for d, returning true early if stopCh is closed first.
+func waitOrStop(stopCh <-chan struct{}, d time.Duration) (stopped bool) {
+	select {
+	case <-stopCh:
+		return true
+	case <-time.After(d):
+		return false
 	}
 }
 
