@@ -99,7 +99,7 @@ func generateTempLinkJWT(linkID string, expiresAt time.Time) (string, error) {
 func parseTempLinkJWT(tokenString string) (*TempLinkClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &TempLinkClaims{}, func(token *jwt.Token) (any, error) {
 		return jwtSecret, nil
-	})
+	}, jwt.WithValidMethods([]string{"HS256"}))
 	if err != nil {
 		return nil, err
 	}

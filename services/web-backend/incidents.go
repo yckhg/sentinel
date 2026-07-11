@@ -92,6 +92,11 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// Trim the device id so a device with incidental surrounding whitespace maps
+		// to the same devices row as /api/devices/seen (which trims). Otherwise the
+		// same physical device could split into two rows depending on padding.
+		req.DeviceID = strings.TrimSpace(req.DeviceID)
+
 		ctx, cancel := dbCtx(r.Context())
 		defer cancel()
 
@@ -117,7 +122,7 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 			isTest = 1
 		}
 		var deviceIDArg any
-		if strings.TrimSpace(req.DeviceID) != "" {
+		if req.DeviceID != "" {
 			deviceIDArg = req.DeviceID
 		} else {
 			deviceIDArg = nil
@@ -160,7 +165,7 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 		markWALDirty()
 
 		// Ensure device is registered/restored if deviceId provided (best-effort)
-		if req.SiteID != "" && strings.TrimSpace(req.DeviceID) != "" {
+		if req.SiteID != "" && req.DeviceID != "" {
 			if _, upErr := db.ExecContext(ctx, `
 				INSERT INTO devices (site_id, device_id, last_seen)
 				VALUES (?, ?, datetime('now'))
