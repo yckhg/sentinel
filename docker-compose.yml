@@ -1,6 +1,14 @@
 # Sentinel — Docker Compose
 # Industrial safety real-time monitoring system
 
+# Common log rotation: cap json-file logs so long-running services can't fill
+# the shared mini-PC disk (co-located with recordings). (#47)
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   # Base image builder: produces sentinel-ffmpeg-base for the ffmpeg-dependent
   # adapters (recording, cctv-adapter, youtube-adapter). One-shot helper — runs
@@ -14,6 +22,7 @@ services:
     pull_policy: build
     command: ["true"]
     restart: "no"
+    logging: *default-logging
     networks:
       - sentinel-net
 
@@ -21,6 +30,7 @@ services:
     image: eclipse-mosquitto:2
     container_name: sentinel-mosquitto
     restart: unless-stopped
+    logging: *default-logging
     command: mosquitto -c /mosquitto-no-auth.conf
     healthcheck:
       test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-W", "3"]
@@ -37,6 +47,7 @@ services:
     build: ./services/hw-gateway
     container_name: sentinel-hw-gateway
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -61,6 +72,7 @@ services:
     build: ./services/cctv-adapter
     container_name: sentinel-cctv-adapter
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -90,6 +102,7 @@ services:
     build: ./services/streaming
     container_name: sentinel-streaming
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -113,6 +126,7 @@ services:
     build: ./services/notifier
     container_name: sentinel-notifier
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -150,6 +164,7 @@ services:
     build: ./services/recording
     container_name: sentinel-recording
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -185,6 +200,7 @@ services:
     build: ./services/web-backend
     container_name: sentinel-web-backend
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -212,6 +228,7 @@ services:
     build: ./services/web-frontend
     container_name: sentinel-web-frontend
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -235,6 +252,7 @@ services:
     build: ./services/youtube-adapter
     container_name: sentinel-youtube-adapter
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
