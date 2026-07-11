@@ -6,10 +6,10 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -531,8 +531,8 @@ func handleApproveUser(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		var parsedID int64
-		if _, err := fmt.Sscanf(userId, "%d", &parsedID); err != nil {
+		parsedID, err := strconv.ParseInt(userId, 10, 64)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid userId"})
 			return
 		}
@@ -574,8 +574,8 @@ func handleRejectUser(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		var parsedID int64
-		if _, err := fmt.Sscanf(userId, "%d", &parsedID); err != nil {
+		parsedID, err := strconv.ParseInt(userId, 10, 64)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid userId"})
 			return
 		}
