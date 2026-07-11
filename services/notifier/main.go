@@ -1045,12 +1045,13 @@ func handleNotify(cfg Config, dedup *dedupCache) http.HandlerFunc {
 				successCount, contactCount, channels["kakaotalk"], channels["sms"], contactCount-successCount)
 		}()
 
-		// Return immediately (accepted, processing async)
+		// Return immediately (accepted, processing async). No contactCount here: the
+		// response is sent before contacts are fetched, so any value would be
+		// structurally 0 and misleading — the field is dropped rather than lie.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":       "accepted",
-			"contactCount": 0, // async, count not yet known
+			"status": "accepted",
 		})
 	}
 }
