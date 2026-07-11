@@ -240,17 +240,20 @@ func handleWebSocket(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// sendUnhealthySnapshot replays every currently-unhealthy monitored target to a
-// single admin client as a health-sourced system_alarm (assertion O4). Non-admin
+// sendUnhealthySnapshot replays currently-unhealthy monitored targets to a single
+// admin client as health-sourced system_alarm frames (assertion O4). Non-admin
 // (user/temp) clients receive nothing.
+//
+// The replay is ordered newest-transition-first, deduped (one frame per entity),
+// and bounded (maxReplaySnapshotFrames). This keeps a just-made-unhealthy target
+// inside the bound even when the live unhealthy set is huge/polluted (thousands of
+// stale sensors), and keeps the whole burst within the WS send buffer so nothing
+// is silently dropped — which also bounds the admin-connect flood.
 func sendUnhealthySnapshot(c *wsClient) {
 	if c.role != "admin" || healthMon == nil {
 		return
 	}
-	for _, e := range healthMon.snapshot() {
-		if e.Status != StatusUnhealthy {
-			continue
-		}
+	for _, e := range healthMon.unhealthySnapshotForReplay(maxReplaySnapshotFrames) {
 		data, err := json.Marshal(WSMessage{
 			Type:      "system_alarm",
 			Payload:   healthAlarmPayload(e.Kind, e.ID, e.Status),

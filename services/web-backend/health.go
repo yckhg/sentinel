@@ -368,6 +368,44 @@ func (m *HealthMonitor) snapshot() []HealthEntry {
 	return out
 }
 
+// maxReplaySnapshotFrames bounds the admin-reconnect unhealthy replay (O4). It is
+// kept well under the WS send buffer (64) so, together with the `connected` frame,
+// the whole burst fits without any non-blocking drop — even when the live
+// unhealthy set is huge/polluted. Combined with newest-transition-first ordering,
+// a just-made-unhealthy target is always inside the bound.
+const maxReplaySnapshotFrames = 50
+
+// unhealthySnapshotForReplay returns currently-unhealthy entities for the admin
+// reconnect replay (assertion O4), ordered by most-recent transition first and
+// capped at max. The entries map is keyed by "kind|id" so the result is inherently
+// deduped (one frame per entity). Newest-first ordering guarantees a target that
+// just went unhealthy is included even when the unhealthy set far exceeds the cap,
+// which also bounds the connect-time burst (fixes the admin-connect flood).
+func (m *HealthMonitor) unhealthySnapshotForReplay(max int) []HealthEntry {
+	m.mu.RLock()
+	out := make([]HealthEntry, 0, len(m.entries))
+	for _, e := range m.entries {
+		if e.Status != StatusUnhealthy {
+			continue
+		}
+		out = append(out, *e)
+	}
+	m.mu.RUnlock()
+
+	// Most-recent transition first (largest Since first). Tie-break on ID for a
+	// stable, deterministic order.
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Since.Equal(out[j].Since) {
+			return out[i].Since.After(out[j].Since)
+		}
+		return out[i].ID < out[j].ID
+	})
+	if max > 0 && len(out) > max {
+		out = out[:max]
+	}
+	return out
+}
+
 // -----------------------------------------------------------------------------
 // HTTP handlers
 // -----------------------------------------------------------------------------
