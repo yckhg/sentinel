@@ -346,15 +346,19 @@ func (cm *CameraManager) Reload(newCameras []CameraConfig) {
 
 	cm.mu.Unlock()
 
-	// Kill FFmpeg processes outside the lock (these are blocking operations)
+	// Terminate removed FFmpeg processes in parallel outside the lock: SIGTERM
+	// every process, wait a single grace period, then SIGKILL any survivors.
+	// Previously this slept 3s per process serially, so removing N cameras
+	// blocked the reload handler for N×3s and could race reload retries into
+	// duplicate reloads. This mirrors Stop()'s one-shot grace. (#44)
+	var stopProcs []*os.Process
 	for _, s := range toStop {
 		if s.state.cmd != nil && s.state.cmd.Process != nil {
 			log.Printf("[%s] Sending SIGTERM to FFmpeg process", s.id)
-			s.state.cmd.Process.Signal(syscall.SIGTERM)
-			time.Sleep(3 * time.Second)
-			s.state.cmd.Process.Kill()
+			stopProcs = append(stopProcs, s.state.cmd.Process)
 		}
 	}
+	terminateProcesses(stopProcs, 3*time.Second)
 
 	// Launch goroutines for new cameras
 	for _, cam := range toStart {
@@ -362,6 +366,23 @@ func (cm *CameraManager) Reload(newCameras []CameraConfig) {
 	}
 
 	log.Printf("[reload] Reconciled: %d cameras active", len(newCameras))
+}
+
+// terminateProcesses sends SIGTERM to every process, waits a single grace
+// period, then SIGKILLs any that remain. The grace wait runs once for the whole
+// batch (not per process), so teardown time does not scale with the process
+// count. Kill on an already-exited process is harmless.
+func terminateProcesses(procs []*os.Process, grace time.Duration) {
+	if len(procs) == 0 {
+		return
+	}
+	for _, p := range procs {
+		p.Signal(syscall.SIGTERM)
+	}
+	time.Sleep(grace)
+	for _, p := range procs {
+		p.Kill()
+	}
 }
 
 // Stop terminates all FFmpeg processes gracefully (SIGTERM → 5s wait → SIGKILL).
