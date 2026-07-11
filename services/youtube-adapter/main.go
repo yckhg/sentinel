@@ -80,6 +80,14 @@ type streamState struct {
 	startedAt time.Time
 	loopCount int
 	stopCh    chan struct{}
+	stopOnce  sync.Once
+}
+
+// stop closes stopCh at most once. StopAll and Reload can both target the same
+// stream (e.g. a reload arriving during SIGTERM shutdown); without this guard the
+// second close panics. (#70)
+func (s *streamState) stop() {
+	s.stopOnce.Do(func() { close(s.stopCh) })
 }
 
 // StreamManager manages all YouTube stream processes
@@ -111,11 +119,11 @@ func (m *StreamManager) StartAll() {
 // os.Exit. The wait is bounded so a stream stuck resolving (yt-dlp) cannot hang
 // shutdown indefinitely.
 func (m *StreamManager) StopAll() {
-	m.mu.RLock()
+	m.mu.Lock()
 	for _, state := range m.streams {
-		close(state.stopCh)
+		state.stop()
 	}
-	m.mu.RUnlock()
+	m.mu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
@@ -151,7 +159,7 @@ func (m *StreamManager) Reload(newSources []YouTubeSource) {
 		if !exists || newSrc.YouTubeURL != old.YouTubeURL {
 			if state, ok := m.streams[id]; ok {
 				log.Printf("[%s] Stopping stream (removed or changed)", id)
-				close(state.stopCh)
+				state.stop()
 				delete(m.streams, id)
 			}
 		}
