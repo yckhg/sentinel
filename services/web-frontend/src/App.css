@@ -1,3 +1,46 @@
+:root {
+  /* Status colors — single source of truth so the same meaning always maps to
+     the same (accessible) color instead of ad-hoc inline HEX (#105). */
+  --status-ok: #2e7d32;
+  --status-danger: #c62828;
+  --status-warn: #e65100;
+  --status-muted: #6b6b6b;
+  --status-info: #1565c0;
+  /* Lowest-contrast secondary text still >= 4.5:1 on white (WCAG AA). */
+  --text-muted: #767676;
+  /* Minimum interactive/touch target size. */
+  --touch-min: 44px;
+}
+
+/* Status badge helpers — pair with .mgmt-card-badge for shape/padding. */
+.status-badge--ok {
+  background: var(--status-ok);
+  color: #fff;
+}
+.status-badge--danger {
+  background: var(--status-danger);
+  color: #fff;
+}
+.status-badge--warn {
+  background: var(--status-warn);
+  color: #fff;
+}
+.status-badge--muted {
+  background: var(--status-muted);
+  color: #fff;
+}
+.status-badge--info {
+  background: var(--status-info);
+  color: #fff;
+}
+
+.status-text--danger {
+  color: var(--status-danger);
+}
+.status-text--ok {
+  color: var(--status-ok);
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -69,10 +112,11 @@ body {
   align-items: center;
   justify-content: center;
   padding: 8px 0;
+  min-height: var(--touch-min);
   border: none;
   background: none;
   cursor: pointer;
-  color: #999;
+  color: var(--text-muted);
   font-size: 0.7rem;
   transition: color 0.15s;
   -webkit-tap-highlight-color: transparent;
@@ -433,6 +477,7 @@ body {
 .mgmt-form-field input {
   width: 100%;
   padding: 8px 10px;
+  min-height: var(--touch-min);
   border: 1px solid #ddd;
   border-radius: 6px;
   font-size: 0.9rem;
@@ -1263,7 +1308,7 @@ body {
 .login-subtitle {
   text-align: center;
   font-size: 0.85rem;
-  color: #999;
+  color: var(--text-muted);
   margin-bottom: 24px;
 }
 
@@ -1276,11 +1321,12 @@ body {
 .login-tab {
   flex: 1;
   padding: 10px 0;
+  min-height: var(--touch-min);
   border: none;
   background: none;
   font-size: 0.9rem;
   font-weight: 600;
-  color: #999;
+  color: var(--text-muted);
   cursor: pointer;
   transition: color 0.15s;
   -webkit-tap-highlight-color: transparent;

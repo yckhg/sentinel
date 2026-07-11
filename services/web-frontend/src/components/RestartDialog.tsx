@@ -59,11 +59,10 @@ export default function RestartDialog({
       {result ? (
         <>
           <p
-            className="mgmt-modal-text"
-              style={{ color: result.success ? "#2e7d32" : "#d32f2f" }}
-            >
-              {result.message}
-            </p>
+            className={`mgmt-modal-text ${result.success ? "status-text--ok" : "status-text--danger"}`}
+          >
+            {result.message}
+          </p>
             <div className="mgmt-form-actions" style={{ justifyContent: "center" }}>
               <button className="mgmt-btn mgmt-btn-secondary" onClick={onClose}>
                 닫기

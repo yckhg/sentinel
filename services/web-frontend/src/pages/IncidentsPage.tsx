@@ -134,7 +134,7 @@ function ResolveModal({ incident, onClose, onResolved }: ResolveModalProps) {
             style={{ width: "100%", resize: "vertical" }}
           />
         </div>
-        {error && <p style={{ color: "#d32f2f", fontSize: "0.8rem", marginBottom: "8px" }}>{error}</p>}
+        {error && <p className="status-text--danger" style={{ fontSize: "0.8rem", marginBottom: "8px" }}>{error}</p>}
         <div className="mgmt-form-actions" style={{ justifyContent: "center" }}>
           <button className="mgmt-btn mgmt-btn-secondary" onClick={onClose} disabled={sending}>
             취소

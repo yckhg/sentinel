@@ -284,31 +284,19 @@ export default function DevicesSection() {
                         {d.alias || d.deviceId}
                         {" "}
                         {deleted ? (
-                          <span
-                            className="mgmt-card-badge"
-                            style={{ background: "#888", color: "#fff" }}
-                          >
+                          <span className="mgmt-card-badge status-badge--muted">
                             삭제됨
                           </span>
                         ) : d.alertState === "active" ? (
-                          <span
-                            className="mgmt-card-badge"
-                            style={{ background: "#e65100", color: "#fff" }}
-                          >
+                          <span className="mgmt-card-badge status-badge--warn">
                             경보 중
                           </span>
                         ) : alive ? (
-                          <span
-                            className="mgmt-card-badge"
-                            style={{ background: "#2e7d32", color: "#fff" }}
-                          >
+                          <span className="mgmt-card-badge status-badge--ok">
                             온라인
                           </span>
                         ) : (
-                          <span
-                            className="mgmt-card-badge"
-                            style={{ background: "#c62828", color: "#fff" }}
-                          >
+                          <span className="mgmt-card-badge status-badge--danger">
                             오프라인
                           </span>
                         )}

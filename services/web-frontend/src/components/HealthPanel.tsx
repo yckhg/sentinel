@@ -127,11 +127,7 @@ export default function HealthPanel() {
         <h2>시스템 상태</h2>
         <div style={{ marginLeft: "auto", display: "flex", gap: "0.5rem", alignItems: "center" }}>
           <span
-            className="mgmt-card-badge"
-            style={{
-              background: unhealthyCount > 0 ? "#c62828" : "#2e7d32",
-              color: "#fff",
-            }}
+            className={`mgmt-card-badge ${unhealthyCount > 0 ? "status-badge--danger" : "status-badge--ok"}`}
           >
             이상 {unhealthyCount} / 정상 {healthyCount}
           </span>
@@ -161,11 +157,7 @@ export default function HealthPanel() {
                     {e.name}
                     {"  "}
                     <span
-                      className="mgmt-card-badge"
-                      style={{
-                        background: healthy ? "#2e7d32" : "#c62828",
-                        color: "#fff",
-                      }}
+                      className={`mgmt-card-badge ${healthy ? "status-badge--ok" : "status-badge--danger"}`}
                     >
                       {healthy ? "정상" : "이상"}
                     </span>
@@ -208,11 +200,7 @@ export default function HealthPanel() {
                         </span>
                         {ev.entityId}{" "}
                         <span
-                          className="mgmt-card-badge"
-                          style={{
-                            background: ev.status === "healthy" ? "#2e7d32" : "#c62828",
-                            color: "#fff",
-                          }}
+                          className={`mgmt-card-badge ${ev.status === "healthy" ? "status-badge--ok" : "status-badge--danger"}`}
                         >
                           {ev.status === "healthy" ? "복구" : "이상"}
                         </span>
