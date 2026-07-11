@@ -88,9 +88,18 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
   // Incident markers
   const [incidents, setIncidents] = useState<IncidentMarker[]>([]);
 
-  // Timeline window: last 1 hour
-  const windowEnd = useRef(new Date());
-  const windowStart = useRef(new Date(windowEnd.current.getTime() - 60 * 60 * 1000));
+  // Timeline window: last 1 hour. Kept in state (not a mount-frozen ref) so it
+  // can be advanced periodically / on demand — otherwise the "last hour" window
+  // and its data go stale while the panel stays open (#101).
+  const WINDOW_MS = 60 * 60 * 1000;
+  const [windowEnd, setWindowEnd] = useState(() => new Date());
+  const [windowStart, setWindowStart] = useState(() => new Date(Date.now() - WINDOW_MS));
+
+  const refreshWindow = useCallback(() => {
+    const end = new Date();
+    setWindowEnd(end);
+    setWindowStart(new Date(end.getTime() - WINDOW_MS));
+  }, [WINDOW_MS]);
 
   const timelineRef = useRef<HTMLDivElement>(null);
 
@@ -154,8 +163,8 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
 
   const fetchIncidents = useCallback(async () => {
     try {
-      const from = windowStart.current.toISOString();
-      const to = windowEnd.current.toISOString();
+      const from = windowStart.toISOString();
+      const to = windowEnd.toISOString();
       const res = await fetchWithTimeout(`/api/incidents?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&limit=100`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
@@ -167,25 +176,34 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
     } catch {
       // silent — incidents are optional decoration
     }
-  }, [token]);
+  }, [token, windowStart, windowEnd]);
 
+  // Fetch (and re-fetch whenever the window advances — fetchIncidents depends on
+  // windowStart/windowEnd, so advancing the window re-runs this effect).
   useEffect(() => {
     fetchTimeRanges();
     fetchArchives();
     fetchIncidents();
   }, [fetchTimeRanges, fetchArchives, fetchIncidents]);
 
+  // Advance the window periodically so an open timeline keeps tracking the live
+  // edge and picks up new recordings/incidents (#101).
+  useEffect(() => {
+    const id = setInterval(refreshWindow, WINDOW_MS / 60); // every minute
+    return () => clearInterval(id);
+  }, [refreshWindow, WINDOW_MS]);
+
   // Convert fraction to absolute time
   const fractionToTime = (frac: number): Date => {
-    const start = windowStart.current.getTime();
-    const end = windowEnd.current.getTime();
+    const start = windowStart.getTime();
+    const end = windowEnd.getTime();
     return new Date(start + frac * (end - start));
   };
 
   // Convert absolute time to fraction
   const timeToFraction = (time: Date): number => {
-    const start = windowStart.current.getTime();
-    const end = windowEnd.current.getTime();
+    const start = windowStart.getTime();
+    const end = windowEnd.getTime();
     return Math.max(0, Math.min(1, (time.getTime() - start) / (end - start)));
   };
 
@@ -270,7 +288,7 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
     // Play from clicked time to end of available window (5 min block or end of recording)
     const playEnd = new Date(Math.min(
       clickTime.getTime() + 5 * 60 * 1000, // 5 minutes from click point
-      windowEnd.current.getTime()
+      windowEnd.getTime()
     ));
 
     setPlaybackPosition(frac);
@@ -407,7 +425,7 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
     <div className="rec-timeline-container" onClick={(e) => e.stopPropagation()}>
       {/* Header with title and live button */}
       <div className="rec-timeline-labels">
-        <span>{formatTime(windowStart.current)}</span>
+        <span>{formatTime(windowStart)}</span>
         <span className="rec-timeline-title">
           {isPlaying ? (
             <>
@@ -422,7 +440,18 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
             "녹화 타임라인"
           )}
         </span>
-        <span>{formatTime(windowEnd.current)}</span>
+        <span className="rec-timeline-window-end">
+          {formatTime(windowEnd)}
+          <button
+            type="button"
+            className="rec-timeline-refresh-btn"
+            onClick={refreshWindow}
+            aria-label="타임라인 새로고침"
+            title="타임라인 새로고침"
+          >
+            &#x21BB;
+          </button>
+        </span>
       </div>
 
       {/* Timeline bar */}

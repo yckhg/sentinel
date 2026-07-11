@@ -1319,6 +1319,30 @@ body {
   font-weight: 600;
 }
 
+.rec-timeline-window-end {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.rec-timeline-refresh-btn {
+  border: none;
+  background: none;
+  color: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 4px;
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: 4px;
+}
+
+.rec-timeline-refresh-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
 .rec-timeline-bar {
   position: relative;
   height: 32px;
