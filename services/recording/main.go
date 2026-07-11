@@ -708,6 +708,40 @@ type ArchiveManager struct {
 	recordingsDir string
 	recManager    *RecordingManager
 	metadataPath  string
+
+	// TTL caches for the expensive directory-size walks behind /api/storage. (#81)
+	recSizeCache *sizeCache
+	arcSizeCache *sizeCache
+}
+
+// storageCacheTTL bounds how stale /api/storage size figures may be.
+const storageCacheTTL = 15 * time.Second
+
+// sizeCache memoizes a directory-size computation for a TTL so a polling UI does
+// not trigger a full filepath.Walk on every /api/storage request. (#81)
+type sizeCache struct {
+	mu  sync.Mutex
+	ttl time.Duration
+	val int64
+	at  time.Time
+	now func() time.Time
+}
+
+func newSizeCache(ttl time.Duration) *sizeCache {
+	return &sizeCache{ttl: ttl, now: time.Now}
+}
+
+// get returns the cached value if it is younger than the TTL, otherwise it
+// recomputes via compute and refreshes the cache.
+func (c *sizeCache) get(compute func() int64) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.at.IsZero() && c.now().Sub(c.at) < c.ttl {
+		return c.val
+	}
+	c.val = compute()
+	c.at = c.now()
+	return c.val
 }
 
 func NewArchiveManager(archivesDir, recordingsDir string, recManager *RecordingManager) *ArchiveManager {
@@ -716,6 +750,8 @@ func NewArchiveManager(archivesDir, recordingsDir string, recManager *RecordingM
 		recordingsDir: recordingsDir,
 		recManager:    recManager,
 		metadataPath:  filepath.Join(archivesDir, "metadata.json"),
+		recSizeCache:  newSizeCache(storageCacheTTL),
+		arcSizeCache:  newSizeCache(storageCacheTTL),
 	}
 	am.loadMetadata()
 	return am
@@ -1271,8 +1307,19 @@ func (am *ArchiveManager) isSegmentInOtherArchive(segPath, excludeArchiveID stri
 
 // GetStorageStats returns disk usage info for recordings and archives, plus filesystem stats.
 func (am *ArchiveManager) GetStorageStats() map[string]any {
-	recordingsSize := dirSize(am.recordingsDir)
-	archivesSize := dirSize(am.archivesDir)
+	// Serve directory sizes from a short-TTL cache so a polling UI does not walk
+	// the entire recordings/archives tree on every request. (#81)
+	var recordingsSize, archivesSize int64
+	if am.recSizeCache != nil {
+		recordingsSize = am.recSizeCache.get(func() int64 { return dirSize(am.recordingsDir) })
+	} else {
+		recordingsSize = dirSize(am.recordingsDir)
+	}
+	if am.arcSizeCache != nil {
+		archivesSize = am.arcSizeCache.get(func() int64 { return dirSize(am.archivesDir) })
+	} else {
+		archivesSize = dirSize(am.archivesDir)
+	}
 
 	stats := map[string]any{
 		"recordingsBytes": recordingsSize,
@@ -1297,13 +1344,21 @@ func (am *ArchiveManager) GetStorageStats() map[string]any {
 
 func dirSize(path string) int64 {
 	var size int64
-	filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+	err := filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			// Log rather than silently swallow per-entry walk errors (#81).
+			log.Printf("[storage] walk error at %s: %v", p, err)
+			return nil
+		}
+		if info.IsDir() {
 			return nil
 		}
 		size += info.Size()
 		return nil
 	})
+	if err != nil {
+		log.Printf("[storage] walk failed for %s: %v", path, err)
+	}
 	return size
 }
 
