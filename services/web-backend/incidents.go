@@ -236,12 +236,17 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 		// Build query with optional date filters using parameterized builder
 		conditions := []string{"1=1"}
 		args := []any{}
+		// Normalize both sides through datetime(): occurred_at is stored as
+		// "YYYY-MM-DD HH:MM:SS" but clients may send ISO-8601 (e.g.
+		// "2026-04-13T00:00:00Z"). A raw lexicographic comparison would treat
+		// 'T' (0x54) > ' ' (0x20) and silently mis-filter at the boundary.
+		// datetime() coerces both formats to a common canonical form.
 		if from != "" {
-			conditions = append(conditions, "occurred_at >= ?")
+			conditions = append(conditions, "datetime(occurred_at) >= datetime(?)")
 			args = append(args, from)
 		}
 		if to != "" {
-			conditions = append(conditions, "occurred_at <= ?")
+			conditions = append(conditions, "datetime(occurred_at) <= datetime(?)")
 			args = append(args, to)
 		}
 		if statusFilter != "" {
