@@ -177,6 +177,7 @@ func (m *HealthMonitor) pollServices() {
 				e.Since = now
 				e.Detail = ""
 				m.recordEvent(KindService, t.Name, StatusHealthy, "recovered")
+				broadcastHealthTransition(KindService, t.Name, StatusHealthy)
 			} else {
 				e.Detail = ""
 			}
@@ -191,6 +192,7 @@ func (m *HealthMonitor) pollServices() {
 				e.Since = now
 				e.Detail = detail
 				m.recordEvent(KindService, t.Name, StatusUnhealthy, detail)
+				broadcastHealthTransition(KindService, t.Name, StatusUnhealthy)
 			} else if e.Status == StatusUnhealthy {
 				e.Detail = detail
 			}
@@ -295,6 +297,7 @@ func (m *HealthMonitor) evaluateSensors() {
 			// only log unhealthy as an event so timelines stay meaningful.
 			if newStatus == StatusUnhealthy {
 				m.recordEvent(KindSensor, entityID, StatusUnhealthy, detail)
+				broadcastHealthTransition(KindSensor, entityID, StatusUnhealthy)
 			}
 		} else {
 			e.Name = displayName
@@ -304,6 +307,7 @@ func (m *HealthMonitor) evaluateSensors() {
 				e.Status = newStatus
 				e.Since = now
 				m.recordEvent(KindSensor, entityID, newStatus, detail)
+				broadcastHealthTransition(KindSensor, entityID, newStatus)
 			}
 		}
 		m.mu.Unlock()
@@ -320,6 +324,14 @@ func (m *HealthMonitor) evaluateSensors() {
 		}
 	}
 	m.mu.Unlock()
+}
+
+// broadcastHealthTransition surfaces a healthy↔unhealthy transition to connected
+// admin WS clients as a health-sourced system_alarm (assertions O2/O3, contract
+// 12/14). Best-effort and non-blocking: BroadcastSystemAlarm filters to admins
+// and drops for slow clients, so it never stalls the monitor loop.
+func broadcastHealthTransition(entityKind, entityID, status string) {
+	BroadcastSystemAlarm(healthAlarmPayload(entityKind, entityID, status))
 }
 
 // recordEvent inserts a transition row into health_events.
