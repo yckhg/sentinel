@@ -136,11 +136,33 @@ iso_count() {
   docker logs "$1" 2>&1 | grep -c -- "$2" 2>/dev/null || true
 }
 
-# iso_preflight — ensure the isolated image exists; auto-build once if missing.
+# iso_preflight — ensure the isolated image exists AND is not stale.
+#
+# STALE-IMAGE GUARD: a pre-existing sentinel-hw-gateway-iso:test built from an
+# OLDER services/hw-gateway would false-green new regressions (old binary under
+# test). So we rebuild not only when the image is missing, but also when any
+# source file under services/hw-gateway is newer than the image's build time.
+# git checkout stamps changed files with a fresh mtime, so switching to a newer
+# integration HEAD is detected. When source is unchanged the image build time is
+# already >= the newest source mtime, so no rebuild fires (cheap: no docker build
+# invoked at all). Only the throwaway iso image is (re)built — the live
+# `sentinel-hw-gateway` image is a different tag and is never touched.
 iso_preflight() {
+  local src need_build=0
+  src="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../services/hw-gateway" 2>/dev/null && pwd)"
   if ! docker image inspect "$GW_ISO_IMG" >/dev/null 2>&1; then
-    local src
-    src="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../services/hw-gateway" 2>/dev/null && pwd)"
+    need_build=1
+  elif [ -n "$src" ]; then
+    local created img_epoch src_epoch
+    created="$(docker image inspect -f '{{.Created}}' "$GW_ISO_IMG" 2>/dev/null)"
+    img_epoch="$(date -d "$created" +%s 2>/dev/null || echo 0)"
+    src_epoch="$(find "$src" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
+    if [ -n "$src_epoch" ] && [ "${src_epoch:-0}" -gt "${img_epoch:-0}" ]; then
+      echo "[iso] source ($src_epoch) newer than image ($img_epoch) — rebuilding $GW_ISO_IMG" >&2
+      need_build=1
+    fi
+  fi
+  if [ "$need_build" = 1 ]; then
     if [ -n "$src" ] && [ -f "$src/Dockerfile" ]; then
       echo "[iso] building $GW_ISO_IMG from $src ..." >&2
       docker build -t "$GW_ISO_IMG" "$src" >/dev/null 2>&1 || return 1
