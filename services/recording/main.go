@@ -605,7 +605,7 @@ type ArchiveMetadata struct {
 	CreatedAt    string `json:"createdAt"`
 	SizeBytes    int64  `json:"sizeBytes"`
 	FilePath     string `json:"filePath"`
-	Status       string `json:"status"` // protecting, pending, processing, completed, failed
+	Status       string `json:"status"` // enum SSOT (spec): protecting, pending, finalizing, processing, completed, failed
 	Error        string `json:"error,omitempty"`
 	IncidentTime string `json:"incidentTime,omitempty"` // original incident timestamp for auto-finalize
 }
@@ -982,6 +982,81 @@ func (am *ArchiveManager) protectSegmentsInRange(streamKey string, from, to time
 	}
 }
 
+// recoveryTargets returns the archives that need startup recovery: non-terminal
+// (status ∈ {pending, processing, finalizing}) and NOT "protecting". Terminal
+// states (completed/failed) and "protecting" (handled by RefreshProtection) are
+// excluded. See docs/spec/recording.md §핵심 로직 7 + 단언 P/P-2.
+func recoveryTargets(archives []ArchiveMetadata) []ArchiveMetadata {
+	var out []ArchiveMetadata
+	for _, a := range archives {
+		switch a.Status {
+		case "pending", "processing", "finalizing":
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// RecoverArchives performs startup recovery for in-flight (non-terminal, non-
+// protecting) archives after metadata load. It enforces the ordering contract of
+// §핵심 로직 7: ① metadata already loaded → ② re-establish deletion protection for
+// every recovery target's [from, to) segment range (SYNCHRONOUSLY, before the
+// rolling cleanup loop's first run) → then resume each merge. This guarantees the
+// originals a resuming merge needs are not deleted by cleanup as a restart side
+// effect.
+//
+// The protection pass logs "Recovery protection re-established"; the cleanup loop
+// logs "Rolling cleanup started" on its first run. Because this runs synchronously
+// in main() before the cleanup goroutine is started, the former always precedes
+// the latter (a simple ordering invariant — no locks/barriers required).
+//
+// Resume direction: with protection re-established, each merge is re-run. A valid
+// range (segments present in [from, to)) converges to completed; a range whose
+// required .ts files are all gone (or that errors) is forced to terminal failed
+// with a non-empty lastError. No archive stays stuck in a non-terminal state
+// across restart.
+func (am *ArchiveManager) RecoverArchives() {
+	targets := am.reestablishRecoveryProtection()
+
+	// Resume merges. processArchive converges each to a terminal state:
+	// completed (segments present + merge ok) or failed (segments gone / error).
+	for _, a := range targets {
+		fromTime, _ := time.Parse(time.RFC3339, a.From)
+		toTime, _ := time.Parse(time.RFC3339, a.To)
+		if fromTime.IsZero() || toTime.IsZero() {
+			// Unrecoverable metadata: force terminal failed with reason.
+			am.updateStatus(a.ID, "failed", "recovery: archive has invalid from/to range")
+			log.Printf("[archive] Recovery: %s has invalid range, marked failed", a.ID)
+			continue
+		}
+		log.Printf("[archive] Recovery: resuming merge for %s [%s, %s)", a.ID, a.From, a.To)
+		go am.processArchive(a.ID, a.StreamKey, fromTime, toTime)
+	}
+}
+
+// reestablishRecoveryProtection performs step ② of the startup ordering contract:
+// synchronously register the [from, to) segment range of every recovery target
+// into the protected set, then log the "Recovery protection re-established" marker.
+// It returns the recovery targets (for the caller to resume). This is separated
+// from the async merge resume so the ordering/protection invariant is observable
+// without launching background work.
+func (am *ArchiveManager) reestablishRecoveryProtection() []ArchiveMetadata {
+	am.mu.RLock()
+	targets := recoveryTargets(am.archives)
+	am.mu.RUnlock()
+
+	for _, a := range targets {
+		fromTime, _ := time.Parse(time.RFC3339, a.From)
+		toTime, _ := time.Parse(time.RFC3339, a.To)
+		if fromTime.IsZero() || toTime.IsZero() {
+			continue
+		}
+		am.protectSegmentsInRange(a.StreamKey, fromTime, toTime)
+	}
+	log.Printf("[archive] Recovery protection re-established for %d recovery-target archive(s)", len(targets))
+	return targets
+}
+
 // RefreshProtection re-protects segments for all "protecting" archives.
 // Called periodically so new segments written after the initial protect call are also protected.
 func (am *ArchiveManager) RefreshProtection() {
@@ -1212,6 +1287,13 @@ func main() {
 	manager := NewRecordingManager(rtmpBaseURL, recordingsDir, ffmpegTimeout)
 	archiveManager := NewArchiveManager(archivesDir, recordingsDir, manager)
 
+	// Startup recovery for in-flight archives. MUST run before the rolling cleanup
+	// loop starts so recovery-target segments are protected before the first
+	// cleanup (§핵심 로직 7 ordering contract; logs "Recovery protection
+	// re-established" strictly before "Rolling cleanup started"). Non-terminal,
+	// non-protecting archives resume merging and converge to completed/failed.
+	archiveManager.RecoverArchives()
+
 	// Fetch initial camera list from web-backend (retry on failure)
 	reloadClient := &http.Client{Timeout: 10 * time.Second}
 	var cameras []CameraInfo
@@ -1239,7 +1321,14 @@ func main() {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
+		first := true
 		for range ticker.C {
+			if first {
+				// Ordering marker (§핵심 로직 7): recovery protection is always
+				// re-established before this first cleanup run.
+				log.Println("Rolling cleanup started")
+				first = false
+			}
 			manager.CleanupOldSegments(rollingWindow)
 		}
 	}()
