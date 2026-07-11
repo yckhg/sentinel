@@ -7,7 +7,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -63,8 +62,9 @@ func isTrustedProxy(ip net.IP) bool {
 }
 
 type ipRecord struct {
-	count     atomic.Int64
-	windowEnd atomic.Int64 // unix timestamp
+	mu        sync.Mutex
+	count     int64
+	windowEnd int64 // unix timestamp
 }
 
 type rateLimiter struct {
@@ -81,23 +81,31 @@ func newRateLimiter(maxRequests int64, window time.Duration) *rateLimiter {
 }
 
 // allow checks if the IP is within the rate limit. Returns true if allowed.
+//
+// The per-record mutex makes the window-boundary check-and-reset one atomic
+// unit. With the previous split atomics, two goroutines arriving as a window
+// expired could each independently observe now>=windowEnd and reset count to 1,
+// letting a burst past the limit and under-counting. Holding rec.mu across the
+// read, the reset, and the increment closes that TOCTOU window.
 func (rl *rateLimiter) allow(ip string) bool {
 	now := time.Now().Unix()
 
 	val, _ := rl.entries.LoadOrStore(ip, &ipRecord{})
 	rec := val.(*ipRecord)
 
-	windowEnd := rec.windowEnd.Load()
-	if now >= windowEnd {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+
+	if now >= rec.windowEnd {
 		// Window expired — reset
-		rec.count.Store(1)
-		rec.windowEnd.Store(now + int64(rl.window.Seconds()))
+		rec.count = 1
+		rec.windowEnd = now + int64(rl.window.Seconds())
 		return true
 	}
 
 	// Within current window — increment
-	newCount := rec.count.Add(1)
-	return newCount <= rl.maxRequests
+	rec.count++
+	return rec.count <= rl.maxRequests
 }
 
 // cleanup removes stale entries older than the window
@@ -105,7 +113,10 @@ func (rl *rateLimiter) cleanup() {
 	now := time.Now().Unix()
 	rl.entries.Range(func(key, value any) bool {
 		rec := value.(*ipRecord)
-		if now >= rec.windowEnd.Load() {
+		rec.mu.Lock()
+		expired := now >= rec.windowEnd
+		rec.mu.Unlock()
+		if expired {
 			rl.entries.Delete(key)
 		}
 		return true
