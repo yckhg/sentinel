@@ -3,7 +3,7 @@
 #   ENCODE_VIDEO_BITRATE→-b:v, ENCODE_GOP→-g, ENCODE_AUDIO_BITRATE→-b:a, ENCODE_PRESET→-preset.
 #   미설정 시 기본값 300k/60/48k/ultrafast. 두 경우 모두 §단언 E(-c:v libx264 + -c:a aac) 성립.
 #
-# MUTATING: throwaway 컨테이너 2개 기동(주입/기본값) + 스트림 송출. ALLOW_MUTATING=1 필요.
+# MUTATING: throwaway 컨테이너 2개 기동(주입/기본값) + 스트림 송출. SPEC_TDD_ALLOW_MUTATING=1 필요.
 #   프로덕션 오염 방지: 프로덕션 streaming 이 아닌 격리 RTMP 싱크(별도 streaming 인스턴스)로만 송출.
 set -u
 
@@ -16,8 +16,10 @@ ok()   { echo "  [ok]  $*"; }
 nok()  { echo "  [NOK] $*"; FAIL=1; }
 info() { echo "  [..]  $*"; }
 
-if [ "${ALLOW_MUTATING:-0}" != "1" ]; then
-  skip "(mutating — 설계자 승인 대기) throwaway 인코딩 컨테이너 기동 필요 — ALLOW_MUTATING=1 로만 실행"
+# 게이트 변수 일관화: SPEC_TDD_ALLOW_MUTATING(스트리밍군 정본) 또는 ALLOW_MUTATING 중
+#   하나라도 1 이면 youtube 게이트군(C/F/G/J/J-2)이 함께 켜진다(조용한 부분초록 방지).
+if [ "${SPEC_TDD_ALLOW_MUTATING:-0}" != "1" ] && [ "${ALLOW_MUTATING:-0}" != "1" ]; then
+  skip "(mutating — 설계자 승인 대기) throwaway 인코딩 컨테이너 기동 필요 — SPEC_TDD_ALLOW_MUTATING=1 로만 실행"
 fi
 docker image inspect "$IMG" >/dev/null 2>&1 || skip "image $IMG 부재"
 

@@ -4,7 +4,7 @@
 #   (b) 실행 중 ffmpeg 인자에 기본값 -g 60 / -preset ultrafast 로 폴백 + 경고 로그,
 #   (c) 30초 이상 송출 유지 + §단언 E(-c:v libx264 + -c:a aac) 성립.
 #
-# MUTATING: throwaway 컨테이너 기동 + 스트림 송출. ALLOW_MUTATING=1 필요.
+# MUTATING: throwaway 컨테이너 기동 + 스트림 송출. SPEC_TDD_ALLOW_MUTATING=1 필요.
 #   프로덕션 오염 방지: 격리 RTMP 싱크(별도 streaming 인스턴스)로만 송출.
 set -u
 
@@ -17,8 +17,10 @@ ok()   { echo "  [ok]  $*"; }
 nok()  { echo "  [NOK] $*"; FAIL=1; }
 info() { echo "  [..]  $*"; }
 
-if [ "${ALLOW_MUTATING:-0}" != "1" ]; then
-  skip "(mutating — 설계자 승인 대기) throwaway 무효-env 컨테이너 기동 필요 — ALLOW_MUTATING=1 로만 실행"
+# 게이트 변수 일관화: SPEC_TDD_ALLOW_MUTATING(스트리밍군 정본) 또는 ALLOW_MUTATING 중
+#   하나라도 1 이면 youtube 게이트군(C/F/G/J/J-2)이 함께 켜진다(조용한 부분초록 방지).
+if [ "${SPEC_TDD_ALLOW_MUTATING:-0}" != "1" ] && [ "${ALLOW_MUTATING:-0}" != "1" ]; then
+  skip "(mutating — 설계자 승인 대기) throwaway 무효-env 컨테이너 기동 필요 — SPEC_TDD_ALLOW_MUTATING=1 로만 실행"
 fi
 docker image inspect "$IMG" >/dev/null 2>&1 || skip "image $IMG 부재"
 
