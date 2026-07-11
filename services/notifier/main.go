@@ -645,6 +645,47 @@ func sendSystemAlarm(cfg Config, contact Contact, alert AlertPayload, kakaoErr, 
 	logf("[alarm] System alarm sent for contact %s (%s) — both KakaoTalk and SMS failed", contact.Name, contact.Phone)
 }
 
+// sendTargetUnavailableAlarm emits a `target_unavailable` system alarm when a valid
+// crisis event was accepted but no delivery target could be established — i.e. the
+// contact list is empty or the contact fetch failed (§출력 11 / assertions M, J).
+// This promotes the "nobody knows about this crisis" state into an observable alarm
+// instead of letting the event vanish in a single log line. The attempt result
+// (2xx / non-2xx / call failure) is always logged; at least one attempt is made.
+func sendTargetUnavailableAlarm(cfg Config, alert AlertPayload, reason string) {
+	alarm := AlarmPayload{
+		Type:    "target_unavailable",
+		Message: fmt.Sprintf("No delivery target for crisis alert (site=%s device=%s): %s", alert.SiteID, alert.DeviceID, reason),
+		Details: map[string]interface{}{
+			"siteId":    alert.SiteID,
+			"deviceId":  alert.DeviceID,
+			"type":      alert.Type,
+			"reason":    scrub(reason),
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+
+	payload, err := json.Marshal(alarm)
+	if err != nil {
+		logf("[alarm] target_unavailable: failed to marshal payload: %v", err)
+		return
+	}
+
+	resp, err := httpClient.Post(cfg.WebBackendURL+"/internal/alarms", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		logf("[alarm] target_unavailable system alarm failed (site=%s device=%s): %v", alert.SiteID, alert.DeviceID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		logf("[alarm] target_unavailable system alarm failed: status %d, body: %s", resp.StatusCode, string(respBody))
+		return
+	}
+
+	logf("[alarm] target_unavailable system alarm sent (site=%s device=%s): %s", alert.SiteID, alert.DeviceID, reason)
+}
+
 // --- Recording Archive (Two-Phase) ---
 
 // requestArchiveProtect sends a protect request to the recording service (Phase 1).
@@ -730,12 +771,19 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 	// 1. Fetch contacts from web-backend
 	contacts, err := fetchContacts(cfg)
 	if err != nil {
-		logf("[notify] Failed to fetch contacts: %v", err)
+		// §출력 11 / M: a fetch failure must not vanish in one log line — promote it
+		// to a target_unavailable system alarm (≥1 attempt, result logged). No
+		// external channel send happens on this path.
+		logf("[notify] Failed to fetch contacts: %v — emitting target_unavailable system alarm", err)
+		sendTargetUnavailableAlarm(cfg, alert, "contact fetch failed: "+scrub(err.Error()))
 		return 0, nil
 	}
 
 	if len(contacts) == 0 {
-		logf("[notify] No contacts configured, skipping notification")
+		// §출력 11 / J,M: zero contacts → 200 accepted, ZERO external-channel sends,
+		// but at least one target_unavailable system-alarm attempt is logged.
+		logf("[notify] No contacts configured — emitting target_unavailable system alarm (no external channel send)")
+		sendTargetUnavailableAlarm(cfg, alert, "no emergency contacts configured")
 		return 0, nil
 	}
 
