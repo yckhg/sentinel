@@ -149,8 +149,28 @@ func (m *HealthMonitor) pollServices() {
 	downThresholdSec := m.readIntSetting("health.service_down_threshold_sec", 90)
 	now := time.Now().UTC()
 
-	for _, t := range serviceTargets {
-		ok, detail := m.probeService(t.HealthzURL)
+	// Probe all services concurrently: with N services each taking up to ~4-5s,
+	// a sequential sweep would stretch a single cycle to N×timeout precisely when
+	// multiple services are down — delaying the subsequent sensor evaluation. Fan
+	// out the probes so one cycle is bounded by the single slowest probe.
+	type probeResult struct {
+		ok     bool
+		detail string
+	}
+	results := make([]probeResult, len(serviceTargets))
+	var wg sync.WaitGroup
+	for i, t := range serviceTargets {
+		wg.Add(1)
+		go func(i int, url string) {
+			defer wg.Done()
+			ok, detail := m.probeService(url)
+			results[i] = probeResult{ok: ok, detail: detail}
+		}(i, t.HealthzURL)
+	}
+	wg.Wait()
+
+	for i, t := range serviceTargets {
+		ok, detail := results[i].ok, results[i].detail
 		key := KindService + "|" + t.Name
 
 		m.mu.Lock()
