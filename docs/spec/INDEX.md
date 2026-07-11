@@ -24,7 +24,7 @@
 | [youtube-adapter.md](youtube-adapter.md) | `tests/spec/youtube-adapter/` | **OK J·J-2·C·B·F부분 · NOK 0 · SKIP G(reload mock 부재)·F완전** (2026-07-11 재검증, #72 인코딩 env, encode_test.go PASS) |
 | [recording.md](recording.md) | `tests/spec/recording/` | **OK P·P-2·O·F·G·M 외 · NOK 0 · SKIP D(⚠#1 삭제시 보호미해제=pre-existing 설계판단)** (2026-07-11 재검증, #75 기동복구, recovery_test.go 4/4 PASS) |
 | [web-backend.md](web-backend.md) | `tests/spec/web-backend/` | OK 3 · NOK 0 · SKIP 16 (admin fixture 부재; 보안 CRITICAL 2) |
-| [web-frontend.md](web-frontend.md) | `tests/spec/web-frontend/` | OK 2 · NOK 0 · SKIP 12 (needs-browser; Playwright 별도 세션) |
+| [web-frontend.md](web-frontend.md) | `tests/spec/web-frontend/` | **OK O/P/Q/R + 실로그인 회귀 = Playwright 19 pass · NOK 0 · SKIP ⚠#2 세션중401·⚠#3 라이브 incident_resolved(설계자)** (2026-07-11 #92/#104/R 재검증; 로그인 되튕김 CRITICAL 회귀 발견·flushSync fix) |
 
 ## 공용 헬퍼
 
