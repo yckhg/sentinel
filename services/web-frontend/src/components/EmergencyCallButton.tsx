@@ -4,6 +4,13 @@ import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 interface EmergencyCallButtonProps {
   className?: string;
   compact?: boolean;
+  /**
+   * Site address fallback carried by the crisis payload (crisis_alert /
+   * backfill isomorphic `site.address`). When provided, it is used as the
+   * dialog address fallback (spec §출력 10) and the /api/sites fetch is
+   * skipped — so live and backfill banners fill the address identically.
+   */
+  siteAddress?: string;
 }
 
 interface SiteInfo {
@@ -16,18 +23,23 @@ interface SiteInfo {
 export default function EmergencyCallButton({
   className,
   compact,
+  siteAddress: siteAddressProp,
 }: EmergencyCallButtonProps) {
   const [showDialog, setShowDialog] = useState(false);
-  const [siteAddress, setSiteAddress] = useState<string | null>(null);
+  const [siteAddress, setSiteAddress] = useState<string | null>(siteAddressProp ?? null);
   const [geoAddress, setGeoAddress] = useState<string | null>(null);
   const [geoLoading, setGeoLoading] = useState(false);
 
   useEffect(() => {
     if (!showDialog) return;
 
-    // Fetch site address from settings
+    // Address supplied by the crisis payload (isomorphic site.address) — use it
+    // directly and skip the /api/sites lookup so the banner keeps a stable
+    // address fallback identical on live and backfill paths.
     const token = localStorage.getItem("token");
-    if (token) {
+    if (siteAddressProp) {
+      setSiteAddress(siteAddressProp);
+    } else if (token) {
       fetchWithTimeout("/api/sites", {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -57,7 +69,7 @@ export default function EmergencyCallButton({
         { timeout: 5000 }
       );
     }
-  }, [showDialog]);
+  }, [showDialog, siteAddressProp]);
 
   const handleCall = () => {
     setShowDialog(false);
