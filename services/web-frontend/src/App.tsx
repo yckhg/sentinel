@@ -6,6 +6,7 @@ import SettingsPage from "./pages/SettingsPage";
 import ViewerPage from "./pages/ViewerPage";
 import LoginPage from "./pages/LoginPage";
 import CrisisAlertBanner from "./components/CrisisAlertBanner";
+import ErrorBoundary from "./components/ErrorBoundary";
 import { isTokenExpired } from "./utils/jwt";
 import "./App.css";
 
@@ -83,8 +84,18 @@ function App() {
 
   return (
     <div className="app">
-      <CrisisAlertBanner />
-      <main className="content">{renderPage()}</main>
+      {/* The crisis banner is safety-critical — isolate it so a page render
+          error can't take it (or the nav) down with it (#99). */}
+      <ErrorBoundary label="banner">
+        <CrisisAlertBanner />
+      </ErrorBoundary>
+      <main className="content">
+        {/* key={activeTab} remounts the boundary on tab change, clearing a
+            previous page's error automatically. */}
+        <ErrorBoundary key={activeTab} label={`page:${activeTab}`}>
+          {renderPage()}
+        </ErrorBoundary>
+      </main>
       <nav className="tab-bar">
         {tabs.map((tab) => (
           <button
