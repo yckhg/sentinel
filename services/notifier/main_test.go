@@ -610,6 +610,65 @@ func TestArchiveProtectLogIsSynchronous(t *testing.T) {
 	}
 }
 
+// waitForLog polls a syncBuffer until it contains want or the deadline elapses.
+func waitForLog(t *testing.T, buf *syncBuffer, want string, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), want) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("log %q not seen within %s; got:\n%s", want, d, buf.String())
+}
+
+// TestArchiveProtectDeliveryTimeoutLogged locks the MEDIUM robustness fix: when the
+// recording endpoint hangs, the background protect delivery must return within its
+// bounded timeout and emit a FAILED sad-path log — so a recording outage cannot
+// silently leave only the happy-path "accepted" record (false sense of safety) nor
+// leak an unbounded goroutine. The synchronous "accepted" record still comes first
+// (P must not regress).
+func TestArchiveProtectDeliveryTimeoutLogged(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/internal/cameras":
+			_, _ = io.WriteString(w, `[{"streamKey":"cam1","enabled":true}]`)
+		case strings.Contains(r.URL.Path, "/api/archives/protect"):
+			<-release // hang the recording endpoint past the protect timeout
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	var buf syncBuffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(orig)
+
+	// Short bound so the test is fast; the real default is 5s.
+	cfg := Config{WebBackendURL: srv.URL, RecordingURL: srv.URL, ArchiveProtectTimeout: 100 * time.Millisecond}
+	initSecretScrubber(cfg)
+
+	requestArchiveProtect(cfg, AlertPayload{
+		SiteID: "site1", DeviceID: "d", Type: "gas", Timestamp: "2026-07-11T00:00:00Z",
+	})
+
+	// Accept record is synchronous and precedes any delivery outcome (P intact).
+	if !strings.Contains(buf.String(), "[archive] Protect request accepted for incident incident_site1_") {
+		t.Fatalf("accepted record must be present synchronously; got:\n%s", buf.String())
+	}
+	// The bounded delivery must fail (timeout) and log FAILED well inside the deadline.
+	waitForLog(t, &buf, "[archive] Protect request FAILED (incident incident_site1_", 2*time.Second)
+	if strings.Contains(buf.String(), "Protect request delivered") {
+		t.Fatalf("delivery must not report success against a hung endpoint; got:\n%s", buf.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // #59 silent-fail: target_unavailable emission (§출력 11 / assertions M, J)
 // ---------------------------------------------------------------------------

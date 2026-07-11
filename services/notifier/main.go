@@ -115,6 +115,9 @@ type Config struct {
 	// retry on fast transient errors (§출력 13).
 	ChannelRetryMax     int
 	ChannelRetryBackoff time.Duration
+	// ArchiveProtectTimeout bounds the background recording-protect HTTP request so a
+	// hung/slow recording endpoint cannot accumulate goroutines. <=0 → 5s default.
+	ArchiveProtectTimeout time.Duration
 }
 
 func loadConfig() Config {
@@ -141,6 +144,9 @@ func loadConfig() Config {
 		// retry stays inside the §출력 7 per-channel 12s budget. 0 → immediate fallback.
 		ChannelRetryMax:     getEnvInt("CHANNEL_RETRY_MAX", 1),
 		ChannelRetryBackoff: time.Duration(getEnvInt("CHANNEL_RETRY_BACKOFF_MS", 200)) * time.Millisecond,
+		// Bound the background protect delivery to a few seconds (default 5s) so a
+		// recording outage cannot hang/leak goroutines. Alert path stays unaffected.
+		ArchiveProtectTimeout: time.Duration(getEnvInt("ARCHIVE_PROTECT_TIMEOUT_MS", 5000)) * time.Millisecond,
 	}
 }
 
@@ -806,11 +812,29 @@ func requestArchiveProtect(cfg Config, alert AlertPayload) {
 	// Deliver the actual protect request to recording CONCURRENTLY (best-effort):
 	// this is fire-and-forget and is never joined by the caller, so it cannot gate or
 	// delay dispatch, and recording being down only produces a log line — the alert
-	// outcome is unaffected.
+	// outcome is unaffected. The request carries a BOUNDED timeout (context) so a
+	// hung/blackholed recording endpoint always returns and cannot accumulate
+	// goroutines; either the delivered happy-path OR the FAILED sad-path is logged so
+	// the two-phase log is never left silent after the synchronous "accepted".
+	timeout := cfg.ArchiveProtectTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
 	go func() {
-		protectResp, err := httpClient.Post(cfg.RecordingURL+"/api/archives/protect", "application/json", bytes.NewReader(payload))
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, "POST", cfg.RecordingURL+"/api/archives/protect", bytes.NewReader(payload))
 		if err != nil {
-			logf("[archive] Protect request delivery failed for incident %s: %v", incidentID, err)
+			logf("[archive] Protect request FAILED (incident %s): %v", incidentID, err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		protectResp, err := httpClient.Do(req)
+		if err != nil {
+			// Transport error OR context timeout (bounded above) — always logged.
+			logf("[archive] Protect request FAILED (incident %s): %v", incidentID, err)
 			return
 		}
 		defer protectResp.Body.Close()
@@ -819,7 +843,7 @@ func requestArchiveProtect(cfg Config, alert AlertPayload) {
 			logf("[archive] Protect request delivered for incident %s (%d cameras)", incidentID, len(streamKeys))
 		} else {
 			body, _ := io.ReadAll(protectResp.Body)
-			logf("[archive] Protect request rejected for incident %s: status %d, body: %s", incidentID, protectResp.StatusCode, string(body))
+			logf("[archive] Protect request FAILED (incident %s): status %d, body: %s", incidentID, protectResp.StatusCode, string(body))
 		}
 	}()
 }
