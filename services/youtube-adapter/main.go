@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -214,7 +215,17 @@ func (m *StreamManager) manageStream(src YouTubeSource, state *streamState) {
 
 		var streamURL string
 		if src.LocalFile != "" {
-			// Use local file — no yt-dlp needed
+			// Use local file — no yt-dlp needed. The doc contract restricts local
+			// file paths to /media/ (youtube-adapter.md:85); reject anything that
+			// escapes it rather than passing it straight to ffmpeg -i. (#71)
+			if err := validateLocalFile(src.LocalFile); err != nil {
+				log.Printf("[%s] Rejecting local file %q: %v", src.ID, src.LocalFile, err)
+				state.Lock()
+				state.status = "error"
+				state.lastError = fmt.Sprintf("localFile: %v", err)
+				state.Unlock()
+				return // config-level error; a fixed config arrives via Reload
+			}
 			log.Printf("[%s] Using local file: %s", src.ID, src.LocalFile)
 			streamURL = src.LocalFile
 		} else {
@@ -302,6 +313,19 @@ func waitOrStop(stopCh <-chan struct{}, d time.Duration) (stopped bool) {
 	case <-time.After(d):
 		return false
 	}
+}
+
+// mediaDir is the only directory local source files may live under (doc contract).
+const mediaDir = "/media"
+
+// validateLocalFile enforces that a configured local file resolves to a path
+// under mediaDir, rejecting traversal (e.g. /media/../etc/passwd). (#71)
+func validateLocalFile(path string) error {
+	cleaned := filepath.Clean(path)
+	if !strings.HasPrefix(cleaned, mediaDir+"/") {
+		return fmt.Errorf("local file must be under %s/ (resolved to %q)", mediaDir, cleaned)
+	}
+	return nil
 }
 
 // resolveCommand builds the yt-dlp resolve command. It is a var so tests can
