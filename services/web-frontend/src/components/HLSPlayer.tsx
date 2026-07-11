@@ -135,6 +135,7 @@ export default function HLSPlayer({
       <video
         ref={videoRef}
         className="camera-video"
+        aria-label={`${cameraName} 영상`}
         muted
         playsInline
         autoPlay
@@ -153,6 +154,7 @@ export default function HLSPlayer({
             e.stopPropagation();
             onRestart();
           }}
+          aria-label={`${cameraName} 장비 재시작`}
           title="장비 재시작"
         >
           &#x21BB;

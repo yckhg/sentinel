@@ -38,8 +38,8 @@ describe("HLSPlayer a11y (#91, #100)", () => {
         onToggleExpand={vi.fn()}
       />,
     );
-    // aria-label added on the <video> in #100 — assertion re-run there.
     const video = document.querySelector("video");
     expect(video).not.toBeNull();
+    expect(video).toHaveAttribute("aria-label", "후문 영상");
   });
 });

@@ -96,14 +96,15 @@ function App() {
           {renderPage()}
         </ErrorBoundary>
       </main>
-      <nav className="tab-bar">
+      <nav className="tab-bar" aria-label="주요 메뉴">
         {tabs.map((tab) => (
           <button
             key={tab.key}
             className={`tab-item${activeTab === tab.key ? " active" : ""}`}
+            aria-current={activeTab === tab.key ? "page" : undefined}
             onClick={() => setActiveTab(tab.key)}
           >
-            <span className="tab-icon">{tab.icon}</span>
+            <span className="tab-icon" aria-hidden="true">{tab.icon}</span>
             <span className="tab-label">{tab.label}</span>
           </button>
         ))}
