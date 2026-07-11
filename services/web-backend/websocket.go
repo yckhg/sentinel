@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -9,6 +12,11 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+// healthMon is the process-wide health monitor, set in main. Used by the WS
+// handler to replay the current unhealthy snapshot to a newly connected admin
+// (assertion O4).
+var healthMon *HealthMonitor
 
 // WebSocket message envelope
 type WSMessage struct {
@@ -23,6 +31,14 @@ type wsClient struct {
 	role   string // "admin", "user", or "temp"
 	userID int64  // 0 for temp link users
 	send   chan []byte
+
+	// Fields for periodic token re-validation (issue #82). The original token is
+	// re-parsed on each ping tick to detect expiry; temp tokens are additionally
+	// checked against the revocation blacklist, and regular tokens against the
+	// owner's password-change boundary.
+	token  string  // original ?token= value
+	isTemp bool    // true for temp-link tokens
+	db     *sql.DB // for the password-change boundary lookup
 }
 
 // Hub manages all active WebSocket connections
@@ -127,7 +143,7 @@ const (
 	pingPeriod = 30 * time.Second
 )
 
-func handleWebSocket() http.HandlerFunc {
+func handleWebSocket(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tokenStr := r.URL.Query().Get("token")
 		if tokenStr == "" {
@@ -137,6 +153,7 @@ func handleWebSocket() http.HandlerFunc {
 
 		var role string
 		var userID int64
+		var isTemp bool
 
 		// Identify temp-link tokens FIRST (non-empty linkId claim). Both token
 		// kinds share the signing secret, so trying parseJWT first would accept a
@@ -153,6 +170,7 @@ func handleWebSocket() http.HandlerFunc {
 			}
 			role = "temp"
 			userID = 0
+			isTemp = true
 		} else {
 			// Regular user/admin JWT.
 			claims, err := parseJWT(tokenStr)
@@ -162,6 +180,15 @@ func handleWebSocket() http.HandlerFunc {
 			}
 			if claims.UserID == 0 || (claims.Role != "admin" && claims.Role != "user") {
 				http.Error(w, "invalid or expired token", http.StatusUnauthorized)
+				return
+			}
+			// Reject at connect time if the token predates the owner's
+			// password-change boundary (issue #83 / #82).
+			bctx, bcancel := dbCtx(r.Context())
+			invalidated := tokenInvalidatedByPasswordChange(bctx, db, claims.UserID, claims.IssuedAt.Time)
+			bcancel()
+			if invalidated {
+				http.Error(w, "token invalidated by password change", http.StatusUnauthorized)
 				return
 			}
 			role = claims.Role
@@ -179,6 +206,9 @@ func handleWebSocket() http.HandlerFunc {
 			role:   role,
 			userID: userID,
 			send:   make(chan []byte, 64),
+			token:  tokenStr,
+			isTemp: isTemp,
+			db:     db,
 		}
 
 		hub.register(client)
@@ -199,8 +229,52 @@ func handleWebSocket() http.HandlerFunc {
 			client.safeSend(connMsg)
 		}
 
+		// O4: right after `connected`, replay the current unhealthy snapshot to a
+		// newly connected admin so an admin that was offline at transition time
+		// still observes in-progress unhealthy targets. Enqueued before the pumps
+		// start; the send buffer holds them until writePump drains.
+		sendUnhealthySnapshot(client)
+
 		go client.writePump()
 		go client.readPump()
+	}
+}
+
+// sendUnhealthySnapshot replays every currently-unhealthy monitored target to a
+// single admin client as a health-sourced system_alarm (assertion O4). Non-admin
+// (user/temp) clients receive nothing.
+func sendUnhealthySnapshot(c *wsClient) {
+	if c.role != "admin" || healthMon == nil {
+		return
+	}
+	for _, e := range healthMon.snapshot() {
+		if e.Status != StatusUnhealthy {
+			continue
+		}
+		data, err := json.Marshal(WSMessage{
+			Type:      "system_alarm",
+			Payload:   healthAlarmPayload(e.Kind, e.ID, e.Status),
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
+		if err != nil {
+			continue
+		}
+		c.safeSend(data)
+	}
+}
+
+// healthAlarmPayload builds the fixed health-sourced system_alarm payload
+// (interface-web-api.md §계약14): envelope {type,message,details} with the
+// details sub-schema {entityKind, entityId, status}.
+func healthAlarmPayload(entityKind, entityID, status string) map[string]any {
+	return map[string]any{
+		"type":    "system_alarm",
+		"message": fmt.Sprintf("%s %s is %s", entityKind, entityID, status),
+		"details": map[string]any{
+			"entityKind": entityKind,
+			"entityId":   entityID,
+			"status":     status,
+		},
 	}
 }
 
@@ -247,10 +321,55 @@ func (c *wsClient) writePump() {
 				return
 			}
 		case <-ticker.C:
+			// Ride the ping cycle (30s ≤ 60s contract bound) to re-validate the
+			// connection's token (issue #82). If the token is now invalid —
+			// temp-link revoked, expired, or past the password-change boundary —
+			// actively close the socket so no further crisis_alert is delivered.
+			if revalidateWSToken(c) != nil {
+				c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+				c.conn.WriteMessage(websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.CloseNormalClosure, "token no longer valid"))
+				return
+			}
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}
 	}
+}
+
+// revalidateWSToken re-checks a live connection's token. It returns nil while the
+// token remains valid, or an error describing why the connection must be closed:
+//   - temp token: expired (parse fails) or its link was revoked (blacklist)
+//   - regular token: expired (parse fails) or issued before the owner's
+//     password-change boundary (assertion Q2 / issue #83)
+func revalidateWSToken(c *wsClient) error {
+	if c.isTemp {
+		claims, err := parseTempLinkJWT(c.token)
+		if err != nil {
+			return fmt.Errorf("temp token expired: %w", err)
+		}
+		linkStore.mu.RLock()
+		_, revoked := linkStore.blacklist[claims.LinkID]
+		linkStore.mu.RUnlock()
+		if revoked {
+			return fmt.Errorf("temp link revoked")
+		}
+		return nil
+	}
+
+	claims, err := parseJWT(c.token)
+	if err != nil {
+		return fmt.Errorf("token expired: %w", err)
+	}
+	if c.db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
+		invalidated := tokenInvalidatedByPasswordChange(ctx, c.db, claims.UserID, claims.IssuedAt.Time)
+		cancel()
+		if invalidated {
+			return fmt.Errorf("token invalidated by password change")
+		}
+	}
+	return nil
 }
