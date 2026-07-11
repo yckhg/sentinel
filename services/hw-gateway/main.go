@@ -43,6 +43,19 @@ var heartbeatTimeout = 30 * time.Second
 // return 503 on timeout instead of an unbounded hang.
 const publishTimeout = 5 * time.Second
 
+// maxLoggedPayloadBytes caps how much of a raw MQTT payload we write to logs,
+// limiting leak surface and log bloat if the payload schema grows. (#56)
+const maxLoggedPayloadBytes = 256
+
+// truncatePayload renders up to maxLoggedPayloadBytes of a raw payload for
+// logging, appending a marker (with the original length) when truncated.
+func truncatePayload(p []byte) string {
+	if len(p) <= maxLoggedPayloadBytes {
+		return string(p)
+	}
+	return string(p[:maxLoggedPayloadBytes]) + fmt.Sprintf("...[truncated, %d bytes total]", len(p))
+}
+
 type alertEntry struct {
 	insertedAt time.Time
 }
@@ -330,7 +343,7 @@ func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
 	}
 
 	if alert.DeviceID == "" || alert.SiteID == "" || alert.Type == "" || alert.Timestamp == "" {
-		log.Printf("[MQTT] Missing required fields in alert payload: %s", string(msg.Payload()))
+		log.Printf("[MQTT] Missing required fields in alert payload: %s", truncatePayload(msg.Payload()))
 		return
 	}
 
@@ -531,7 +544,7 @@ func handleHeartbeat(msg mqtt.Message, webBackendURL string) {
 	}
 
 	if hb.DeviceID == "" || hb.SiteID == "" {
-		log.Printf("[MQTT] Missing required fields in heartbeat payload: %s", string(msg.Payload()))
+		log.Printf("[MQTT] Missing required fields in heartbeat payload: %s", truncatePayload(msg.Payload()))
 		return
 	}
 
@@ -585,12 +598,12 @@ func handleCandidate(msg mqtt.Message, webBackendURL string) {
 	}
 
 	if candidate.DeviceID == "" || candidate.SiteID == "" {
-		log.Printf("[MQTT] Missing required fields in candidate payload: %s", string(msg.Payload()))
+		log.Printf("[MQTT] Missing required fields in candidate payload: %s", truncatePayload(msg.Payload()))
 		return
 	}
 
 	if candidate.Class == "" || candidate.Confidence <= 0 || candidate.Threshold <= 0 {
-		log.Printf("[CANDIDATE] missing required fields (class/confidence/threshold), skipping: %s", msg.Payload())
+		log.Printf("[CANDIDATE] missing required fields (class/confidence/threshold), skipping: %s", truncatePayload(msg.Payload()))
 		return
 	}
 
