@@ -799,10 +799,17 @@ func (am *ArchiveManager) processArchive(archiveID, streamKey string, from, to t
 
 	sort.Slice(segments, func(i, j int) bool { return segments[i].t.Before(segments[j].t) })
 
-	// Protect all segments from cleanup
+	// Protect all segments from cleanup during the merge.
 	for _, seg := range segments {
 		am.recManager.ProtectSegment(seg.path)
 	}
+
+	// Release the originals once the merge attempt finishes: on success they are
+	// captured in the MP4; on failure keeping them pinned forever would defeat
+	// rolling cleanup, grow the recordings volume unbounded, and leak the
+	// protected map. Segments still referenced by another archive are retained
+	// (isSegmentInOtherArchive), and this archive excludes itself. (#76)
+	defer am.unprotectSegments(streamKey, from, to, archiveID)
 
 	// Create archive output directory
 	outDir := filepath.Join(am.archivesDir, archiveID)
@@ -903,12 +910,13 @@ func (am *ArchiveManager) DeleteArchive(archiveID string) error {
 	archiveDir := filepath.Join(am.archivesDir, archiveID)
 	os.RemoveAll(archiveDir)
 
-	// Unprotect segments that were in this archive's range
+	// Unprotect segments that were in this archive's range (exclude this archive
+	// itself — it is still in the slice at this point). (#76)
 	if archive.StreamKey != "" {
 		fromTime, _ := time.Parse(time.RFC3339, archive.From)
 		toTime, _ := time.Parse(time.RFC3339, archive.To)
 		if !fromTime.IsZero() && !toTime.IsZero() {
-			am.unprotectSegments(archive.StreamKey, fromTime, toTime)
+			am.unprotectSegments(archive.StreamKey, fromTime, toTime, archive.ID)
 		}
 	}
 
@@ -945,12 +953,12 @@ func (am *ArchiveManager) DeleteIncidentArchives(incidentID string) (int, error)
 		archiveDir := filepath.Join(am.archivesDir, archive.ID)
 		os.RemoveAll(archiveDir)
 
-		// Unprotect segments
+		// Unprotect segments (exclude this archive — still in the slice here). (#76)
 		if archive.StreamKey != "" {
 			fromTime, _ := time.Parse(time.RFC3339, archive.From)
 			toTime, _ := time.Parse(time.RFC3339, archive.To)
 			if !fromTime.IsZero() && !toTime.IsZero() {
-				am.unprotectSegments(archive.StreamKey, fromTime, toTime)
+				am.unprotectSegments(archive.StreamKey, fromTime, toTime, archive.ID)
 			}
 		}
 
@@ -1145,7 +1153,12 @@ func (am *ArchiveManager) AutoFinalizeExpired(maxAge time.Duration) {
 	}
 }
 
-func (am *ArchiveManager) unprotectSegments(streamKey string, from, to time.Time) {
+// unprotectSegments releases protection on the .ts segments in [from,to] for a
+// stream, skipping any still referenced by another (non-excluded) archive. The
+// excludeArchiveID lets a caller ignore its own archive entry — otherwise the
+// archive being completed/deleted would still be found by isSegmentInOtherArchive
+// and its segments would stay protected forever. (#76)
+func (am *ArchiveManager) unprotectSegments(streamKey string, from, to time.Time, excludeArchiveID string) {
 	streamDir := filepath.Join(am.recordingsDir, streamKey)
 	files, _ := os.ReadDir(streamDir)
 	const segDuration = 10 * time.Second
@@ -1163,7 +1176,7 @@ func (am *ArchiveManager) unprotectSegments(streamKey string, from, to time.Time
 		if segEnd.After(from) && t.Before(to) {
 			fullPath := filepath.Join(streamDir, f.Name())
 			// Only unprotect if no other archive references this segment
-			if !am.isSegmentInOtherArchive(fullPath, "") {
+			if !am.isSegmentInOtherArchive(fullPath, excludeArchiveID) {
 				am.recManager.UnprotectSegment(fullPath)
 			}
 		}
