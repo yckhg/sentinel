@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useState } from "react";
+import { flushSync } from "react-dom";
 import CCTVPage from "./pages/CCTVPage";
 import IncidentsPage from "./pages/IncidentsPage";
 import ManagementPage from "./pages/ManagementPage";
@@ -89,7 +90,13 @@ function App() {
 
   const handleLoginSuccess = (t: string, mode: "login" | "register") => {
     localStorage.setItem("token", t);
-    setToken(t);
+    // Commit the authed state BEFORE navigating. navigate() mutates
+    // window.location (the live-read routing source) and synchronously
+    // dispatches popstate; without flushSync the ensuing render would observe
+    // the new protected path while `token` state still lags (isAuthed=false),
+    // firing the auth-redirect effect and bouncing back to /login. flushSync
+    // guarantees the target path is only ever rendered with the authed token.
+    flushSync(() => setToken(t));
     if (mode === "register") {
       navigate(DEFAULT_PATH, { replace: true });
       return;
