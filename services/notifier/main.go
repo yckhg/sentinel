@@ -688,6 +688,31 @@ func sendTargetUnavailableAlarm(cfg Config, alert AlertPayload, reason string) {
 
 // --- Recording Archive (Two-Phase) ---
 
+// cameraInfo is the notifier's view of a web-backend camera record. Beyond
+// {streamKey,enabled} it decodes the per-camera `siteId` so protection can be
+// scoped to the event's site (§출력 6 / assertion I). The siteId field contract is
+// owned by interface-web-api; absent/empty siteId simply never matches a real event
+// site and is left unprotected (safe default — no cross-site over-protection).
+type cameraInfo struct {
+	StreamKey string `json:"streamKey"`
+	Enabled   bool   `json:"enabled"`
+	SiteID    string `json:"siteId"`
+}
+
+// filterProtectedStreamKeys returns the streamKeys eligible for protection for a
+// given event site: enabled, non-empty key, and belonging to that exact siteId.
+// Cameras of other sites are excluded so a site-A incident never protects site-B
+// segments (multi-site contamination guard, §출력 6).
+func filterProtectedStreamKeys(cameras []cameraInfo, siteID string) []string {
+	var streamKeys []string
+	for _, c := range cameras {
+		if c.Enabled && c.StreamKey != "" && c.SiteID == siteID {
+			streamKeys = append(streamKeys, c.StreamKey)
+		}
+	}
+	return streamKeys
+}
+
 // requestArchiveProtect sends a protect request to the recording service (Phase 1).
 // Protects segments from (incident_time - 1h) for all cameras. Finalization happens on incident resolution.
 func requestArchiveProtect(cfg Config, alert AlertPayload) {
@@ -714,24 +739,18 @@ func requestArchiveProtect(cfg Config, alert AlertPayload) {
 	}
 	defer resp.Body.Close()
 
-	var cameras []struct {
-		StreamKey string `json:"streamKey"`
-		Enabled   bool   `json:"enabled"`
-	}
+	var cameras []cameraInfo
 	if err := json.NewDecoder(resp.Body).Decode(&cameras); err != nil {
 		logf("[archive] Failed to decode cameras: %v", err)
 		return
 	}
 
-	var streamKeys []string
-	for _, c := range cameras {
-		if c.Enabled && c.StreamKey != "" {
-			streamKeys = append(streamKeys, c.StreamKey)
-		}
-	}
+	// Scope protection to the event's site only (§출력 6 / assertion I): other
+	// sites' segments must never be dragged into this incident's protection.
+	streamKeys := filterProtectedStreamKeys(cameras, alert.SiteID)
 
 	if len(streamKeys) == 0 {
-		logf("[archive] No enabled cameras, skipping protect")
+		logf("[archive] No enabled cameras for site %s, skipping protect", alert.SiteID)
 		return
 	}
 
