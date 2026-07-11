@@ -629,6 +629,46 @@ func requestArchiveProtect(cfg Config, alert AlertPayload) {
 
 // --- Notification Dispatch ---
 
+// maxConcurrentSends caps how many notification sends run at once (#62),
+// bounding both goroutine count and concurrent outbound API connections.
+const maxConcurrentSends = 16
+
+// runBounded executes jobs through a fixed worker pool of at most `limit`
+// goroutines and blocks until every job has finished. This bounds concurrency
+// so a large contact list cannot explode goroutines/outbound connections. Each
+// job runs under recoverGoroutine (#58) so one panicking send neither crashes
+// the process nor kills its pool worker (which would starve the remaining jobs).
+func runBounded(jobs []func(), limit int) {
+	if len(jobs) == 0 {
+		return
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > len(jobs) {
+		limit = len(jobs)
+	}
+	ch := make(chan func())
+	var wg sync.WaitGroup
+	wg.Add(limit)
+	for w := 0; w < limit; w++ {
+		go func() {
+			defer wg.Done()
+			for job := range ch {
+				func() {
+					defer recoverGoroutine("notification send")
+					job()
+				}()
+			}
+		}()
+	}
+	for _, job := range jobs {
+		ch <- job
+	}
+	close(ch)
+	wg.Wait()
+}
+
 func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult) {
 	// 1. Fetch contacts from web-backend
 	contacts, err := fetchContacts(cfg)
@@ -668,29 +708,32 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 		logf("[notify] SMS disabled (SMS_ENABLED=false), skipping SMS channel")
 	}
 
-	var wg sync.WaitGroup
 	results := make([]NotifyResult, len(contacts))
 
+	// Build the per-contact send jobs, then run them through a bounded worker
+	// pool (#62). fetchContacts is unbounded and each contact spawns up to two
+	// sends (email + KakaoTalk→SMS→alarm chain); a large contact list — or many
+	// concurrent /api/notify requests — would explode goroutines and outbound
+	// connections, exhausting resources and tripping external-API rate limits.
+	// The pool caps how many sends run at once while still driving every contact.
+	var jobs []func()
 	for i, contact := range contacts {
+		i, contact := i, contact
 		// Send email in parallel (independent channel, does not affect KakaoTalk/SMS)
 		if contact.NotifyEmail && contact.Email != "" {
-			wg.Add(1)
-			go func(c Contact) {
-				defer wg.Done()
-				defer recoverGoroutine("email dispatch")
+			jobs = append(jobs, func() {
+				c := contact
 				if err := sendCrisisEmail(cfg, c, alert, cctvLink); err != nil {
 					logf("[notify] Email FAILED for %s (%s): %v", c.Name, maskEmail(c.Email), err)
 				} else {
 					logf("[notify] Email SUCCESS for %s (%s)", c.Name, maskEmail(c.Email))
 				}
-			}(contact)
+			})
 		}
 
 		// KakaoTalk → SMS → System alarm fallback chain
-		wg.Add(1)
-		go func(idx int, c Contact) {
-			defer wg.Done()
-			defer recoverGoroutine("contact dispatch")
+		jobs = append(jobs, func() {
+			idx, c := i, contact
 			result := NotifyResult{
 				ContactID:   c.ID,
 				ContactName: c.Name,
@@ -740,10 +783,10 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 			result.Success = false
 			result.Error = scrub(fmt.Sprintf("kakao: %s; sms: %s", kakaoErr.Error(), smsErr.Error()))
 			results[idx] = result
-		}(i, contact)
+		})
 	}
 
-	wg.Wait()
+	runBounded(jobs, maxConcurrentSends)
 
 	// Log email dispatch summary
 	emailCount := 0
