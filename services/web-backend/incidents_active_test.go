@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // TestActiveIncidents verifies GET /api/incidents/active (contract 2): only
@@ -71,6 +73,60 @@ func TestActiveIncidents(t *testing.T) {
 			if _, ok := site[k]; !ok {
 				t.Fatalf("missing site.%s in %v", k, site)
 			}
+		}
+	}
+}
+
+// TestActiveIncidentsCapped verifies the backfill returns at most
+// activeIncidentsLimit rows (most-recent first) instead of streaming an unbounded
+// (polluted) unresolved set, while preserving DESC order and the isomorphic keys.
+func TestActiveIncidentsCapped(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO sites (address, manager_name, manager_phone) VALUES ('a','m','010-1234-5678')"); err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	// Insert more open incidents than the cap, with strictly increasing occurred_at.
+	total := activeIncidentsLimit + 25
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for i := 0; i < total; i++ {
+		ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(i) * time.Minute).Format("2006-01-02 15:04:05")
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO incidents (site_id, description, occurred_at, is_test, status) VALUES ('s1', ?, ?, 0, 'open')",
+			fmt.Sprintf("inc-%d", i), ts); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/incidents/active", nil)
+	rec := httptest.NewRecorder()
+	handleActiveIncidents(db)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	var arr []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &arr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(arr) != activeIncidentsLimit {
+		t.Fatalf("len=%d want cap %d", len(arr), activeIncidentsLimit)
+	}
+	// DESC: the newest incident (inc-%d with largest index) must be first.
+	if arr[0]["description"] != fmt.Sprintf("inc-%d", total-1) {
+		t.Fatalf("not DESC: first=%v", arr[0]["description"])
+	}
+	// Isomorphic key set preserved under the cap.
+	for _, k := range []string{"incidentId", "siteId", "description", "occurredAt", "isTest", "site"} {
+		if _, ok := arr[0][k]; !ok {
+			t.Fatalf("missing key %q", k)
 		}
 	}
 }

@@ -333,10 +333,18 @@ func crisisAlertPayload(incidentID int64, siteID, description, occurredAt string
 	}
 }
 
+// activeIncidentsLimit caps the unresolved-banner backfill. Like GET /api/incidents
+// (which clamps to 100), the banner only needs the most-recent unresolved
+// incidents; without a cap a polluted table (tens of thousands of stale open rows)
+// would be streamed in full. The most-recent-N (occurred_at DESC) is sufficient to
+// reconstruct the in-progress banner.
+const activeIncidentsLimit = 200
+
 // handleActiveIncidents handles GET /api/incidents/active — the unresolved-banner
-// backfill (contract 2). Returns open+acknowledged incidents (resolved excluded),
-// occurred_at DESC, each element isomorphic to the crisis_alert payload plus a
-// status field. The identifier is incidentId (not the list `id`).
+// backfill (contract 2). Returns the most-recent open+acknowledged incidents
+// (resolved excluded), occurred_at DESC, capped at activeIncidentsLimit. Each
+// element is isomorphic to the crisis_alert payload plus a status field. The
+// identifier is incidentId (not the list `id`).
 func handleActiveIncidents(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := dbCtx(r.Context())
@@ -346,7 +354,8 @@ func handleActiveIncidents(db *sql.DB) http.HandlerFunc {
 			`SELECT id, site_id, description, datetime(occurred_at), is_test, status
 			 FROM incidents
 			 WHERE status IN ('open', 'acknowledged')
-			 ORDER BY datetime(occurred_at) DESC`)
+			 ORDER BY datetime(occurred_at) DESC
+			 LIMIT ?`, activeIncidentsLimit)
 		if err != nil {
 			log.Printf("list active incidents error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
