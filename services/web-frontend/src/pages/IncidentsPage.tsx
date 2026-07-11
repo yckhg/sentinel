@@ -159,6 +159,7 @@ export default function IncidentsPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("");
   const [resolveTarget, setResolveTarget] = useState<Incident | null>(null);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [actionError, setActionError] = useState("");
   const admin = useState(() => isAdmin(localStorage.getItem("token")))[0];
 
   const fetchIncidents = useCallback(async (page: number, from: string, to: string, status: StatusFilter, append: boolean) => {
@@ -223,6 +224,7 @@ export default function IncidentsPage() {
 
   const handleAcknowledge = async (inc: Incident) => {
     setActionLoading(inc.id);
+    setActionError("");
     try {
       const res = await fetchWithTimeout(`/api/incidents/${inc.id}/acknowledge`, {
         method: "PATCH",
@@ -234,7 +236,15 @@ export default function IncidentsPage() {
       }
       refresh();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "확인 처리에 실패했습니다.");
+      // Inline error (consistent with the resolve modal) instead of a jarring
+      // browser alert() (#103).
+      setActionError(
+        isTimeoutError(err)
+          ? timeoutMessage()
+          : err instanceof Error
+          ? err.message
+          : "확인 처리에 실패했습니다.",
+      );
     } finally {
       setActionLoading(null);
     }
@@ -282,6 +292,7 @@ export default function IncidentsPage() {
       </div>
 
       {error && <div className="incidents-error">{error}</div>}
+      {actionError && <div className="incidents-error">{actionError}</div>}
 
       <div className="incidents-count">
         총 {pagination.total}건

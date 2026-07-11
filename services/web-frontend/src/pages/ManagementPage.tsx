@@ -228,6 +228,18 @@ export default function ManagementPage() {
   const [incidentDeleteLoading, setIncidentDeleteLoading] = useState(false);
   const [archiveDownloading, setArchiveDownloading] = useState<string | null>(null);
 
+  // Shared inline error for the confirm/delete modals — only one is open at a
+  // time. Previously delete failures were silently swallowed (modal just closed)
+  // so the user assumed success (#103).
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const errorMessage = (err: unknown): string =>
+    isTimeoutError(err)
+      ? timeoutMessage()
+      : err instanceof Error
+        ? err.message
+        : "요청을 처리하지 못했습니다";
+
   const fetchContacts = async () => {
     try {
       const res = await fetchWithTimeout("/api/contacts", { headers: getAuthHeaders() });
@@ -387,6 +399,7 @@ export default function ManagementPage() {
   const handleCancelInvite = async () => {
     if (!cancelInviteTarget) return;
     setCancelInviteLoading(true);
+    setActionError(null);
     try {
       const res = await fetchWithTimeout(`/api/invitations/${cancelInviteTarget.id}`, {
         method: "DELETE",
@@ -395,8 +408,8 @@ export default function ManagementPage() {
       if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`);
       setCancelInviteTarget(null);
       await fetchInvitations();
-    } catch {
-      setCancelInviteTarget(null);
+    } catch (err) {
+      setActionError(errorMessage(err));
     } finally {
       setCancelInviteLoading(false);
     }
@@ -504,6 +517,7 @@ export default function ManagementPage() {
   const handleArchiveDelete = async () => {
     if (!archiveDeleteTarget) return;
     setArchiveDeleteLoading(true);
+    setActionError(null);
     try {
       const res = await fetchWithTimeout(`/api/archives/${archiveDeleteTarget.id}`, {
         method: "DELETE",
@@ -512,8 +526,8 @@ export default function ManagementPage() {
       if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`);
       setArchiveDeleteTarget(null);
       await Promise.all([fetchArchives(), fetchStorage()]);
-    } catch {
-      setArchiveDeleteTarget(null);
+    } catch (err) {
+      setActionError(errorMessage(err)); // keep modal open, surface failure (#103)
     } finally {
       setArchiveDeleteLoading(false);
     }
@@ -522,6 +536,7 @@ export default function ManagementPage() {
   const handleIncidentArchiveDelete = async () => {
     if (!incidentDeleteTarget) return;
     setIncidentDeleteLoading(true);
+    setActionError(null);
     try {
       const res = await fetchWithTimeout(`/api/archives/incident/${encodeURIComponent(incidentDeleteTarget)}`, {
         method: "DELETE",
@@ -530,8 +545,8 @@ export default function ManagementPage() {
       if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`);
       setIncidentDeleteTarget(null);
       await Promise.all([fetchArchives(), fetchStorage()]);
-    } catch {
-      setIncidentDeleteTarget(null);
+    } catch (err) {
+      setActionError(errorMessage(err));
     } finally {
       setIncidentDeleteLoading(false);
     }
@@ -645,6 +660,7 @@ export default function ManagementPage() {
   const handleCameraDelete = async () => {
     if (!camDeleteTarget) return;
     setCamDeleteLoading(true);
+    setActionError(null);
     try {
       const res = await fetchWithTimeout(`/api/cameras/${camDeleteTarget.id}`, {
         method: "DELETE",
@@ -653,8 +669,8 @@ export default function ManagementPage() {
       if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`);
       setCamDeleteTarget(null);
       await fetchCameras();
-    } catch {
-      setCamDeleteTarget(null);
+    } catch (err) {
+      setActionError(errorMessage(err));
     } finally {
       setCamDeleteLoading(false);
     }
@@ -742,6 +758,7 @@ export default function ManagementPage() {
   const handleRevoke = async () => {
     if (!revokeTarget) return;
     setRevokeLoading(true);
+    setActionError(null);
     try {
       const res = await fetchWithTimeout(`/api/links/${revokeTarget.id}`, {
         method: "DELETE",
@@ -751,8 +768,8 @@ export default function ManagementPage() {
       setRevokeTarget(null);
       setNewLinkUrl(null);
       await fetchTempLinks();
-    } catch {
-      setRevokeTarget(null);
+    } catch (err) {
+      setActionError(errorMessage(err));
     } finally {
       setRevokeLoading(false);
     }
@@ -906,6 +923,7 @@ export default function ManagementPage() {
   const handleDelete = async () => {
     if (!deleteTarget) return;
     setDeleteLoading(true);
+    setActionError(null);
     try {
       const res = await fetchWithTimeout(`/api/contacts/${deleteTarget.id}`, {
         method: "DELETE",
@@ -914,8 +932,8 @@ export default function ManagementPage() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setDeleteTarget(null);
       await fetchContacts();
-    } catch {
-      setDeleteTarget(null);
+    } catch (err) {
+      setActionError(errorMessage(err));
     } finally {
       setDeleteLoading(false);
     }
@@ -1803,10 +1821,14 @@ export default function ManagementPage() {
 
       {/* Cancel invitation confirmation dialog */}
       {cancelInviteTarget && (
-        <Modal onClose={() => setCancelInviteTarget(null)} ariaLabel="초대 취소 확인">
+        <Modal
+          onClose={() => { setCancelInviteTarget(null); setActionError(null); }}
+          ariaLabel="초대 취소 확인"
+        >
             <p className="mgmt-modal-text">
               <strong>{cancelInviteTarget.email}</strong> 초대를 취소하시겠습니까?
             </p>
+            {actionError && <p className="mgmt-form-error">{actionError}</p>}
             <div className="mgmt-form-actions">
               <button
                 className="mgmt-btn mgmt-btn-danger"
@@ -1817,7 +1839,7 @@ export default function ManagementPage() {
               </button>
               <button
                 className="mgmt-btn mgmt-btn-secondary"
-                onClick={() => setCancelInviteTarget(null)}
+                onClick={() => { setCancelInviteTarget(null); setActionError(null); }}
               >
                 닫기
               </button>
@@ -1827,11 +1849,15 @@ export default function ManagementPage() {
 
       {/* Revoke confirmation dialog */}
       {revokeTarget && (
-        <Modal onClose={() => setRevokeTarget(null)} ariaLabel="임시 링크 폐기 확인">
+        <Modal
+          onClose={() => { setRevokeTarget(null); setActionError(null); }}
+          ariaLabel="임시 링크 폐기 확인"
+        >
             <p className="mgmt-modal-text">
               이 임시 링크를 폐기하시겠습니까?<br />
               <small>폐기 후에는 해당 링크로 접속할 수 없습니다.</small>
             </p>
+            {actionError && <p className="mgmt-form-error">{actionError}</p>}
             <div className="mgmt-form-actions">
               <button
                 className="mgmt-btn mgmt-btn-danger"
@@ -1842,7 +1868,7 @@ export default function ManagementPage() {
               </button>
               <button
                 className="mgmt-btn mgmt-btn-secondary"
-                onClick={() => setRevokeTarget(null)}
+                onClick={() => { setRevokeTarget(null); setActionError(null); }}
               >
                 취소
               </button>
@@ -1852,26 +1878,34 @@ export default function ManagementPage() {
 
       {/* Camera delete confirmation dialog */}
       {camDeleteTarget && (
-        <Modal onClose={() => setCamDeleteTarget(null)} ariaLabel="카메라 삭제 확인">
+        <Modal
+          onClose={() => { setCamDeleteTarget(null); setActionError(null); }}
+          ariaLabel="카메라 삭제 확인"
+        >
             <p className="mgmt-modal-text">
               <strong>{camDeleteTarget.name}</strong> 카메라를 삭제하시겠습니까?
             </p>
+            {actionError && <p className="mgmt-form-error">{actionError}</p>}
             <div className="mgmt-form-actions">
               <button className="mgmt-btn mgmt-btn-danger" onClick={handleCameraDelete} disabled={camDeleteLoading}>
                 {camDeleteLoading ? "삭제 중..." : "삭제"}
               </button>
-              <button className="mgmt-btn mgmt-btn-secondary" onClick={() => setCamDeleteTarget(null)}>취소</button>
+              <button className="mgmt-btn mgmt-btn-secondary" onClick={() => { setCamDeleteTarget(null); setActionError(null); }}>취소</button>
             </div>
         </Modal>
       )}
 
       {/* Archive delete confirmation dialog */}
       {archiveDeleteTarget && (
-        <Modal onClose={() => setArchiveDeleteTarget(null)} ariaLabel="보관 영상 삭제 확인">
+        <Modal
+          onClose={() => { setArchiveDeleteTarget(null); setActionError(null); }}
+          ariaLabel="보관 영상 삭제 확인"
+        >
             <p className="mgmt-modal-text">
               <strong>{archiveDeleteTarget.streamKey}</strong> 보관 영상을 삭제하시겠습니까?<br />
               <small>{archiveDeleteTarget.sizeBytes > 0 ? formatBytes(archiveDeleteTarget.sizeBytes) : ""} 디스크 공간이 확보됩니다.</small>
             </p>
+            {actionError && <p className="mgmt-form-error">{actionError}</p>}
             <div className="mgmt-form-actions">
               <button
                 className="mgmt-btn mgmt-btn-danger"
@@ -1882,7 +1916,7 @@ export default function ManagementPage() {
               </button>
               <button
                 className="mgmt-btn mgmt-btn-secondary"
-                onClick={() => setArchiveDeleteTarget(null)}
+                onClick={() => { setArchiveDeleteTarget(null); setActionError(null); }}
               >
                 취소
               </button>
@@ -1892,11 +1926,15 @@ export default function ManagementPage() {
 
       {/* Incident archive delete confirmation dialog */}
       {incidentDeleteTarget && (
-        <Modal onClose={() => setIncidentDeleteTarget(null)} ariaLabel="사건 보관 영상 삭제 확인">
+        <Modal
+          onClose={() => { setIncidentDeleteTarget(null); setActionError(null); }}
+          ariaLabel="사건 보관 영상 삭제 확인"
+        >
             <p className="mgmt-modal-text">
               <strong>{incidentDeleteTarget}</strong> 사건의 모든 보관 영상을 삭제하시겠습니까?<br />
               <small>해당 사건의 모든 카메라 영상이 삭제됩니다.</small>
             </p>
+            {actionError && <p className="mgmt-form-error">{actionError}</p>}
             <div className="mgmt-form-actions">
               <button
                 className="mgmt-btn mgmt-btn-danger"
@@ -1907,7 +1945,7 @@ export default function ManagementPage() {
               </button>
               <button
                 className="mgmt-btn mgmt-btn-secondary"
-                onClick={() => setIncidentDeleteTarget(null)}
+                onClick={() => { setIncidentDeleteTarget(null); setActionError(null); }}
               >
                 취소
               </button>
@@ -1917,10 +1955,14 @@ export default function ManagementPage() {
 
       {/* Delete confirmation dialog */}
       {deleteTarget && (
-        <Modal onClose={() => setDeleteTarget(null)} ariaLabel="연락처 삭제 확인">
+        <Modal
+          onClose={() => { setDeleteTarget(null); setActionError(null); }}
+          ariaLabel="연락처 삭제 확인"
+        >
             <p className="mgmt-modal-text">
               <strong>{deleteTarget.name}</strong> 연락처를 삭제하시겠습니까?
             </p>
+            {actionError && <p className="mgmt-form-error">{actionError}</p>}
             <div className="mgmt-form-actions">
               <button
                 className="mgmt-btn mgmt-btn-danger"
@@ -1931,7 +1973,7 @@ export default function ManagementPage() {
               </button>
               <button
                 className="mgmt-btn mgmt-btn-secondary"
-                onClick={() => setDeleteTarget(null)}
+                onClick={() => { setDeleteTarget(null); setActionError(null); }}
               >
                 취소
               </button>
