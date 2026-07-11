@@ -1,3 +1,46 @@
+:root {
+  /* Status colors — single source of truth so the same meaning always maps to
+     the same (accessible) color instead of ad-hoc inline HEX (#105). */
+  --status-ok: #2e7d32;
+  --status-danger: #c62828;
+  --status-warn: #e65100;
+  --status-muted: #6b6b6b;
+  --status-info: #1565c0;
+  /* Lowest-contrast secondary text still >= 4.5:1 on white (WCAG AA). */
+  --text-muted: #767676;
+  /* Minimum interactive/touch target size. */
+  --touch-min: 44px;
+}
+
+/* Status badge helpers — pair with .mgmt-card-badge for shape/padding. */
+.status-badge--ok {
+  background: var(--status-ok);
+  color: #fff;
+}
+.status-badge--danger {
+  background: var(--status-danger);
+  color: #fff;
+}
+.status-badge--warn {
+  background: var(--status-warn);
+  color: #fff;
+}
+.status-badge--muted {
+  background: var(--status-muted);
+  color: #fff;
+}
+.status-badge--info {
+  background: var(--status-info);
+  color: #fff;
+}
+
+.status-text--danger {
+  color: var(--status-danger);
+}
+.status-text--ok {
+  color: var(--status-ok);
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -30,6 +73,26 @@ body {
   margin-bottom: 0.5rem;
 }
 
+.error-boundary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 16px;
+  text-align: center;
+  color: #333;
+}
+
+.error-boundary-title {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.error-boundary-desc {
+  font-size: 0.85rem;
+  color: #555;
+}
+
 .tab-bar {
   position: fixed;
   bottom: 0;
@@ -49,10 +112,11 @@ body {
   align-items: center;
   justify-content: center;
   padding: 8px 0;
+  min-height: var(--touch-min);
   border: none;
   background: none;
   cursor: pointer;
-  color: #999;
+  color: var(--text-muted);
   font-size: 0.7rem;
   transition: color 0.15s;
   -webkit-tap-highlight-color: transparent;
@@ -186,6 +250,26 @@ body {
 
 .camera-restart-btn:hover {
   background: rgba(211, 47, 47, 0.8);
+}
+
+/* Manual retry button shown when a fatal HLS error is surfaced (#96). The
+   overlay is pointer-events:none, so the button must opt back in. */
+.camera-retry-btn {
+  margin-top: 8px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.4);
+  color: #fff;
+  font-size: 0.8rem;
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.camera-retry-btn:hover {
+  background: rgba(255, 152, 0, 0.85);
 }
 
 /* Crisis Alert Banner */
@@ -393,6 +477,7 @@ body {
 .mgmt-form-field input {
   width: 100%;
   padding: 8px 10px;
+  min-height: var(--touch-min);
   border: 1px solid #ddd;
   border-radius: 6px;
   font-size: 0.9rem;
@@ -728,6 +813,16 @@ body {
   word-break: break-all;
 }
 
+.emergency-dialog-fallback {
+  font-size: 0.8rem;
+  color: #b71c1c;
+  background: #fdecea;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  text-align: center;
+}
+
 /* Desktop: wider layout */
 @media (min-width: 768px) {
   .content {
@@ -964,6 +1059,15 @@ body {
   border-radius: 4px;
   transition: background 0.1s;
   user-select: none;
+  /* dc-day is a <button> for keyboard/screen-reader access — strip the
+     native button chrome so it renders like the surrounding grid cells. */
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  color: inherit;
+  width: 100%;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .dc-day:hover:not(.dc-day-empty):not(.dc-day-disabled) {
@@ -1204,7 +1308,7 @@ body {
 .login-subtitle {
   text-align: center;
   font-size: 0.85rem;
-  color: #999;
+  color: var(--text-muted);
   margin-bottom: 24px;
 }
 
@@ -1217,11 +1321,12 @@ body {
 .login-tab {
   flex: 1;
   padding: 10px 0;
+  min-height: var(--touch-min);
   border: none;
   background: none;
   font-size: 0.9rem;
   font-weight: 600;
-  color: #999;
+  color: var(--text-muted);
   cursor: pointer;
   transition: color 0.15s;
   -webkit-tap-highlight-color: transparent;
@@ -1308,6 +1413,30 @@ body {
   color: rgba(255, 255, 255, 0.7);
   font-size: 0.7rem;
   font-weight: 600;
+}
+
+.rec-timeline-window-end {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.rec-timeline-refresh-btn {
+  border: none;
+  background: none;
+  color: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 4px;
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: 4px;
+}
+
+.rec-timeline-refresh-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .rec-timeline-bar {

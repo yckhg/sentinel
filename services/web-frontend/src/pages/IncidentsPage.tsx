@@ -1,7 +1,9 @@
 import { useEffect, useState, useCallback } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 import { formatKstDateTime } from "../utils/datetime";
+import { isAdmin } from "../utils/jwt";
 import DualCalendar from "../components/DualCalendar";
+import Modal from "../components/Modal";
 
 interface Incident {
   id: number;
@@ -47,21 +49,6 @@ function getAuthHeaders(): Record<string, string> {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   };
-}
-
-function isAdmin(): boolean {
-  const token = localStorage.getItem("token");
-  if (!token) return false;
-  try {
-    const parts = token.split(".");
-    if (parts.length < 2) return false;
-    const encoded = parts[1];
-    if (!encoded) return false;
-    const payload = JSON.parse(atob(encoded));
-    return payload.role === "admin";
-  } catch {
-    return false;
-  }
 }
 
 function formatDateTime(iso: string): string {
@@ -129,8 +116,7 @@ function ResolveModal({ incident, onClose, onResolved }: ResolveModalProps) {
   };
 
   return (
-    <div className="mgmt-modal-overlay" onClick={onClose}>
-      <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+    <Modal onClose={onClose} ariaLabel="조치 완료 처리">
         <p className="mgmt-modal-text">
           <strong>조치 완료 처리</strong>
         </p>
@@ -148,7 +134,7 @@ function ResolveModal({ incident, onClose, onResolved }: ResolveModalProps) {
             style={{ width: "100%", resize: "vertical" }}
           />
         </div>
-        {error && <p style={{ color: "#d32f2f", fontSize: "0.8rem", marginBottom: "8px" }}>{error}</p>}
+        {error && <p className="status-text--danger" style={{ fontSize: "0.8rem", marginBottom: "8px" }}>{error}</p>}
         <div className="mgmt-form-actions" style={{ justifyContent: "center" }}>
           <button className="mgmt-btn mgmt-btn-secondary" onClick={onClose} disabled={sending}>
             취소
@@ -157,8 +143,7 @@ function ResolveModal({ incident, onClose, onResolved }: ResolveModalProps) {
             {sending ? "처리 중..." : "조치 완료"}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -174,7 +159,8 @@ export default function IncidentsPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("");
   const [resolveTarget, setResolveTarget] = useState<Incident | null>(null);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
-  const admin = useState(() => isAdmin())[0];
+  const [actionError, setActionError] = useState("");
+  const admin = useState(() => isAdmin(localStorage.getItem("token")))[0];
 
   const fetchIncidents = useCallback(async (page: number, from: string, to: string, status: StatusFilter, append: boolean) => {
     if (append) {
@@ -238,6 +224,7 @@ export default function IncidentsPage() {
 
   const handleAcknowledge = async (inc: Incident) => {
     setActionLoading(inc.id);
+    setActionError("");
     try {
       const res = await fetchWithTimeout(`/api/incidents/${inc.id}/acknowledge`, {
         method: "PATCH",
@@ -249,7 +236,15 @@ export default function IncidentsPage() {
       }
       refresh();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "확인 처리에 실패했습니다.");
+      // Inline error (consistent with the resolve modal) instead of a jarring
+      // browser alert() (#103).
+      setActionError(
+        isTimeoutError(err)
+          ? timeoutMessage()
+          : err instanceof Error
+          ? err.message
+          : "확인 처리에 실패했습니다.",
+      );
     } finally {
       setActionLoading(null);
     }
@@ -297,6 +292,7 @@ export default function IncidentsPage() {
       </div>
 
       {error && <div className="incidents-error">{error}</div>}
+      {actionError && <div className="incidents-error">{actionError}</div>}
 
       <div className="incidents-count">
         총 {pagination.total}건

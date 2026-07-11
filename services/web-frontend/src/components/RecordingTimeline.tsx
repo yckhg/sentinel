@@ -88,11 +88,40 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
   // Incident markers
   const [incidents, setIncidents] = useState<IncidentMarker[]>([]);
 
-  // Timeline window: last 1 hour
-  const windowEnd = useRef(new Date());
-  const windowStart = useRef(new Date(windowEnd.current.getTime() - 60 * 60 * 1000));
+  // Timeline window: last 1 hour. Kept in state (not a mount-frozen ref) so it
+  // can be advanced periodically / on demand — otherwise the "last hour" window
+  // and its data go stale while the panel stays open (#101).
+  const WINDOW_MS = 60 * 60 * 1000;
+  const [windowEnd, setWindowEnd] = useState(() => new Date());
+  const [windowStart, setWindowStart] = useState(() => new Date(Date.now() - WINDOW_MS));
+
+  const refreshWindow = useCallback(() => {
+    const end = new Date();
+    setWindowEnd(end);
+    setWindowStart(new Date(end.getTime() - WINDOW_MS));
+  }, [WINDOW_MS]);
 
   const timelineRef = useRef<HTMLDivElement>(null);
+
+  // Archive-completion polling handles. Kept in refs so the unmount cleanup can
+  // stop them — otherwise collapsing the camera (unmounting) while an archive
+  // is in flight leaves the 3s poll + 5min safety timeout running and calling
+  // setState on an unmounted component (#93).
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollIntervalRef.current !== null) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (pollTimeoutRef.current !== null) {
+      clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => stopPolling, [stopPolling]);
 
   const token = localStorage.getItem("token");
 
@@ -134,8 +163,8 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
 
   const fetchIncidents = useCallback(async () => {
     try {
-      const from = windowStart.current.toISOString();
-      const to = windowEnd.current.toISOString();
+      const from = windowStart.toISOString();
+      const to = windowEnd.toISOString();
       const res = await fetchWithTimeout(`/api/incidents?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&limit=100`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
@@ -147,25 +176,34 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
     } catch {
       // silent — incidents are optional decoration
     }
-  }, [token]);
+  }, [token, windowStart, windowEnd]);
 
+  // Fetch (and re-fetch whenever the window advances — fetchIncidents depends on
+  // windowStart/windowEnd, so advancing the window re-runs this effect).
   useEffect(() => {
     fetchTimeRanges();
     fetchArchives();
     fetchIncidents();
   }, [fetchTimeRanges, fetchArchives, fetchIncidents]);
 
+  // Advance the window periodically so an open timeline keeps tracking the live
+  // edge and picks up new recordings/incidents (#101).
+  useEffect(() => {
+    const id = setInterval(refreshWindow, WINDOW_MS / 60); // every minute
+    return () => clearInterval(id);
+  }, [refreshWindow, WINDOW_MS]);
+
   // Convert fraction to absolute time
   const fractionToTime = (frac: number): Date => {
-    const start = windowStart.current.getTime();
-    const end = windowEnd.current.getTime();
+    const start = windowStart.getTime();
+    const end = windowEnd.getTime();
     return new Date(start + frac * (end - start));
   };
 
   // Convert absolute time to fraction
   const timeToFraction = (time: Date): number => {
-    const start = windowStart.current.getTime();
-    const end = windowEnd.current.getTime();
+    const start = windowStart.getTime();
+    const end = windowEnd.getTime();
     return Math.max(0, Math.min(1, (time.getTime() - start) / (end - start)));
   };
 
@@ -216,6 +254,24 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
     setDragging(null);
   };
 
+  // Keyboard support for the selection handles (custom slider). Arrow keys nudge
+  // the handle; Home/End jump to the bounds.
+  const HANDLE_STEP = 0.02;
+  const handleHandleKeyDown = (e: React.KeyboardEvent, handle: "start" | "end") => {
+    let delta = 0;
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") delta = -HANDLE_STEP;
+    else if (e.key === "ArrowRight" || e.key === "ArrowUp") delta = HANDLE_STEP;
+    else if (e.key === "Home") delta = -1;
+    else if (e.key === "End") delta = 1;
+    else return;
+    e.preventDefault();
+    if (handle === "start") {
+      setSelStart((s) => Math.max(0, Math.min(selEnd - 0.01, s + delta)));
+    } else {
+      setSelEnd((en) => Math.max(selStart + 0.01, Math.min(1, en + delta)));
+    }
+  };
+
   // Click on timeline bar to seek to that position for playback
   const handleTimelineClick = (e: React.MouseEvent) => {
     if (dragging) return; // Don't seek while dragging handles
@@ -232,7 +288,7 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
     // Play from clicked time to end of available window (5 min block or end of recording)
     const playEnd = new Date(Math.min(
       clickTime.getTime() + 5 * 60 * 1000, // 5 minutes from click point
-      windowEnd.current.getTime()
+      windowEnd.getTime()
     ));
 
     setPlaybackPosition(frac);
@@ -308,8 +364,10 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
           message: `보관 요청 완료: ${formatTime(from)} ~ ${formatTime(to)} (${formatDuration(from, to)})`,
           archiveId: archive?.id,
         });
-        // Poll for archive completion
-        const pollInterval = setInterval(async () => {
+        // Poll for archive completion. Handles live in refs so the component's
+        // unmount cleanup can stop them (#93).
+        stopPolling();
+        pollIntervalRef.current = setInterval(async () => {
           try {
             const pollRes = await fetchWithTimeout("/api/archives", {
               headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -320,7 +378,7 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
               setArchives(myArchives);
               const target = myArchives.find((a) => a.id === archive?.id);
               if (!target || target.status === "completed" || target.status === "failed") {
-                clearInterval(pollInterval);
+                stopPolling();
                 if (target?.status === "failed") {
                   setArchiveResult({
                     success: false,
@@ -330,11 +388,11 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
               }
             }
           } catch {
-            clearInterval(pollInterval);
+            stopPolling();
           }
         }, 3000);
         // Safety: stop polling after 5 minutes
-        setTimeout(() => clearInterval(pollInterval), 5 * 60 * 1000);
+        pollTimeoutRef.current = setTimeout(() => stopPolling(), 5 * 60 * 1000);
       } else {
         const data = await res.json().catch(() => ({}));
         setArchiveResult({
@@ -367,7 +425,7 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
     <div className="rec-timeline-container" onClick={(e) => e.stopPropagation()}>
       {/* Header with title and live button */}
       <div className="rec-timeline-labels">
-        <span>{formatTime(windowStart.current)}</span>
+        <span>{formatTime(windowStart)}</span>
         <span className="rec-timeline-title">
           {isPlaying ? (
             <>
@@ -382,7 +440,18 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
             "녹화 타임라인"
           )}
         </span>
-        <span>{formatTime(windowEnd.current)}</span>
+        <span className="rec-timeline-window-end">
+          {formatTime(windowEnd)}
+          <button
+            type="button"
+            className="rec-timeline-refresh-btn"
+            onClick={refreshWindow}
+            aria-label="타임라인 새로고침"
+            title="타임라인 새로고침"
+          >
+            &#x21BB;
+          </button>
+        </span>
       </div>
 
       {/* Timeline bar */}
@@ -467,14 +536,30 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
         <div
           className={`rec-timeline-handle rec-timeline-handle-start${dragging === "start" ? " dragging" : ""}`}
           style={{ left: `${selStart * 100}%` }}
+          role="slider"
+          tabIndex={0}
+          aria-label="구간 시작"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(selStart * 100)}
+          aria-valuetext={formatTimeWithSec(selFromTime)}
           onPointerDown={(e) => handlePointerDown(e, "start")}
+          onKeyDown={(e) => handleHandleKeyDown(e, "start")}
         />
 
         {/* End handle */}
         <div
           className={`rec-timeline-handle rec-timeline-handle-end${dragging === "end" ? " dragging" : ""}`}
           style={{ left: `${selEnd * 100}%` }}
+          role="slider"
+          tabIndex={0}
+          aria-label="구간 종료"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(selEnd * 100)}
+          aria-valuetext={formatTimeWithSec(selToTime)}
           onPointerDown={(e) => handlePointerDown(e, "end")}
+          onKeyDown={(e) => handleHandleKeyDown(e, "end")}
         />
       </div>
 
