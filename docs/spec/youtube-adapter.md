@@ -31,6 +31,7 @@ YouTube 영상 URL 또는 로컬 비디오 파일을 소스로 삼아, streaming
     - `ENCODE_AUDIO_BITRATE` (기본 `48k`) → FFmpeg `-b:a`
     - `ENCODE_PRESET` (기본 `ultrafast`) → FFmpeg `-preset`
     - 계약: 이 값들은 코드에 고정되지 않고 위 환경변수로 주입되며, 미설정 시 기본값이 적용된다. 값 변경은 재빌드 없이 컨테이너 재기동만으로 반영된다. 코덱 정규화(H.264 + AAC) 자체는 이 값들과 무관하게 항상 유지된다(§핵심 로직 "재인코딩 필수").
+    - **무효값 폴백 계약 (recording env 규정과 대칭)**: 네 변수 중 어느 하나라도 **무효·미인식 값**(예: `ENCODE_GOP=xyz`처럼 정수가 아닌 GOP, 음수/0 비트레이트, FFmpeg가 인식하지 못하는 preset 문자열)이 주입되면, 그 변수는 **기본값으로 폴백**하고(경고 로그 1회) 기본값으로 기동한다. 무효값 때문에 FFmpeg가 매 재시도마다 즉시 실패하는 크래시 루프에 빠지지 않는다. 폴백은 변수별로 독립적이다 — 한 변수가 무효여도 나머지 유효 변수는 주입값 그대로 사용한다.
 - **설정 파일**: JSON 배열. 각 원소 = `{id, youtubeUrl, streamKey, localFile?}`.
   - `localFile`이 있으면 로컬 파일이 소스가 된다. 없으면 `youtubeUrl`을 yt-dlp로 해석한다.
 - **YouTube URL 제약**: https 필수, 최대 200자, `youtube.com/watch?v=…`, `youtube.com/live/…`, `youtu.be/…` 형태만 허용. 이를 위반하는 소스는 기동 시 건너뛰고(경고 로그) 나머지 소스는 정상 기동한다.
@@ -48,7 +49,7 @@ YouTube 영상 URL 또는 로컬 비디오 파일을 소스로 삼아, streaming
 ## 핵심 로직 (동작)
 
 - **소스 선택 규칙**: 소스에 `localFile`이 있으면 yt-dlp를 사용하지 않고 그 파일을 재생한다. 없으면 yt-dlp로 URL을 해석하되, 해석은 30초 안에 끝나야 하며 실패는 해당 소스만의 error로 격리된다.
-- **재인코딩 필수(정규화)**: 어떤 소스든 출력은 항상 H.264 + AAC로 재인코딩된다(저비트레이트·저지연 정규화). 소스 코덱을 그대로 통과(copy)시키지 않는다. `-preset ultrafast`의 부작용으로 결과 스트림에 B-frame이 없으나, 이는 저지연 최적화의 부산물이지 허브 수락 조건이 아니다(허브는 B-frame을 수용).
+- **재인코딩 필수(정규화)**: 어떤 소스든 출력은 항상 H.264 + AAC로 재인코딩된다(저비트레이트·저지연 정규화). 소스 코덱을 그대로 통과(copy)시키지 않는다. **기본 `ENCODE_PRESET=ultrafast`에선 그 부작용으로 결과 스트림에 B-frame이 없으나, 이는 저지연 최적화의 부산물일 뿐 계약이 아니다** — `ENCODE_PRESET`을 다른 값으로 바꾸면 preset에 따라 B-frame 유무가 달라질 수 있다. 어느 경우든 허브 수락 조건과 무관하다(허브는 B-frame 포함 H.264를 수용). 즉 B-frame 유무는 preset 선택의 결과일 뿐 어댑터가 보장하는 출력 성질이 아니다.
 - **격리와 자가 복구**: 소스별로 독립 관리된다. 한 소스의 실패(yt-dlp 실패, FFmpeg 비정상 종료)는 다른 소스와 HTTP API에 영향을 주지 않는다. 실패한 소스는 지수 backoff(1s 시작, 상한 30s)로 무한 재시도하고, 정상 종료 후 재시작 시 backoff는 1s로 리셋된다. YouTube URL 소스는 스트림이 정상 종료되면 URL을 다시 해석해 재시작한다(항상 켜져 있음을 지향).
 - **reload 재조정(reconcile)**: reload 요청 시 web-backend 카메라 목록에서 `sourceType=youtube`이고 `enabled=true`이며 `streamKey`가 비어있지 않은 항목만 채택해 새 소스 집합으로 삼는다. 기존과 동일한(같은 식별자 + 같은 URL) 스트림은 중단 없이 계속 돌고, URL이 바뀌었거나 목록에서 사라진 스트림은 중지되며, 새 항목은 시작된다.
 - **설정 결함 내성**: 설정 파일이 없거나 파싱 불가여도 서비스는 스트림 0개로 기동한다(헬스 정상). 유효하지 않은 URL의 소스는 개별 건너뛴다.
@@ -69,6 +70,7 @@ YouTube 영상 URL 또는 로컬 비디오 파일을 소스로 삼아, streaming
 - H. **설정 결함 내성**: config 파일 없이(또는 깨진 JSON으로) 기동 → 컨테이너가 크래시하지 않고 `/healthz` 200, `/api/streams/status`가 빈 배열이면 OK.
 - I. **정상 종료**: 스트림 1개 송출 중 컨테이너에 SIGTERM → 컨테이너 종료 후 호스트/컨테이너에 잔존 ffmpeg 프로세스가 없으면 OK.
 - J. **인코딩 파라미터 주입**: `ENCODE_VIDEO_BITRATE=500k`, `ENCODE_GOP=30`, `ENCODE_AUDIO_BITRATE=64k`, `ENCODE_PRESET=veryfast`로 기동해 스트림 1개 송출 → 실행 중인 FFmpeg 프로세스의 인자에 `-b:v 500k`, `-g 30`, `-b:a 64k`, `-preset veryfast`가 그대로 반영되어 있으면 OK. 네 변수를 모두 미설정으로 기동하면 각각 `-b:v 300k`, `-g 60`, `-b:a 48k`, `-preset ultrafast`가 사용되면(기본값 불변) OK. 두 경우 모두 §단언 E(H.264+AAC 정규화)는 계속 성립해야 한다.
+- J-2. **무효 인코딩 값 폴백**: 무효값 `ENCODE_GOP=xyz`(정수 아님)로 기동해 스트림 1개 송출 → (a) 컨테이너가 크래시 루프에 빠지지 않고 `/healthz` 200을 유지하며, (b) 실행 중인 FFmpeg 인자에 기본값 `-g 60`이 사용되고(폴백), 경고 로그가 남으며, (c) 30초 이상 송출이 유지되고 §단언 E(H.264+AAC 정규화)가 성립하면 OK. (무효 `ENCODE_PRESET`도 동일하게 기본 `-preset ultrafast`로 폴백되어야 하며, 매 재시도마다 즉시 종료되는 크래시 루프가 관측되면 NOK.)
 
 ## ⚠️ 리뷰 필요 (의도 불확실)
 

@@ -45,6 +45,7 @@
   - `archiveId = {incidentId}_{streamKey}_{fromUTC(YYYYMMDD_HHMMSS)}` — 같은 (incident, streamKey, from)에 대한 중복 생성 요청은 기존 항목을 반환하며 새로 만들지 않는다.
   - MP4는 다운로드 완료 전에도 재생을 시작할 수 있는 형태(메타데이터 선행 배치)로 생성되며, 세그먼트들의 무손실 병합본이다.
 - **아카이브 메타데이터**: `{ARCHIVES_DIR}/metadata.json` — 전체 아카이브 목록의 SSOT. 상태 변화마다 저장되고 재시작 시 로드된다.
+  - 각 아카이브 항목은 병합 구간 경계 `from`/`to`(RFC3339, UTC)를 보유하며, 이 값은 **모든 비종단 상태(`protecting`·`pending`·`processing`·`finalizing`)에서 영속·보존된다** — 재시작 후 기동 복구가 원본 구간을 알 수 있는 근거다(§핵심 로직 7). 종단 전이(`completed`/`failed`) 시에도 유지된다.
 
 ### HTTP API (응답 계약 요지)
 
@@ -59,7 +60,7 @@
 | `POST /api/archives/protect` | (Phase 1) 202. incident별·streamKey별 상태 `protecting` 아카이브 항목 생성. `incidentTime − 1시간`부터의 세그먼트를 삭제 보호. 이후 도착하는 세그먼트도 주기적으로 계속 보호 |
 | `POST /api/archives/finalize` | (Phase 2) 해당 incident의 `protecting` 아카이브들을 `resolvedAt + 30분`을 종료 시각으로 백그라운드 병합 시작. `protecting`이 하나도 없으면 404. **종료 시각(`To`)은 메타 상한**이며 병합이 즉시 실행되므로 `resolvedAt`이 현재 시각에 가까우면 그 이후 post-roll 세그먼트는 디스크에 없어 MP4에 포함되지 않는다(과대표기 가능, ⚠️ 리뷰 필요 2) |
 | `POST /api/archives` | 임의 구간 즉시 아카이브(수동). 202 + 생성된 항목들. `incidentId` 생략 시 `manual_*` 자동 부여 |
-| `GET /api/archives` | 전체 아카이브 메타 배열. `status ∈ {protecting, pending, finalizing, processing, completed, failed}` |
+| `GET /api/archives` | 전체 아카이브 메타 배열. `status`는 **아카이브 status enum의 정본(정의 SSOT=본 스펙)**이며 정확히 6종 `{protecting, pending, finalizing, processing, completed, failed}` 중 하나다. 이 enum을 소비하는 web-frontend의 의무(6종 전부 처리·미지 상태 안전 fallback·`failed` 노출)는 [interface-web-api.md](interface-web-api.md) §계약 8이 판정 가능한 소비자 계약으로 규정한다 |
 | `GET /api/archives/{id}/download` | `completed`만 `video/mp4` + attachment로 서빙. 미완료면 409, 없으면 404 |
 | `DELETE /api/archives/{id}` | 아카이브 디렉터리·메타 삭제. 없으면 404 |
 | `DELETE /api/archives/incident/{incidentId}` | 해당 incident의 모든 아카이브 삭제 + 삭제 수 반환. 없으면 404 |
@@ -84,7 +85,7 @@
 6. **reconcile**: reload 시 streamKey 기준으로만 비교한다 — 새 key는 녹화 시작, 사라진 key는 SIGTERM(3초 후 SIGKILL)으로 중지. 동일 key의 다른 속성 변경은 녹화에 영향 없다. 카메라 목록 조회 실패는 "카메라 0대"와 동일하게 취급되어 실행 중인 모든 recorder가 중지된다 (⚠️ 8).
 7. **재시작 내성**: 메타데이터 JSON은 재시작 후 로드된다. `protecting` 아카이브는 보호 갱신 주기에 의해 재시작 후에도 세그먼트 보호가 복원된다.
    - **미완료 아카이브 복구 (기동 시)**: 병합은 in-process 작업이므로 재시작하면 스스로 이어지지 않는다. 따라서 로드 직후, 비종단(non-terminal) 상태이면서 `protecting`이 아닌 아카이브(`pending`·`processing`·`finalizing`)에 대해 기동 복구를 수행한다. 종단 상태는 `completed`·`failed` 두 가지뿐이며, 재시작을 넘겨 비종단 상태에 무기한 고착되는 아카이브는 없어야 한다.
-   - **보호 우선 재확립 (불변식)**: 복구 대상 아카이브의 병합 구간 `[from, to)`에 해당하는 세그먼트 보호는, **첫 롤링 정리 주기가 그 세그먼트를 삭제할 수 있기 이전에** 재확립된다. 즉 진행 중이던 병합에 필요한 원본 `.ts`가 재시작의 부작용으로 롤링 cleanup에 삭제되는 일은 없다.
+   - **보호 우선 재확립 (순서 계약)**: 기동 시퀀스는 **① metadata 로드 → ② 모든 복구 대상 아카이브(비종단·비-`protecting`)의 병합 구간 `[from, to)` 세그먼트를 보호 집합에 등록 → ③ 롤링 정리 루프의 최초 실행** 순서를 지킨다. 즉 복구 대상 보호 등록은 첫 cleanup 실행보다 **먼저 완료**된다(단순 순서 불변식 — 락·배리어 등 정교한 동기화는 요구하지 않는다). 결과적으로 진행 중이던 병합에 필요한 원본 `.ts`가 재시작의 부작용으로 롤링 cleanup에 삭제되는 일은 없다. 이 순서는 로그 마커로 관측 가능하다: 보호 재확립 완료 시 `Recovery protection re-established`를, cleanup 최초 실행 시 `Rolling cleanup started`를 남기며, 전자가 후자보다 먼저 나타난다.
    - **복구 방향 = 재개, 실패는 표식**: 재확립된 보호 위에서 병합을 다시 실행(재개)한다. 성공하면 `completed`(+크기), 필요한 세그먼트가 이미 소실되었거나 병합이 오류로 끝나면 `failed`(+사유)로 종단 전이시킨다. 어느 경우든 최종적으로 종단 상태에 도달한다.
 
 ## 검증 단언 (TDD)
@@ -106,7 +107,8 @@
 - **M. 자동 finalize**: `incidentTime`을 3시간 전으로 지정해 protect만 해두면, 60초 이내에 해당 아카이브가 `protecting`을 벗어나 `finalizing`/`processing`/`completed`/`failed` 중 하나로 전이된다 (로그에 `Auto-finalizing expired incident` 존재).
 - **N. 저장 통계**: `GET /api/storage` 응답에 `recordingsBytes`, `archivesBytes`, `totalUsedBytes`, `archiveCount`, `diskTotalBytes`, `diskAvailableBytes`가 모두 존재하고 0 이상의 수치다.
 - **O. 재시작 내성**: 아카이브가 1개 이상 있는 상태에서 컨테이너 재시작 후 `GET /api/archives` 결과가 재시작 전과 동일한 ID 집합을 반환한다 (`metadata.json` 로드). `protecting` 항목이 있었다면 재시작 60초 후에도 해당 구간 세그먼트가 롤링 삭제되지 않는다.
-- **P. 미완료 아카이브 복구**: `ROLLING_WINDOW_MINUTES=1` 환경에서, 병합 구간에 유효 세그먼트가 존재하는 아카이브의 `metadata.json` 상태를 `processing`(또는 `finalizing`)으로 조작해 둔 채 컨테이너를 재시작한다 → (a) 재시작 3분(윈도우의 3배) 후에도 그 구간의 원본 `.ts`가 롤링 삭제되지 않고 남아 있으며(보호 재확립), (b) 재시작 60초 이내에 해당 아카이브가 `processing`/`finalizing`을 벗어나 `completed`(재개 성공, `sizeBytes > 0` + MP4 생성) 또는 `failed`(+`lastError`/사유) 중 하나의 **종단 상태**로 전이한다. 어떤 아카이브도 재시작을 넘겨 `pending`/`processing`/`finalizing`에 무기한 머무르지 않으면 OK.
+- **P. 미완료 아카이브 복구 — 세그먼트 존재 → `completed` 수렴**: `ROLLING_WINDOW_MINUTES=1` 환경에서, **병합 구간에 유효 세그먼트가 존재하는** 아카이브의 `metadata.json` 상태를 `processing`·`finalizing`·`pending` 각각으로 조작해 둔 채 컨테이너를 재시작한다 → 각 setup에 대해 (a) 재시작 3분(윈도우의 3배) 후에도 그 구간의 원본 `.ts`가 롤링 삭제되지 않고 남아 있으며(보호 재확립), (b) 로그에서 `Recovery protection re-established`가 `Rolling cleanup started`보다 **먼저** 출현하고(보호 우선 순서 계약, §핵심 로직 7), (c) 재시작 60초 이내에 해당 아카이브가 비종단 상태를 벗어나 **`completed`**(재개 성공, `sizeBytes > 0` + MP4 생성)로 전이한다. 세 setup(`processing`/`finalizing`/`pending`) 모두에서 성립하면 OK. (세그먼트가 온전한데 `failed`로 끝나면 NOK — 유효 입력에 대한 판정은 `completed`로만 수렴해야 한다.)
+- **P-2. 미완료 아카이브 복구 — 세그먼트 소실 → `failed` 종단 강제**: `ROLLING_WINDOW_MINUTES=1` 환경에서, 아카이브의 `metadata.json` 상태를 비종단(`processing`·`finalizing`·`pending` 중 하나)으로 조작하되 **병합 구간 `[from, to)`에 필요한 원본 `.ts`를 모두 제거**(사전 롤링 삭제/아카이브 소실 재현)한 채 컨테이너를 재시작한다 → 재시작 60초 이내에 해당 아카이브가 **`failed`**로 종단 전이하고 `lastError`(사유)가 비어있지 않다. 세그먼트가 없는데 `completed`가 되거나(불가능한 성공 표기), 60초를 넘겨 비종단 상태에 머무르면 NOK. 어떤 아카이브도 재시작을 넘겨 `pending`/`processing`/`finalizing`에 무기한 고착되지 않아야 하며, 복구 불가 케이스는 반드시 `failed`+사유로 종단해야 한다.
 
 ## ⚠️ 리뷰 필요 (의도 불확실)
 
@@ -116,5 +118,5 @@
 4. ~~재시작 시 진행 중(`pending`/`processing`/`finalizing`) 아카이브가 영구히 그 상태로 남음.~~ **[해소 — 계약화됨]** §핵심 로직 7 "미완료 아카이브 복구"로 승격. 기동 시 비종단·비-`protecting` 아카이브는 보호를 우선 재확립한 뒤 병합을 재개하고, 재개 불가 시 `failed`로 종단 전이한다(단언 P). 재시작을 넘겨 비종단 상태에 고착되는 아카이브는 없다.
 5. **타임존 없는 시간 형식(`"2006-01-02 15:04:05"`)을 UTC로 해석.** protect/finalize의 fallback 파싱이 UTC 가정이라, 호출자가 로컬(KST) 시각을 보내면 보호 구간이 9시간 어긋난다. 이 fallback을 쓰는 호출자가 UTC를 보내는 것이 계약인지 확인 필요.
 6. **watchdog이 "출력 없음 = 고장"을 전제.** FFmpeg를 `-loglevel warning`으로 실행하므로 완전히 정상인 프로세스가 `FFMPEG_TIMEOUT`(기본 60초) 동안 아무 출력도 내지 않으면 건강한 녹화가 주기적으로 강제 재시작될 수 있다(재시작 순간 수 초 유실). 실운영에서 FFmpeg의 주기적 stderr 출력(진행 stats 등)에 의존하는 구조가 의도인지 확인 필요.
-7. **문서와 상태 enum 불일치.** 서비스 문서·메타 주석의 상태 목록에는 `finalizing`이 없으나 실제로 이 상태가 존재한다. 소비자(web-backend/프론트)가 미지의 상태를 안전하게 처리하는지 확인 필요.
+7. **문서와 상태 enum 불일치 — P/P-2 도입으로 노출 증가.** 서비스 문서·메타 주석의 일부 상태 목록에는 `finalizing`이 없으나 실제로 이 상태가 존재한다. 본 스펙의 정본 enum은 §출력 `GET /api/archives`의 `status ∈ {protecting, pending, finalizing, processing, completed, failed}` 6종이다 — **enum 값 정의의 SSOT는 본 스펙이 단독 소유**한다. 이 enum을 소비하는 web-frontend의 의무(6종 전부 처리·미지 상태 안전 fallback·`failed` 노출)는 [docs/spec/interface-web-api.md](interface-web-api.md) §계약 8이 **판정 가능한 소비자 계약**으로 규정한다(값 나열은 본 스펙 참조, 소비자 의무 자체는 §계약 8 소유). **주의: 단언 P(재개→`completed`)·P-2(소실→`failed`) 계약화로 기동 복구 중 `finalizing`/`processing`/`failed` 상태가 소비자에게 노출될 확률이 증가**했으므로 §계약 8의 소비자 계약이 이를 강제한다.
 8. **reload가 web-backend 조회 실패를 "카메라 0대"와 구분하지 못함.** 카메라 목록 조회가 연결 오류·본문 디코드 실패로 실패해도(HTTP 상태코드는 검사하지 않음) 오류를 반환하지 않고 빈 목록으로 reconcile하여 **모든 recorder를 중지**시키고 200 `{"status":"reloaded","cameras":0}`을 반환한다. 같은 접면을 쓰는 cctv-adapter(조회 실패 시 502/500 + 기존 push 유지)·youtube-adapter(조회 실패 시 500 + 기존 스트림 유지)와 비대칭이며, web-backend 일시 장애 중 reload 한 번으로 전체 녹화가 끊길 수 있다. 실패 시 기존 recorder 유지 + 오류 응답이 의도인지 확인 필요.

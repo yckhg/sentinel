@@ -1,8 +1,9 @@
 # Web API — Sentinel
 
-> **이 문서는 Sentinel web-backend HTTP/WebSocket 인터페이스의 SSOT입니다.**
-> web-frontend / 모바일 클라이언트 / 외부 통합 세션이 이 문서 하나로 backend와 통신할 수 있습니다.
-> 코드와 동기화 의무 — `services/web-backend/` 라우트/응답 변경 시 본 문서도 같은 커밋에 수정.
+> **이 문서는 orchestrator용 요약(navigational overview)입니다. 계약의 정본(SSOT)은 [`docs/spec/interface-web-api.md`](../spec/interface-web-api.md)입니다.**
+> web-frontend / 모바일 클라이언트 / 외부 통합 세션은 빠른 조망을 위해 이 문서를 읽되, **판정 가능한 계약·검증 단언이 필요하면 반드시 정본을 참조**합니다. 두 문서가 충돌하면 정본이 이깁니다.
+> 코드와 동기화 의무 — `services/web-backend/` 라우트/응답 변경 시 **정본**을 같은 커밋에 수정하고, 본 요약도 함께 맞춘다.
+> ⚠️ 정책 주의: 프로젝트 CLAUDE.md는 `docs/interfaces/`를 "인터페이스 SSOT"로 소개하나, web-api 접면의 실제 living-contract SSOT는 `docs/spec/interface-web-api.md`가 자기선언·소유한다(삼중 SSOT 혼선 해소를 위해 본 문서는 요약으로 격하). 상위 문서 문구 정합은 orchestrator 확인 필요.
 
 ---
 
@@ -378,6 +379,8 @@ Body 불필요. hw-gateway `/api/test-alert`에 `{siteId:"test", deviceId:"TEST-
 | GET | `/api/storage` | 스토리지 사용량 통계 |
 
 요청/응답 body는 recording 서비스 통과 원본. HLS(`application/vnd.apple.mpegurl`) 컨텐츠는 그대로 forward.
+
+**소비자 계약 — 아카이브 status enum**: `GET /api/archives` 각 항목의 `status`는 정확히 6종 `{protecting, pending, finalizing, processing, completed, failed}` 중 하나다. **enum 값 정의의 정본(SSOT)은 recording 스펙**([`docs/spec/recording.md`](../spec/recording.md) §출력·§HTTP API)이 단독 소유하고, **이를 소비하는 프론트의 의무는 계약으로 [`docs/spec/interface-web-api.md`](../spec/interface-web-api.md) §계약 8이 규정**한다(정의=recording, 소비자 의무=§계약 8 — 두 소유가 분리됨). 프론트/소비자 의무: 6종 **전부**를 처리하고, 미지 상태가 오면 **안전 fallback**(미완료로 취급, 임의 완료 표시 금지)하며, `failed`(+사유)는 미완료 아카이브 기동 복구 실패 시 종단 상태이므로 UI에 실패로 명시 노출한다. 기동 복구(recording 스펙 단언 P/P-2) 도입으로 재시작 직후 `finalizing`·`processing`·`failed` 상태가 소비자에게 노출될 확률이 증가했다.
 
 ---
 
