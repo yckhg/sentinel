@@ -963,8 +963,20 @@ func handleNotify(cfg Config, dedup *dedupCache) http.HandlerFunc {
 			return
 		}
 
-		// Dispatch notifications asynchronously
+		// Dispatch notifications asynchronously.
 		go func() {
+			// §출력 6 / assertion P: archive protection runs CONCURRENTLY with the
+			// contact dispatch and is NOT gated on channel completion — it must be
+			// triggered immediately so its log precedes the first channel-attempt
+			// completion (and the dispatch summary). Start it before blocking on
+			// dispatch, then join both.
+			var pwg sync.WaitGroup
+			pwg.Add(1)
+			go func() {
+				defer pwg.Done()
+				requestArchiveProtect(cfg, alert)
+			}()
+
 			contactCount, results := dispatchNotifications(cfg, alert)
 			successCount := 0
 			channels := map[string]int{}
@@ -977,8 +989,7 @@ func handleNotify(cfg Config, dedup *dedupCache) http.HandlerFunc {
 			logf("[notify] Dispatch complete: %d/%d contacts notified (kakao:%d sms:%d failed:%d)",
 				successCount, contactCount, channels["kakaotalk"], channels["sms"], contactCount-successCount)
 
-			// Request segment protection for this incident (Phase 1 of two-phase archiving)
-			requestArchiveProtect(cfg, alert)
+			pwg.Wait()
 		}()
 
 		// Return immediately (accepted, processing async)
