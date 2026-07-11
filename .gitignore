@@ -10,8 +10,14 @@ build/
 *.o
 *.so
 
-# Go compiled binary (web-backend build output)
+# Go compiled binaries (build output — name matches the service directory)
 services/web-backend/web-backend
+services/hw-gateway/hw-gateway
+services/cctv-adapter/cctv-adapter
+services/youtube-adapter/youtube-adapter
+services/streaming/streaming
+services/notifier/notifier
+services/recording/recording
 
 # Environment
 .env

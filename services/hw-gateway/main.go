@@ -228,9 +228,26 @@ func main() {
 		handleAlertResolvedPublish(w, r, mqttClient)
 	})
 
+	srv := newHTTPServer(mux)
+
 	log.Println("hw-gateway listening on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// newHTTPServer builds the service HTTP server with hardened timeouts. Without
+// them ReadHeaderTimeout/ReadTimeout/IdleTimeout default to 0 (unlimited) and a
+// slow/malicious client can trickle headers or body to hold goroutines/sockets
+// open indefinitely (Slowloris) — critical for a safety control entrypoint.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ":8080",
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 
