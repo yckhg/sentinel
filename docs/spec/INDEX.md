@@ -17,7 +17,7 @@
 
 | Spec | 테스트 위치 | 최근 판정 (2026-07-10) |
 |---|---|---|
-| [hw-gateway.md](hw-gateway.md) | `tests/spec/hw-gateway/` | OK 1 · NOK 0 · SKIP 16 |
+| [hw-gateway.md](hw-gateway.md) | `tests/spec/hw-gateway/` | **OK 22코어+f2/e2 · NOK 0 · SKIP 1 (a3 per-topic SUBACK=load-bearing, 유닛 대체커버)** (2026-07-11 spec/followup-2 재검증, Go unit 9/9) |
 | [notifier.md](notifier.md) | `tests/spec/notifier/` | OK 8 · NOK 0 · SKIP 2 (최후 보루 79/79 401 = 드리프트) |
 | [streaming.md](streaming.md) | `tests/spec/streaming/` | OK 3 · NOK 0 · SKIP 5 (healthz 게이트 false-NOK 버그) |
 | [cctv-adapter.md](cctv-adapter.md) | `tests/spec/cctv-adapter/` | OK 2 · NOK 0 · SKIP 9 (카메라 0대 구성) |
