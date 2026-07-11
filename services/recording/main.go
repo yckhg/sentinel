@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +20,16 @@ import (
 	"syscall"
 	"time"
 )
+
+// pathComponentRe matches a safe single path segment used to build filesystem
+// paths (stream keys, incident IDs). It permits only alphanumerics, '_' and '-',
+// which structurally excludes path separators and ".." traversal. (#73)
+var pathComponentRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// isValidPathComponent reports whether s is safe to use as a path segment.
+func isValidPathComponent(s string) bool {
+	return pathComponentRe.MatchString(s)
+}
 
 // CameraInfo represents a camera to record.
 type CameraInfo struct {
@@ -691,6 +702,11 @@ func (am *ArchiveManager) ListArchives() []ArchiveMetadata {
 // CreateArchive creates an archive for the given parameters.
 // It protects segments, merges them into MP4, and stores metadata.
 func (am *ArchiveManager) CreateArchive(incidentID, streamKey string, from, to time.Time) (*ArchiveMetadata, error) {
+	// Reject traversal-bearing identifiers before they are joined into paths. (#73)
+	if !isValidPathComponent(incidentID) || !isValidPathComponent(streamKey) {
+		return nil, fmt.Errorf("invalid incidentId or streamKey")
+	}
+
 	archiveID := fmt.Sprintf("%s_%s_%s", incidentID, streamKey, from.UTC().Format("20060102_150405"))
 
 	// Check for duplicate
@@ -936,7 +952,16 @@ func (am *ArchiveManager) ProtectIncidentSegments(incidentID string, streamKeys 
 	now := time.Now().UTC()
 
 	var created []ArchiveMetadata
+	// Reject traversal-bearing identifiers before they are joined into paths. (#73)
+	if !isValidPathComponent(incidentID) {
+		log.Printf("[archive] Rejecting invalid incidentId %q", incidentID)
+		return created
+	}
 	for _, streamKey := range streamKeys {
+		if !isValidPathComponent(streamKey) {
+			log.Printf("[archive] Skipping invalid streamKey %q", streamKey)
+			continue
+		}
 		archiveID := fmt.Sprintf("%s_%s_%s", incidentID, streamKey, protectFrom.UTC().Format("20060102_150405"))
 
 		// Check for duplicate
@@ -1403,6 +1428,12 @@ func main() {
 		streamKey := r.PathValue("stream_key")
 		filename := r.PathValue("filename")
 
+		// Validate streamKey (previously only filename was checked — asymmetric). (#73)
+		if !isValidPathComponent(streamKey) {
+			http.Error(w, "invalid stream key", http.StatusBadRequest)
+			return
+		}
+
 		// Validate filename to prevent path traversal
 		if strings.Contains(filename, "/") || strings.Contains(filename, "\\") || strings.Contains(filename, "..") {
 			http.Error(w, "invalid filename", http.StatusBadRequest)
@@ -1439,6 +1470,22 @@ func main() {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": "streamKeys is required"})
 			return
+		}
+
+		// Reject traversal-bearing identifiers up front. (#73)
+		if req.IncidentID != "" && !isValidPathComponent(req.IncidentID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid incidentId"})
+			return
+		}
+		for _, sk := range req.StreamKeys {
+			if !isValidPathComponent(sk) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid streamKey"})
+				return
+			}
 		}
 
 		from, err := time.Parse(time.RFC3339, req.From)
@@ -1497,6 +1544,22 @@ func main() {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": "incidentId, streamKeys, and incidentTime are required"})
 			return
+		}
+
+		// Reject traversal-bearing identifiers up front. (#73)
+		if !isValidPathComponent(req.IncidentID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid incidentId"})
+			return
+		}
+		for _, sk := range req.StreamKeys {
+			if !isValidPathComponent(sk) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid streamKey"})
+				return
+			}
 		}
 
 		incidentTime, err := time.Parse(time.RFC3339, req.IncidentTime)
