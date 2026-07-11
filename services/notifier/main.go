@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -109,6 +111,10 @@ type Config struct {
 
 	// DedupWindow is the incident dedup window (§출력 12). <=0 disables dedup.
 	DedupWindow time.Duration
+	// ChannelRetryMax / ChannelRetryBackoff drive the pre-fallback same-channel
+	// retry on fast transient errors (§출력 13).
+	ChannelRetryMax     int
+	ChannelRetryBackoff time.Duration
 }
 
 func loadConfig() Config {
@@ -131,6 +137,10 @@ func loadConfig() Config {
 
 		// §출력 12: default a conservative short window (60s); 0 disables dedup.
 		DedupWindow: time.Duration(getEnvInt("DEDUP_WINDOW_SECONDS", 60)) * time.Second,
+		// §출력 13: default a small retry cap (1) + short backoff (200ms) so the
+		// retry stays inside the §출력 7 per-channel 12s budget. 0 → immediate fallback.
+		ChannelRetryMax:     getEnvInt("CHANNEL_RETRY_MAX", 1),
+		ChannelRetryBackoff: time.Duration(getEnvInt("CHANNEL_RETRY_BACKOFF_MS", 200)) * time.Millisecond,
 	}
 }
 
@@ -281,6 +291,69 @@ func (d *dedupCache) checkAndRecord(key string, window time.Duration, now time.T
 	return false
 }
 
+// --- External-Channel Retry (§출력 13 / assertion O) ---
+
+// isTimeoutErr reports whether err is a request timeout (response-header/overall
+// deadline). Timeouts are NOT retried — the time budget is already spent, so a
+// retry would only add crisis latency; we fall back immediately instead.
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return ne.Timeout()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return os.IsTimeout(err)
+}
+
+// perChannelCap bounds one external channel's total wall time incl. retries (§출력 7).
+const perChannelCap = 12 * time.Second
+
+// sendChannelWithRetry drives a single external channel with immediate same-channel
+// retry (§출력 13). `once` performs one send attempt and returns (retryable, err):
+// retryable is true only for FAST transient failures (5xx / connection-refused) —
+// timeouts and permanent failures (channel disabled, credentials missing) return
+// retryable=false and fall back immediately. Retries are capped by max, spaced by
+// backoff, and never started if they would breach the §출력 7 12s per-channel cap.
+func sendChannelWithRetry(channel, name, phone string, max int, backoff time.Duration, once func() (bool, error)) error {
+	if max < 0 {
+		max = 0
+	}
+	start := time.Now()
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		retryable, err := once()
+		if err == nil {
+			if attempt > 0 {
+				logf("[%s] Retry succeeded on attempt %d for %s (%s)", channel, attempt+1, name, phone)
+			}
+			return nil
+		}
+		lastErr = err
+		if !retryable {
+			// Timeout or permanent failure → no retry, immediate fallback.
+			return lastErr
+		}
+		if attempt >= max {
+			if max > 0 {
+				logf("[%s] Retries exhausted (max=%d) for %s (%s), falling back: %v", channel, max, name, phone, err)
+			}
+			return lastErr
+		}
+		if time.Since(start)+backoff >= perChannelCap {
+			logf("[%s] Retry budget (12s) reached for %s (%s), falling back: %v", channel, name, phone, err)
+			return lastErr
+		}
+		logf("[%s] Transient failure for %s (%s), retrying same channel (attempt %d/%d): %v",
+			channel, name, phone, attempt+1, max, err)
+		time.Sleep(backoff)
+	}
+}
+
 // --- Settings Fetching ---
 
 // fetchSiteURL reads site_url from web-backend's internal settings API.
@@ -358,10 +431,15 @@ func requestTempLink(cfg Config, label string) (*TempLinkResponse, error) {
 
 // --- KakaoTalk 알림톡 Sending ---
 
-func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
+// sendKakaoTalkOnce performs a single KakaoTalk send attempt and classifies the
+// failure for the retry driver (§출력 13): the first return value is `retryable` —
+// true only for fast transient errors (5xx or a non-timeout transport error such
+// as connection-refused). Timeouts and permanent failures (unconfigured channel)
+// return retryable=false so the caller falls back immediately without retrying.
+func sendKakaoTalkOnce(cfg Config, contact Contact, alert AlertPayload, cctvLink string) (bool, error) {
 	if cfg.KakaoAPIURL == "" || cfg.KakaoAPIKey == "" {
 		logf("[kakao] API not configured, skipping KakaoTalk for %s (%s)", contact.Name, contact.Phone)
-		return fmt.Errorf("KakaoTalk API not configured")
+		return false, fmt.Errorf("KakaoTalk API not configured") // permanent → no retry
 	}
 
 	description := alert.Description
@@ -386,12 +464,12 @@ func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink str
 
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
-		return fmt.Errorf("marshal kakao request: %w", err)
+		return false, fmt.Errorf("marshal kakao request: %w", err)
 	}
 
 	req, err := http.NewRequest("POST", cfg.KakaoAPIURL+"/v1/alimtalk/send", bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("create kakao request: %w", err)
+		return false, fmt.Errorf("create kakao request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Api-Key", cfg.KakaoAPIKey)
@@ -399,25 +477,30 @@ func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink str
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("kakao API call: %s", scrub(err.Error()))
+		// Transport error: retry only fast failures (connection-refused etc.),
+		// never timeouts (§출력 13 — timeout already spent the budget).
+		return !isTimeoutErr(err), fmt.Errorf("kakao API call: %s", scrub(err.Error()))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("kakao API error: status %d, body: %s", resp.StatusCode, string(body))
+		// 5xx is a fast transient server error → retryable; 4xx is permanent.
+		return resp.StatusCode >= 500, fmt.Errorf("kakao API error: status %d, body: %s", resp.StatusCode, string(body))
 	}
 
 	logf("[kakao] Successfully sent to %s (%s)", contact.Name, contact.Phone)
-	return nil
+	return false, nil
 }
 
 // --- NHN Cloud SMS Sending ---
 
-func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
+// sendSMSOnce performs a single SMS send attempt and classifies the failure for
+// the retry driver exactly like sendKakaoTalkOnce (§출력 13).
+func sendSMSOnce(cfg Config, contact Contact, alert AlertPayload, cctvLink string) (bool, error) {
 	if cfg.NHNAppKey == "" || cfg.NHNSecretKey == "" {
 		logf("[sms] NHN Cloud SMS not configured, skipping SMS for %s (%s)", contact.Name, contact.Phone)
-		return fmt.Errorf("NHN Cloud SMS not configured")
+		return false, fmt.Errorf("NHN Cloud SMS not configured") // permanent → no retry
 	}
 
 	prefix := "[위기알림]"
@@ -440,13 +523,13 @@ func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) e
 
 	payload, err := json.Marshal(smsReq)
 	if err != nil {
-		return fmt.Errorf("marshal SMS request: %w", err)
+		return false, fmt.Errorf("marshal SMS request: %w", err)
 	}
 
 	url := fmt.Sprintf("https://api-sms.cloud.toast.com/sms/v3.0/appKeys/%s/sender/sms", cfg.NHNAppKey)
 	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("create SMS request: %w", err)
+		return false, fmt.Errorf("create SMS request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	req.Header.Set("X-Secret-Key", cfg.NHNSecretKey)
@@ -456,18 +539,18 @@ func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) e
 		// The request URL embeds NHN_SMS_APP_KEY; a transport error (*url.Error)
 		// carries the full URL, so scrub it here so the credential cannot leak
 		// through any downstream consumer of this error (logs, system-alarm
-		// payload, dispatch result).
-		return fmt.Errorf("SMS API call: %s", scrub(err.Error()))
+		// payload, dispatch result). Retry fast failures, not timeouts (§출력 13).
+		return !isTimeoutErr(err), fmt.Errorf("SMS API call: %s", scrub(err.Error()))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("SMS API error: status %d, body: %s", resp.StatusCode, string(respBody))
+		return resp.StatusCode >= 500, fmt.Errorf("SMS API error: status %d, body: %s", resp.StatusCode, string(respBody))
 	}
 
 	logf("[sms] Successfully sent to %s (%s)", contact.Name, contact.Phone)
-	return nil
+	return false, nil
 }
 
 // --- Crisis Email ---
@@ -716,7 +799,8 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 				kakaoErr = fmt.Errorf("KakaoTalk disabled (KAKAO_ENABLED=false)")
 				logf("[notify] KakaoTalk skipped for %s (%s) — channel disabled, proceeding to SMS/fallback", c.Name, c.Phone)
 			} else {
-				kakaoErr = sendKakaoTalk(cfg, c, alert, cctvLink)
+				kakaoErr = sendChannelWithRetry("kakao", c.Name, c.Phone, cfg.ChannelRetryMax, cfg.ChannelRetryBackoff,
+					func() (bool, error) { return sendKakaoTalkOnce(cfg, c, alert, cctvLink) })
 				if kakaoErr == nil {
 					result.Channel = "kakaotalk"
 					result.Success = true
@@ -735,7 +819,8 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 				smsErr = fmt.Errorf("SMS disabled (SMS_ENABLED=false)")
 				logf("[notify] SMS skipped for %s (%s) — channel disabled, proceeding to system alarm", c.Name, c.Phone)
 			} else {
-				smsErr = sendSMS(cfg, c, alert, cctvLink)
+				smsErr = sendChannelWithRetry("sms", c.Name, c.Phone, cfg.ChannelRetryMax, cfg.ChannelRetryBackoff,
+					func() (bool, error) { return sendSMSOnce(cfg, c, alert, cctvLink) })
 				if smsErr == nil {
 					result.Channel = "sms"
 					result.Success = true
@@ -1131,8 +1216,8 @@ func main() {
 	mux.HandleFunc("POST /api/notify", handleNotify(cfg, dedup))
 	mux.HandleFunc("POST /api/send-email", handleSendEmail(cfg))
 
-	logf("notifier listening on :8080 (kakao configured: %v, sms configured: %v, smtp configured: %v, frontend: %s, dedup: %s)",
-		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "", cfg.SMTPHost != "", cfg.FrontendURL, cfg.DedupWindow)
+	logf("notifier listening on :8080 (kakao configured: %v, sms configured: %v, smtp configured: %v, frontend: %s, dedup: %s, retryMax: %d)",
+		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "", cfg.SMTPHost != "", cfg.FrontendURL, cfg.DedupWindow, cfg.ChannelRetryMax)
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatal(err)
 	}
