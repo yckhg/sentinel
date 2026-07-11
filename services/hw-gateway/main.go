@@ -228,12 +228,26 @@ func main() {
 		handleAlertResolvedPublish(w, r, mqttClient)
 	})
 
-	srv := newHTTPServer(mux)
+	srv := newHTTPServer(maxBytesMiddleware(mux))
 
 	log.Println("hw-gateway listening on :8080")
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// maxRequestBodyBytes caps request bodies (#41): the control endpoints accept
+// only small JSON, so 1 MB prevents memory exhaustion from oversized bodies.
+const maxRequestBodyBytes = 1 << 20 // 1 MB
+
+// maxBytesMiddleware wraps every request body in an http.MaxBytesReader so a
+// handler that decodes an oversized body gets an error (→ 400) instead of
+// buffering unbounded data. GET/HEAD requests without a body are unaffected.
+func maxBytesMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // newHTTPServer builds the service HTTP server with hardened timeouts. Without

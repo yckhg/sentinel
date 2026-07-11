@@ -190,7 +190,7 @@ func main() {
 
 	startLinkCleanup()
 
-	srv := newHTTPServer(mux)
+	srv := newHTTPServer(maxBytesMiddleware(mux))
 
 	// Graceful shutdown (#40): on SIGTERM/SIGINT stop the health monitor and
 	// drain in-flight HTTP requests via srv.Shutdown before exiting, instead of
@@ -213,6 +213,21 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+// maxRequestBodyBytes caps request bodies (#41). JSON payloads here are tiny;
+// 1 MB is generous while preventing memory exhaustion from oversized bodies sent
+// to unauthenticated endpoints (/auth/register, /auth/login, /internal/*).
+const maxRequestBodyBytes = 1 << 20 // 1 MB
+
+// maxBytesMiddleware wraps every request body in an http.MaxBytesReader so a
+// handler that decodes an oversized body gets an error (→ 400) instead of
+// buffering unbounded data. GET/HEAD requests without a body are unaffected.
+func maxBytesMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // newHTTPServer builds the service HTTP server with hardened timeouts. Without

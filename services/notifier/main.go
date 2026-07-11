@@ -1053,7 +1053,7 @@ func main() {
 	mux.HandleFunc("POST /api/notify", handleNotify(cfg))
 	mux.HandleFunc("POST /api/send-email", handleSendEmail(cfg))
 
-	srv := newHTTPServer(mux)
+	srv := newHTTPServer(maxBytesMiddleware(mux))
 
 	// Graceful shutdown (#40): on SIGTERM/SIGINT stop accepting new requests
 	// (srv.Shutdown), then wait for crisis-alert dispatch goroutines already in
@@ -1099,6 +1099,21 @@ func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
 	case <-time.After(d):
 		return false
 	}
+}
+
+// maxRequestBodyBytes caps request bodies (#41). Previously only /api/send-email
+// bounded its body (1 MB) while its sibling /api/notify did not; this middleware
+// applies the same limit uniformly so an unbounded body cannot exhaust memory.
+const maxRequestBodyBytes = 1 << 20 // 1 MB
+
+// maxBytesMiddleware wraps every request body in an http.MaxBytesReader so a
+// handler that decodes an oversized body gets an error (→ 400) instead of
+// buffering unbounded data. GET/HEAD requests without a body are unaffected.
+func maxBytesMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // newHTTPServer builds the service HTTP server with hardened timeouts. Without
