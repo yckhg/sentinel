@@ -451,6 +451,10 @@ func (rm *RecordingManager) IsProtected(path string) bool {
 	return rm.protected[path]
 }
 
+// zeroByteGrace is how long a 0-byte segment must be untouched before cleanup
+// will reap it, protecting freshly-created segments still being written. (#80)
+var zeroByteGrace = 60 * time.Second
+
 // CleanupOldSegments deletes .ts files older than the rolling window.
 func (rm *RecordingManager) CleanupOldSegments(rollingWindow time.Duration) {
 	entries, err := os.ReadDir(rm.recordingsDir)
@@ -477,12 +481,17 @@ func (rm *RecordingManager) CleanupOldSegments(rollingWindow time.Duration) {
 			}
 			fullPath := filepath.Join(streamDir, f.Name())
 
-			// Delete 0-byte segments unconditionally (even if protected)
+			// A segment ffmpeg just created can momentarily be 0 bytes before the
+			// first flush. Only reap 0-byte files once they have been stale for a
+			// grace period, so an actively-writing segment is never deleted out
+			// from under the recorder. (#80)
 			info, infoErr := f.Info()
 			if infoErr == nil && info.Size() == 0 {
-				if err := os.Remove(fullPath); err == nil {
-					log.Printf("[cleanup] Deleted empty segment: %s", f.Name())
-					deleted++
+				if time.Since(info.ModTime()) > zeroByteGrace {
+					if err := os.Remove(fullPath); err == nil {
+						log.Printf("[cleanup] Deleted stale empty segment: %s", f.Name())
+						deleted++
+					}
 				}
 				continue
 			}
