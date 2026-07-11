@@ -92,7 +92,17 @@ export default function HLSPlayer({
   return (
     <div
       className={`camera-cell${expanded ? " expanded" : ""}`}
+      role="button"
+      tabIndex={0}
+      aria-pressed={expanded}
+      aria-label={`${cameraName} ${expanded ? "축소" : "확대"}`}
       onClick={onToggleExpand}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onToggleExpand();
+        }
+      }}
     >
       <video
         ref={videoRef}

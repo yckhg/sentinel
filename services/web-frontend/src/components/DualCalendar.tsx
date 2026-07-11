@@ -94,13 +94,18 @@ function MonthCalendar({
               if (isEnd && startDate) cls += " dc-day-range-end";
 
               return (
-                <div
+                <button
                   key={ci}
+                  type="button"
                   className={cls}
+                  disabled={isFuture}
+                  aria-label={dateStr}
+                  aria-pressed={isSelected}
+                  aria-current={isToday ? "date" : undefined}
                   onClick={isFuture ? undefined : () => onDayClick(dateStr)}
                 >
                   {d}
-                </div>
+                </button>
               );
             })}
           </div>

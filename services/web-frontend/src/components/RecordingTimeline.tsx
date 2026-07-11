@@ -216,6 +216,24 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
     setDragging(null);
   };
 
+  // Keyboard support for the selection handles (custom slider). Arrow keys nudge
+  // the handle; Home/End jump to the bounds.
+  const HANDLE_STEP = 0.02;
+  const handleHandleKeyDown = (e: React.KeyboardEvent, handle: "start" | "end") => {
+    let delta = 0;
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") delta = -HANDLE_STEP;
+    else if (e.key === "ArrowRight" || e.key === "ArrowUp") delta = HANDLE_STEP;
+    else if (e.key === "Home") delta = -1;
+    else if (e.key === "End") delta = 1;
+    else return;
+    e.preventDefault();
+    if (handle === "start") {
+      setSelStart((s) => Math.max(0, Math.min(selEnd - 0.01, s + delta)));
+    } else {
+      setSelEnd((en) => Math.max(selStart + 0.01, Math.min(1, en + delta)));
+    }
+  };
+
   // Click on timeline bar to seek to that position for playback
   const handleTimelineClick = (e: React.MouseEvent) => {
     if (dragging) return; // Don't seek while dragging handles
@@ -467,14 +485,30 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
         <div
           className={`rec-timeline-handle rec-timeline-handle-start${dragging === "start" ? " dragging" : ""}`}
           style={{ left: `${selStart * 100}%` }}
+          role="slider"
+          tabIndex={0}
+          aria-label="구간 시작"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(selStart * 100)}
+          aria-valuetext={formatTimeWithSec(selFromTime)}
           onPointerDown={(e) => handlePointerDown(e, "start")}
+          onKeyDown={(e) => handleHandleKeyDown(e, "start")}
         />
 
         {/* End handle */}
         <div
           className={`rec-timeline-handle rec-timeline-handle-end${dragging === "end" ? " dragging" : ""}`}
           style={{ left: `${selEnd * 100}%` }}
+          role="slider"
+          tabIndex={0}
+          aria-label="구간 종료"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(selEnd * 100)}
+          aria-valuetext={formatTimeWithSec(selToTime)}
           onPointerDown={(e) => handlePointerDown(e, "end")}
+          onKeyDown={(e) => handleHandleKeyDown(e, "end")}
         />
       </div>
 

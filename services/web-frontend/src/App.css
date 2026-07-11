@@ -964,6 +964,15 @@ body {
   border-radius: 4px;
   transition: background 0.1s;
   user-select: none;
+  /* dc-day is a <button> for keyboard/screen-reader access — strip the
+     native button chrome so it renders like the surrounding grid cells. */
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  color: inherit;
+  width: 100%;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .dc-day:hover:not(.dc-day-empty):not(.dc-day-disabled) {
