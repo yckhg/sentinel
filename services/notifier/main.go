@@ -191,6 +191,44 @@ func maskSecret(s string) string {
 	return s[:n] + "***"
 }
 
+// maskPhone redacts the middle of a phone number for logs, keeping the leading
+// 3 and trailing 4 digits (e.g. "010-****-5678"). Numbers with fewer than 7
+// digits are fully masked. Empty input stays empty. PII (phone/email) must not
+// be logged in plaintext (#43).
+func maskPhone(p string) string {
+	if p == "" {
+		return ""
+	}
+	digits := make([]byte, 0, len(p))
+	for i := 0; i < len(p); i++ {
+		if p[i] >= '0' && p[i] <= '9' {
+			digits = append(digits, p[i])
+		}
+	}
+	if len(digits) < 7 {
+		return "****"
+	}
+	d := string(digits)
+	return d[:3] + "-****-" + d[len(d)-4:]
+}
+
+// maskEmail redacts the local part of an email for logs, keeping only its first
+// character (e.g. "j***@example.com"). Empty input stays empty (#43).
+func maskEmail(e string) string {
+	if e == "" {
+		return ""
+	}
+	at := strings.LastIndex(e, "@")
+	if at <= 0 {
+		return "***"
+	}
+	local, domain := e[:at], e[at:]
+	if len(local) == 1 {
+		return "*" + domain
+	}
+	return local[:1] + strings.Repeat("*", len(local)-1) + domain
+}
+
 // scrub redacts any occurrence of a configured secret plaintext from s.
 func scrub(s string) string {
 	for _, sec := range secretValues {
@@ -296,7 +334,7 @@ func requestTempLink(cfg Config, label string) (*TempLinkResponse, error) {
 
 func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
 	if cfg.KakaoAPIURL == "" || cfg.KakaoAPIKey == "" {
-		logf("[kakao] API not configured, skipping KakaoTalk for %s (%s)", contact.Name, contact.Phone)
+		logf("[kakao] API not configured, skipping KakaoTalk for %s (%s)", contact.Name, maskPhone(contact.Phone))
 		return fmt.Errorf("KakaoTalk API not configured")
 	}
 
@@ -344,7 +382,7 @@ func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink str
 		return fmt.Errorf("kakao API error: status %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	logf("[kakao] Successfully sent to %s (%s)", contact.Name, contact.Phone)
+	logf("[kakao] Successfully sent to %s (%s)", contact.Name, maskPhone(contact.Phone))
 	return nil
 }
 
@@ -352,7 +390,7 @@ func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink str
 
 func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
 	if cfg.NHNAppKey == "" || cfg.NHNSecretKey == "" {
-		logf("[sms] NHN Cloud SMS not configured, skipping SMS for %s (%s)", contact.Name, contact.Phone)
+		logf("[sms] NHN Cloud SMS not configured, skipping SMS for %s (%s)", contact.Name, maskPhone(contact.Phone))
 		return fmt.Errorf("NHN Cloud SMS not configured")
 	}
 
@@ -402,7 +440,7 @@ func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) e
 		return fmt.Errorf("SMS API error: status %d, body: %s", resp.StatusCode, string(respBody))
 	}
 
-	logf("[sms] Successfully sent to %s (%s)", contact.Name, contact.Phone)
+	logf("[sms] Successfully sent to %s (%s)", contact.Name, maskPhone(contact.Phone))
 	return nil
 }
 
@@ -410,7 +448,7 @@ func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) e
 
 func sendCrisisEmail(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
 	if cfg.SMTPHost == "" || cfg.SMTPFrom == "" {
-		logf("[email] SMTP not configured, skipping email for %s (%s)", contact.Name, contact.Email)
+		logf("[email] SMTP not configured, skipping email for %s (%s)", contact.Name, maskEmail(contact.Email))
 		return fmt.Errorf("SMTP not configured")
 	}
 
@@ -449,10 +487,10 @@ func sendCrisisEmail(cfg Config, contact Contact, alert AlertPayload, cctvLink s
 	body += `</body></html>`
 
 	if err := sendEmail(cfg, contact.Email, subject, body); err != nil {
-		return fmt.Errorf("crisis email to %s: %w", contact.Email, err)
+		return fmt.Errorf("crisis email to %s: %w", maskEmail(contact.Email), err)
 	}
 
-	logf("[email] Crisis alert sent to %s (%s)", contact.Name, contact.Email)
+	logf("[email] Crisis alert sent to %s (%s)", contact.Name, maskEmail(contact.Email))
 	return nil
 }
 
@@ -495,7 +533,7 @@ func sendSystemAlarm(cfg Config, contact Contact, alert AlertPayload, kakaoErr, 
 		return
 	}
 
-	logf("[alarm] System alarm sent for contact %s (%s) — both KakaoTalk and SMS failed", contact.Name, contact.Phone)
+	logf("[alarm] System alarm sent for contact %s (%s) — both KakaoTalk and SMS failed", contact.Name, maskPhone(contact.Phone))
 }
 
 // --- Recording Archive (Two-Phase) ---
@@ -628,9 +666,9 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 			go func(c Contact) {
 				defer wg.Done()
 				if err := sendCrisisEmail(cfg, c, alert, cctvLink); err != nil {
-					logf("[notify] Email FAILED for %s (%s): %v", c.Name, c.Email, err)
+					logf("[notify] Email FAILED for %s (%s): %v", c.Name, maskEmail(c.Email), err)
 				} else {
-					logf("[notify] Email SUCCESS for %s (%s)", c.Name, c.Email)
+					logf("[notify] Email SUCCESS for %s (%s)", c.Name, maskEmail(c.Email))
 				}
 			}(contact)
 		}
@@ -650,17 +688,17 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 				// Disabled channel: never call sendKakaoTalk (no external send
 				// attempt is logged); record the skip and proceed to the next step.
 				kakaoErr = fmt.Errorf("KakaoTalk disabled (KAKAO_ENABLED=false)")
-				logf("[notify] KakaoTalk skipped for %s (%s) — channel disabled, proceeding to SMS/fallback", c.Name, c.Phone)
+				logf("[notify] KakaoTalk skipped for %s (%s) — channel disabled, proceeding to SMS/fallback", c.Name, maskPhone(c.Phone))
 			} else {
 				kakaoErr = sendKakaoTalk(cfg, c, alert, cctvLink)
 				if kakaoErr == nil {
 					result.Channel = "kakaotalk"
 					result.Success = true
-					logf("[notify] KakaoTalk SUCCESS for %s (%s)", c.Name, c.Phone)
+					logf("[notify] KakaoTalk SUCCESS for %s (%s)", c.Name, maskPhone(c.Phone))
 					results[idx] = result
 					return
 				}
-				logf("[notify] KakaoTalk FAILED for %s (%s): %v — falling back to SMS", c.Name, c.Phone, kakaoErr)
+				logf("[notify] KakaoTalk FAILED for %s (%s): %v — falling back to SMS", c.Name, maskPhone(c.Phone), kakaoErr)
 			}
 
 			// Step 2: Fallback to SMS (if enabled)
@@ -669,17 +707,17 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 				// Disabled channel: never call sendSMS (no external send attempt is
 				// logged); record the skip and proceed to the system-alarm fallback.
 				smsErr = fmt.Errorf("SMS disabled (SMS_ENABLED=false)")
-				logf("[notify] SMS skipped for %s (%s) — channel disabled, proceeding to system alarm", c.Name, c.Phone)
+				logf("[notify] SMS skipped for %s (%s) — channel disabled, proceeding to system alarm", c.Name, maskPhone(c.Phone))
 			} else {
 				smsErr = sendSMS(cfg, c, alert, cctvLink)
 				if smsErr == nil {
 					result.Channel = "sms"
 					result.Success = true
-					logf("[notify] SMS SUCCESS for %s (%s)", c.Name, c.Phone)
+					logf("[notify] SMS SUCCESS for %s (%s)", c.Name, maskPhone(c.Phone))
 					results[idx] = result
 					return
 				}
-				logf("[notify] SMS FAILED for %s (%s): %v — sending system alarm", c.Name, c.Phone, smsErr)
+				logf("[notify] SMS FAILED for %s (%s): %v — sending system alarm", c.Name, maskPhone(c.Phone), smsErr)
 			}
 
 			// Step 3: Both channels unavailable or failed — send system alarm to web-backend

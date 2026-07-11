@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -213,6 +214,44 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+// maskPhone redacts the middle of a phone number for logs, keeping the leading
+// 3 and trailing 4 digits (e.g. "010-****-5678"). Numbers with fewer than 7
+// digits are fully masked. Empty input stays empty. PII (phone/email) must not
+// be logged in plaintext (#43).
+func maskPhone(p string) string {
+	if p == "" {
+		return ""
+	}
+	digits := make([]byte, 0, len(p))
+	for i := 0; i < len(p); i++ {
+		if p[i] >= '0' && p[i] <= '9' {
+			digits = append(digits, p[i])
+		}
+	}
+	if len(digits) < 7 {
+		return "****"
+	}
+	d := string(digits)
+	return d[:3] + "-****-" + d[len(d)-4:]
+}
+
+// maskEmail redacts the local part of an email for logs, keeping only its first
+// character (e.g. "j***@example.com"). Empty input stays empty (#43).
+func maskEmail(e string) string {
+	if e == "" {
+		return ""
+	}
+	at := strings.LastIndex(e, "@")
+	if at <= 0 {
+		return "***"
+	}
+	local, domain := e[:at], e[at:]
+	if len(local) == 1 {
+		return "*" + domain
+	}
+	return local[:1] + strings.Repeat("*", len(local)-1) + domain
 }
 
 // maxRequestBodyBytes caps request bodies (#41). JSON payloads here are tiny;

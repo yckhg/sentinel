@@ -113,7 +113,7 @@ func handleCreateContact(db *sql.DB) http.HandlerFunc {
 		}
 
 		id, _ := result.LastInsertId()
-		log.Printf("contact created: id=%d name=%s phone=%s email=%v by user=%d", id, req.Name, req.Phone, emailVal, user.UserID)
+		log.Printf("contact created: id=%d name=%s phone=%s email=%s by user=%d", id, req.Name, maskPhone(req.Phone), maskEmail(req.Email), user.UserID)
 
 		writeJSON(w, http.StatusCreated, contactResponse{
 			ID:          id,
