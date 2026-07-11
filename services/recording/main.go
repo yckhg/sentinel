@@ -147,30 +147,7 @@ func (rm *RecordingManager) manageRecording(cam CameraInfo, state *recorderState
 
 		log.Printf("[%s] Connecting to RTMP stream: %s", cam.StreamKey, srcURL)
 
-		// Record RTMP stream as segmented .ts files
-		// -fflags +genpts+discardcorrupt: regenerate PTS and discard corrupt frames
-		// -avoid_negative_ts make_zero: shift timestamps to start from zero
-		// -c copy: no transcoding (H.264 passthrough)
-		// -f segment: output as individual segment files
-		// -segment_time 10: 10-second segments
-		// -strftime 1: use timestamp-based filenames
-		// -segment_atclocktime 1: align segments to clock time
-		// -reset_timestamps 1: reset timestamps per segment for clean playback
-		cmd := exec.Command("ffmpeg",
-			"-hide_banner",
-			"-loglevel", "warning",
-			"-fflags", "+genpts+discardcorrupt",
-			"-i", srcURL,
-			"-avoid_negative_ts", "make_zero",
-			"-c", "copy",
-			"-f", "segment",
-			"-segment_time", "10",
-			"-segment_format", "mpegts",
-			"-strftime", "1",
-			"-segment_atclocktime", "1",
-			"-reset_timestamps", "1",
-			segPattern,
-		)
+		cmd := buildRecordCmd(srcURL, segPattern)
 
 		stdoutWatcher := newWatchdogWriter(os.Stdout)
 		stderrWatcher := newWatchdogWriter(os.Stderr)
@@ -266,6 +243,41 @@ func (rm *RecordingManager) manageRecording(cam CameraInfo, state *recorderState
 		}
 		backoff = min(backoff*2, maxBackoff)
 	}
+}
+
+// buildRecordCmd builds the segmenting ffmpeg command for a recorder.
+//
+// ffmpeg -strftime uses the process's *local* time to name segment files, but
+// the whole service parses those names with time.Parse (which yields UTC) and
+// compares them against UTC query ranges / rolling cutoffs. If the container TZ
+// were not UTC, filenames and queries would drift by the offset and break
+// playback/archive/cleanup. Force TZ=UTC on the child so filenames are always
+// UTC wall-clock regardless of the host/container timezone. (#77)
+//
+//   - -fflags +genpts+discardcorrupt: regenerate PTS, discard corrupt frames
+//   - -avoid_negative_ts make_zero:   shift timestamps to start from zero
+//   - -c copy:                        no transcoding (H.264 passthrough)
+//   - -f segment / -segment_time 10:  10-second segment files
+//   - -strftime 1 / -segment_atclocktime 1: clock-aligned timestamp filenames
+//   - -reset_timestamps 1:            reset per segment for clean playback
+func buildRecordCmd(srcURL, segPattern string) *exec.Cmd {
+	cmd := exec.Command("ffmpeg",
+		"-hide_banner",
+		"-loglevel", "warning",
+		"-fflags", "+genpts+discardcorrupt",
+		"-i", srcURL,
+		"-avoid_negative_ts", "make_zero",
+		"-c", "copy",
+		"-f", "segment",
+		"-segment_time", "10",
+		"-segment_format", "mpegts",
+		"-strftime", "1",
+		"-segment_atclocktime", "1",
+		"-reset_timestamps", "1",
+		segPattern,
+	)
+	cmd.Env = append(os.Environ(), "TZ=UTC")
+	return cmd
 }
 
 // GetStatuses returns the current status of all recorders.
