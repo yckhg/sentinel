@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 
 interface DualCalendarProps {
   startDate: string; // YYYY-MM-DD
@@ -118,6 +118,27 @@ function MonthCalendar({
 export default function DualCalendar({ startDate, endDate, onSelect, onReset }: DualCalendarProps) {
   const [open, setOpen] = useState(false);
   const today = useMemo(todayStr, []);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  // Close the open dropdown on an outside click or Escape (#102) — otherwise it
+  // only closes after picking two dates or resetting.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
 
   // Base month for left calendar — defaults to previous month
   const now = new Date();
@@ -203,7 +224,7 @@ export default function DualCalendar({ startDate, endDate, onSelect, onReset }: 
   };
 
   return (
-    <div className="dc-wrapper">
+    <div className="dc-wrapper" ref={wrapperRef}>
       <div className="dc-trigger-row">
         <button className="dc-trigger-btn" onClick={handleToggle}>
           <span className="dc-trigger-icon">📅</span>

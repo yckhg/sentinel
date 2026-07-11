@@ -30,3 +30,30 @@ describe("DualCalendar a11y (#91)", () => {
     if (todayBtn) expect(todayBtn).not.toBeDisabled();
   });
 });
+
+describe("DualCalendar dismissal (#102)", () => {
+  it("closes on Escape", async () => {
+    const user = userEvent.setup();
+    render(<DualCalendar startDate="" endDate="" onSelect={vi.fn()} onReset={vi.fn()} />);
+    await user.click(screen.getByText("날짜 선택"));
+    expect(screen.getAllByText(/월$/).length).toBeGreaterThan(0); // month titles visible
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryAllByText(/월$/).length).toBe(0);
+  });
+
+  it("closes on an outside click", async () => {
+    const user = userEvent.setup();
+    render(
+      <div>
+        <button>바깥</button>
+        <DualCalendar startDate="" endDate="" onSelect={vi.fn()} onReset={vi.fn()} />
+      </div>,
+    );
+    await user.click(screen.getByText("날짜 선택"));
+    expect(screen.getAllByText(/월$/).length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "바깥" }));
+    expect(screen.queryAllByText(/월$/).length).toBe(0);
+  });
+});
