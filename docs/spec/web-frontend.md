@@ -115,6 +115,7 @@
   - (4) **스테일 제거(진짜 sync)**: 배너로 표시 중이던 `incidentId`가 백필 응답에 더 이상 없으면(끊긴 구간에 `resolved`됨) 해당 배너가 제거된다.
   - (5) **표시기 분리**: 백필 접면이 오류(5xx/타임아웃)를 반환해도 연결 상태 표시는 재접속 성공 즉시 "연결됨"이며, 기존 배너 집합은 임의로 소거되지 않고 유지된다.
 - **Q. URL 라우팅·딥링크** — (1) CCTV가 아닌 탭(예: `/admin`)으로 이동하면 URL이 그 canonical 경로로 바뀌고, 새로고침 시 관리 탭이 그대로 복원된다(CCTV로 리셋되지 않는다). (2) 탭 이동 후 브라우저 뒤로가기 → 직전 탭으로 돌아간다. (3) 미인증 상태로 보호 경로에 접속 → `/login`으로 리다이렉트되고 URL이 보호 경로로 남지 않는다. (4) 어느 경로에도 매칭되지 않는 경로(예: `GET /nonexistent`)로 앱 내 이동 → 404 화면이 표시되고 메인 앱/CCTV로 흡수되지 않는다. (5) **canonical 경로**: 각 탭의 URL 문자열은 정확히 `/cctv`·`/incidents`·`/admin`·`/settings`다. (6) **returnTo 복귀**: 미인증으로 `/admin` 딥링크 → `/login` 후 로그인 성공 → `/admin`으로 복귀한다. `returnTo`가 없거나 앱 밖/무효 경로면 `/cctv`로 간다. (7) **history replace(루프 방지)**: 미인증 `/admin` 딥링크→`/login`→로그인→`/admin` 복귀 후 브라우저 뒤로가기 → `/login`이나 리다이렉트 중간 항목으로 돌아가지 않는다(무한 루프 없음).
+- **R. 아카이브 status 소비자 판정** — 아카이브 목록 UI(RecordingTimeline)가 `GET /api/archives` 응답의 `status` enum을 소비하는 방식을 관측한다(값 정의 SSOT=recording.md, 소비자 의무=interface-web-api.md §계약8 "아카이브 status 소비자 계약"). (1) **6종 전부 구별**: enum 6종 `{protecting, pending, finalizing, processing, completed, failed}`을 각각 담은 항목을 주입 → 각 항목이 서로 구별되는 상태 라벨/배지(예: `data-status` 마커 또는 상태 문구)로 렌더되며, 어느 하나도 다른 상태로 조용히 오인되지 않는다. (2) **미지 상태 안전 fallback**: enum 밖의 미지 `status`(예: `"unknown"`)를 담은 항목을 주입 → 해당 항목은 미완료(진행 중)로 표시되고, 완료(`completed`)로 표시되지 않으며 다운로드 어피어던스(다운로드 버튼·링크)가 그 항목의 DOM에 존재하지 않는다. (3) **`failed` 오류 종단**: `status:"failed"` 항목을 주입 → 실패임을 나타내는 라벨과 사유가 오류 종단으로 사용자에게 노출되고, 이 항목 역시 다운로드 어피어던스를 노출하지 않는다.
 
 ## ⚠️ 리뷰 필요 (의도 불확실)
 

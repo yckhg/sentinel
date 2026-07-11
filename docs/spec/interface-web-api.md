@@ -418,7 +418,7 @@ Device object:
   curl -s -H "Authorization: Bearer $T" http://localhost:8080/api/archives \
     | jq -e 'all(.[]; .status | IN("protecting","pending","finalizing","processing","completed","failed"))'
   ```
-- [ ] **소비자 fallback 의무(web-frontend 교차)**: 위 6종 밖의 미지 `status`를 받은 web-frontend는 이를 완료로 표시하지 않고 미완료(진행 중)로 안전 처리하며, `failed`는 사용자에게 실패(+사유)로 노출한다 (web-frontend 스펙의 아카이브 목록 UI 단언과 교차 판정)
+- [ ] **소비자 fallback 의무(web-frontend 교차)**: 위 6종 밖의 미지 `status`를 받은 web-frontend는 이를 완료로 표시하지 않고 미완료(진행 중)로 안전 처리하며, `failed`는 사용자에게 실패(+사유)로 노출한다 ([`web-frontend.md`](web-frontend.md) §검증 단언 **단언 R**(아카이브 status 소비자 판정)과 교차 판정)
 
 ---
 
