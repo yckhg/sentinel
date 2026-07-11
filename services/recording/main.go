@@ -672,21 +672,39 @@ func (am *ArchiveManager) loadMetadata() {
 	}
 	var archives []ArchiveMetadata
 	if err := json.Unmarshal(data, &archives); err != nil {
-		log.Printf("[archive] Failed to load metadata: %v", err)
+		// Corrupt/truncated metadata (e.g. from a crash mid-write on the old
+		// non-atomic path). Preserve the bad file for forensics instead of
+		// silently overwriting it on the next save, and alert loudly. (#74)
+		backup := fmt.Sprintf("%s.corrupt.%d", am.metadataPath, time.Now().Unix())
+		if rerr := os.Rename(am.metadataPath, backup); rerr != nil {
+			log.Printf("[archive] ALERT: metadata unreadable (%v) and backup failed: %v", err, rerr)
+		} else {
+			log.Printf("[archive] ALERT: metadata unreadable (%v); moved corrupt file to %s", err, backup)
+		}
 		return
 	}
 	am.archives = archives
 	log.Printf("[archive] Loaded %d archive(s) from metadata", len(archives))
 }
 
+// saveMetadata writes metadata atomically: marshal to a temp file in the same
+// directory, then rename over the target. A crash mid-write can now only leave a
+// stale-but-valid metadata.json (or an orphan .tmp), never a truncated file that
+// fails to unmarshal and loses the entire archive list. (#74)
 func (am *ArchiveManager) saveMetadata() {
 	data, err := json.MarshalIndent(am.archives, "", "  ")
 	if err != nil {
 		log.Printf("[archive] Failed to marshal metadata: %v", err)
 		return
 	}
-	if err := os.WriteFile(am.metadataPath, data, 0644); err != nil {
-		log.Printf("[archive] Failed to save metadata: %v", err)
+	tmp := am.metadataPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		log.Printf("[archive] Failed to write metadata temp file: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, am.metadataPath); err != nil {
+		log.Printf("[archive] Failed to rename metadata into place: %v", err)
+		os.Remove(tmp)
 	}
 }
 
