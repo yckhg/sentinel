@@ -212,7 +212,7 @@ func (m *StreamManager) manageStream(src YouTubeSource, state *streamState) {
 		} else {
 			log.Printf("[%s] Resolving stream URL via yt-dlp for %s", src.ID, src.YouTubeURL)
 			var err error
-			streamURL, err = resolveStreamURL(src.YouTubeURL)
+			streamURL, err = resolveStreamURL(src.YouTubeURL, state.stopCh)
 			if err != nil {
 				log.Printf("[%s] yt-dlp error: %v", src.ID, err)
 				state.Lock()
@@ -296,9 +296,22 @@ func waitOrStop(stopCh <-chan struct{}, d time.Duration) (stopped bool) {
 	}
 }
 
+// resolveCommand builds the yt-dlp resolve command. It is a var so tests can
+// substitute a stand-in binary to exercise cancellation.
+var resolveCommand = func(ctx context.Context, youtubeURL string) *exec.Cmd {
+	return exec.CommandContext(ctx, "yt-dlp",
+		"--no-warnings",
+		"-f", "best[ext=mp4]/best",
+		"--get-url",
+		youtubeURL,
+	)
+}
+
 // resolveStreamURL uses yt-dlp to get the direct stream URL.
 // It validates the YouTube URL before execution and enforces a 30s timeout.
-func resolveStreamURL(youtubeURL string) (string, error) {
+// stopCh cancels the resolve early so a Reload/StopAll is not blocked for up to
+// 30s and does not leave a yt-dlp child running as an orphan. (#69)
+func resolveStreamURL(youtubeURL string, stopCh <-chan struct{}) (string, error) {
 	if err := validateYouTubeURL(youtubeURL); err != nil {
 		return "", fmt.Errorf("invalid YouTube URL: %w", err)
 	}
@@ -306,16 +319,25 @@ func resolveStreamURL(youtubeURL string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "yt-dlp",
-		"--no-warnings",
-		"-f", "best[ext=mp4]/best",
-		"--get-url",
-		youtubeURL,
-	)
+	// Cancel the exec context when a stop is requested (or when resolve finishes).
+	go func() {
+		select {
+		case <-stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	cmd := resolveCommand(ctx, youtubeURL)
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("yt-dlp timed out after 30s")
+		}
+		select {
+		case <-stopCh:
+			return "", fmt.Errorf("yt-dlp canceled: shutdown/reload requested")
+		default:
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return "", fmt.Errorf("%v: %s", err, string(exitErr.Stderr))
