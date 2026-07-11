@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -237,4 +238,30 @@ func TestNewHTTPServerTimeouts(t *testing.T) {
 			t.Errorf("%s must be > 0 to defend against Slowloris, got %v", c.name, c.got)
 		}
 	}
+}
+
+// TestWaitTimeout covers the graceful-shutdown drain primitive (#40): it must
+// return true once the tracked dispatch goroutines finish, and false when they
+// exceed the deadline so shutdown cannot block forever.
+func TestWaitTimeout(t *testing.T) {
+	t.Run("completes before deadline", func(t *testing.T) {
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			wg.Done()
+		}()
+		if !waitTimeout(&wg, time.Second) {
+			t.Fatal("expected waitTimeout to report completion")
+		}
+	})
+
+	t.Run("times out when work outlives deadline", func(t *testing.T) {
+		var wg sync.WaitGroup
+		wg.Add(1)
+		defer wg.Done() // release after the assertion so the helper goroutine exits
+		if waitTimeout(&wg, 20*time.Millisecond) {
+			t.Fatal("expected waitTimeout to report a timeout")
+		}
+	})
 }

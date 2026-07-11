@@ -7,7 +7,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -190,8 +192,25 @@ func main() {
 
 	srv := newHTTPServer(mux)
 
+	// Graceful shutdown (#40): on SIGTERM/SIGINT stop the health monitor and
+	// drain in-flight HTTP requests via srv.Shutdown before exiting, instead of
+	// dying instantly on docker stop with the monitor goroutine and in-flight
+	// handlers cut off mid-work.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		log.Println("shutting down: stopping health monitor and draining HTTP...")
+		healthMonitor.Stop()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("http shutdown: %v", err)
+		}
+	}()
+
 	log.Println("web-backend listening on :8080")
-	if err := srv.ListenAndServe(); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }

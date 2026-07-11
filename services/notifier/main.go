@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -11,9 +12,11 @@ import (
 	"net/http"
 	"net/smtp"
 	"os"
+	"os/signal"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -746,8 +749,12 @@ func handleNotify(cfg Config) http.HandlerFunc {
 		logf("[notify] Received alert: site=%s device=%s type=%s severity=%s",
 			alert.SiteID, alert.DeviceID, alert.Type, alert.Severity)
 
-		// Dispatch notifications asynchronously
+		// Dispatch notifications asynchronously. Track the goroutine in
+		// inflightDispatch so graceful shutdown (#40) can drain crisis-alert
+		// dispatches already in progress instead of losing them on SIGTERM.
+		inflightDispatch.Add(1)
 		go func() {
+			defer inflightDispatch.Done()
 			contactCount, results := dispatchNotifications(cfg, alert)
 			successCount := 0
 			channels := map[string]int{}
@@ -1048,10 +1055,49 @@ func main() {
 
 	srv := newHTTPServer(mux)
 
+	// Graceful shutdown (#40): on SIGTERM/SIGINT stop accepting new requests
+	// (srv.Shutdown), then wait for crisis-alert dispatch goroutines already in
+	// flight so they are not truncated/lost. New /api/notify requests can no
+	// longer start a dispatch once Shutdown returns, so draining terminates.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		logf("shutting down: draining in-flight notifications...")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			logf("http shutdown: %v", err)
+		}
+		if !waitTimeout(&inflightDispatch, 15*time.Second) {
+			logf("shutdown: timed out waiting for in-flight notifications")
+		}
+	}()
+
 	logf("notifier listening on :8080 (kakao configured: %v, sms configured: %v, smtp configured: %v, frontend: %s)",
 		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "", cfg.SMTPHost != "", cfg.FrontendURL)
-	if err := srv.ListenAndServe(); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
+	}
+}
+
+// inflightDispatch tracks crisis-alert dispatch goroutines spawned by
+// /api/notify so graceful shutdown can wait for them to finish.
+var inflightDispatch sync.WaitGroup
+
+// waitTimeout waits for wg with an upper bound, returning true if it completed
+// and false if the deadline elapsed first.
+func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
 	}
 }
 

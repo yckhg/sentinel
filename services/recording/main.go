@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1623,8 +1625,26 @@ func main() {
 
 	srv := newHTTPServer(mux)
 
+	// Graceful shutdown (#40): on SIGTERM/SIGINT terminate the ffmpeg recorder
+	// children through manager.Stop() (SIGTERM → grace → SIGKILL) so in-progress
+	// segments are flushed rather than truncated/left 0-byte, then drain in-flight
+	// HTTP downloads via srv.Shutdown. Without this, docker stop kills the process
+	// immediately and orphans partial segments.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		log.Println("shutting down: stopping recorders and draining HTTP...")
+		manager.Stop()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("http shutdown: %v", err)
+		}
+	}()
+
 	log.Println("recording service listening on :8080")
-	if err := srv.ListenAndServe(); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		manager.Stop()
 		log.Fatal(err)
 	}
