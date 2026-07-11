@@ -74,10 +74,10 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 
 - 가입 기본 상태는 `pending`; 유효한 `inviteToken` 제시 시 자동 `active` + 초대 이메일 주입
 - `pending` 계정은 로그인 불가(`403`) — 승인 전 시스템 접근 경로 없음
-- JWT 유효기간 24h, HS256. 토큰에 `role` 클레임 포함
+- JWT 유효기간 24h, HS256. 토큰 페이로드는 `userId`·`role`(`admin`/`user`)·`iat`(발급 시각, Unix epoch 초) 클레임을 담는다. `iat`는 자격증명 변경 경계 판정의 기준값이다(아래 불변식)
 - `/auth/pending|approve|reject|users`는 인증 미들웨어 밖 — 핸들러가 직접 admin JWT 검증 (프리픽스 `/api/` 아님이 계약)
 - 레이트 리밋은 IP 단위, `/auth/login` 10/min, `/auth/register` 5/min — 다른 엔드포인트에는 적용하지 않음
-- **비밀번호 변경은 기존 발급 토큰을 무효화** — `POST /api/auth/change-password` 성공 시 해당 사용자에게 변경 이전에 발급된 모든 로그인 JWT가 즉시 `401`이 된다(관측 가능한 자격증명 변경 경계 이후 재로그인 토큰만 유효 — 구현 방식은 계약 아님). 변경에 사용한 토큰 자신도 이후 무효가 되어 클라이언트는 재로그인해야 한다. 비밀번호 미변경 사용자의 토큰은 만료(24h)까지 유효
+- **비밀번호 변경은 기존 발급 토큰을 무효화 (자격증명 변경 경계)** — 서버는 각 사용자의 경계를 **DB에 영속**한다(`users.password_changed_at`, credential_boundary). `POST /api/auth/change-password` 성공 시 이 값이 변경 시각으로 갱신되고, 인증 검증은 제시된 토큰의 `iat`가 소유 사용자의 `password_changed_at`보다 **이르면 거부(`401`)**한다. 따라서 변경 이전에 발급된 모든 로그인 JWT(변경에 사용한 토큰 자신 포함)가 즉시 `401`이 되어 클라이언트는 재로그인해야 하며, 경계 이후 재로그인으로 얻은(=`iat`가 경계 이상인) 토큰만 유효하다. 경계가 **DB 영속**이므로 컨테이너 재시작 후에도 변경-이전 토큰은 부활하지 않고 계속 `401`이다(in-memory 경계였다면 재시작 시 탈취 토큰이 만료까지 부활). 비밀번호 미변경 사용자의 토큰은 만료(24h)까지 유효. (경계 데이터(`iat` 클레임 + `password_changed_at` 영속)와 비교 시맨틱은 계약이며, 이를 per-user token-version으로 등가 구현하는 것은 허용된다.)
 
 ### 검증 단언 (TDD)
 
@@ -97,7 +97,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 - [ ] 같은 IP에서 `/auth/login` 11회 연속 → 11번째 `429`
 - [ ] user 토큰으로 `GET /auth/pending` → `401` 또는 `403` (200 아님)
 - [ ] `POST /auth/approve/{id}` 후 해당 계정 로그인 → `200`
-- [ ] 로그인 토큰 `t`로 `GET /api/incidents` → `200`; `POST /api/auth/change-password` 성공 후 **같은 `t`**로 `GET /api/incidents` → `401`; 변경 후 재로그인으로 얻은 새 토큰 → `200`
+- [ ] 로그인 토큰 `t`로 `GET /api/incidents` → `200`; `POST /api/auth/change-password` 성공 후 **같은 `t`**로 `GET /api/incidents` → `401`; 변경 후 재로그인으로 얻은 새 토큰 → `200`; 변경 후 **컨테이너 재시작**해도 `t`는 여전히 `401`(경계 DB 영속 — 재시작으로 부활하지 않음); 다른 사용자 V가 변경 전 발급받은 토큰은 영향받지 않아 여전히 `200`
 
 ---
 
@@ -108,6 +108,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 | Method | Path | Auth | 입력 |
 |--------|------|------|------|
 | GET | `/api/incidents` | user | query: `page`(≥1, def 1) `limit`(def 20, max 100) `from` `to`(occurred_at, SQLite datetime) `status`(`open\|acknowledged\|resolved`) |
+| GET | `/api/incidents/active` | user | — (미해결 사고 배너 backfill 전용) |
 | PATCH | `/api/incidents/{id}/acknowledge` | admin | 바디 없음 |
 | PATCH | `/api/incidents/{id}/resolve` | admin | `{resolutionNotes*: non-empty string}` |
 | POST | `/api/incidents` | **none (internal)** | → 계약 13 |
@@ -130,6 +131,20 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 }
 ```
 
+`GET /api/incidents/active` → `200` — **미해결(open+acknowledged) 사고** 배열. 각 원소는 WS `crisis_alert` payload(계약 14)와 **동형**이다 — 배너 backfill이 실시간 push와 동일한 모양을 재구성하도록 계약된다(반쪽 배너 방지):
+
+```json
+[{
+  "incidentId": 12,
+  "siteId": "site-001",
+  "description": "gas leak",
+  "occurredAt": "2026-04-13 10:20:30",
+  "isTest": false,
+  "status": "open | acknowledged",
+  "site": { "address": "...", "managerName": "...", "managerPhone": "010-1234-5678" }
+}]
+```
+
 - `PATCH .../acknowledge` → `200` `{"status":"acknowledged"}` · 이미 `resolved`면 `409`
 - `PATCH .../resolve` → `200` `{"status":"resolved", "resolvedByKind":"web", "resolvedById":"<username>", "resolvedByLabel":"..."}` · 이미 resolved면 `409` · notes 비어있으면 `400`
 
@@ -139,6 +154,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 - **양방향 해소 attribution**: `resolvedByKind ∈ {"web", "sensor_button", null}` — 웹 해제는 본 계약, 센서 버튼 해제는 계약 13(`resolve-from-sensor`). 어느 경로든 동일 필드에 기록
 - resolve 성공 부작용 3종: (a) recording 아카이브 finalize 비동기 트리거 (b) hw-gateway `/api/alert/resolved`(계약 15) 경유 MQTT `safety/{siteId}/alert/resolved` 발행 (c) WS `incident_resolved` 브로드캐스트 (계약 14)
 - `limit > 100` 요청은 100으로 클램프 (에러 아님)
+- **`/api/incidents/active` (배너 backfill 계약)**: `status ∈ {open, acknowledged}`만 반환(resolved 제외), 발생시각 내림차순. 각 원소의 식별자는 계약 2 목록의 `id`가 아니라 `crisis_alert`와 동일하게 **`incidentId`**이며, 사고 site의 `{address, managerName, managerPhone}`를 **`site`로 중첩** 포함한다(sites 테이블(계약 4)에서 조인). 이 payload 동형성 보장으로 web-frontend가 접속/재접속 시 진행 중 위기 배너를 실시간 `crisis_alert`와 같은 모양으로 재구성하며, 현장 연락 정보가 결손된 반쪽 배너가 되지 않는다
 
 ### 검증 단언 (TDD)
 
@@ -153,6 +169,12 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 - [ ] `resolutionNotes: ""` 로 resolve → `400`
 - [ ] user 토큰으로 acknowledge → `403`
 - [ ] resolve 성공 직후 WS 클라이언트가 `incident_resolved` 메시지 수신 (계약 14 단언과 교차)
+- [ ] `GET /api/incidents/active` → `200`, 모든 원소 `status ∈ {open, acknowledged}`(resolved 미포함), 각 원소에 `incidentId`·`site.address`·`site.managerName`·`site.managerPhone` 존재
+- [ ] `GET /api/incidents/active` 원소의 키 집합이 `crisis_alert`(계약 14) payload와 동형 — `incidentId, siteId, description, occurredAt, isTest, site.{address,managerName,managerPhone}`
+  ```bash
+  curl -s -H "Authorization: Bearer $T" http://localhost:8080/api/incidents/active \
+    | jq -e 'all(.[]; has("incidentId") and (.status=="open" or .status=="acknowledged") and (.site|has("address") and has("managerName") and has("managerPhone")))'
+  ```
 
 ---
 
@@ -376,7 +398,7 @@ Device object:
 
 ### 출력 (계약)
 
-- 요청/응답 바디는 recording 서비스 원본을 그대로 통과 (스키마 SSOT는 `docs/spec/recording.md` §HTTP API — 본 계약 범위 밖)
+- 요청/응답 바디는 recording 서비스 원본을 그대로 통과한다. 응답 **스키마 값의 정의 SSOT는 `docs/spec/recording.md` §출력·§HTTP API**가 소유한다(enum 값 나열을 본 계약에서 재정의하지 않음) — 다만 `GET /api/archives`의 `status` enum을 **소비하는 쪽(web-frontend)의 의무는 본 계약이 규정**한다(아래 핵심 로직 "아카이브 status 소비자 계약").
 - HLS 응답(`application/vnd.apple.mpegurl`)과 다운로드 바이너리 스트림은 Content-Type 보존하여 forward
 - recording 서비스 통신 실패 → `502`
 
@@ -384,12 +406,19 @@ Device object:
 
 - 이 그룹에서 web-backend가 보장하는 것은 **인증 게이트 + 투명 프록시** 두 가지뿐 — 바디 변형·필터링 없음
 - JWT 없이는 어떤 프록시 경로도 통과 불가
+- **아카이브 status 소비자 계약**: `GET /api/archives` 응답 각 항목의 `status`는 recording 스펙([`docs/spec/recording.md`](recording.md) §출력·§HTTP API)이 **정의를 소유**하는 enum 6종 `{protecting, pending, finalizing, processing, completed, failed}` 중 하나다(값 정의 SSOT=recording 스펙, 본 계약은 값을 재정의하지 않음). 이 enum을 소비하는 web-frontend는 다음을 **의무로** 지킨다 — (a) 6종 **전부**를 처리한다, (b) 이 6종에 없는 **미지 상태가 오면 안전 fallback**한다: 미완료(진행 중)로 취급하며 임의로 완료(`completed`)로 표시하지 않는다, (c) `failed`는 오류 종단으로 **사용자에게 노출**한다(실패 표기+사유). recording 기동 복구(recording 스펙 단언 P/P-2) 도입으로 재시작 직후 `finalizing`·`processing`·`failed`가 노출될 확률이 증가하므로 이 소비자 의무를 판정 가능한 계약으로 고정한다.
 
 ### 검증 단언 (TDD)
 
 - [ ] JWT 없이 `GET /api/storage` → `401` (프록시 이전 차단)
 - [ ] recording 컨테이너 중지 후 `GET /api/archives` → `502`
 - [ ] `GET /api/recordings/{key}/play` 응답 Content-Type이 recording 서비스 응답과 동일 (m3u8 보존)
+- [ ] **아카이브 status enum**: `GET /api/archives` 응답의 모든 원소 `status`가 6종 `{protecting, pending, finalizing, processing, completed, failed}` 중 하나다(recording 스펙이 소유하는 enum과 일치)
+  ```bash
+  curl -s -H "Authorization: Bearer $T" http://localhost:8080/api/archives \
+    | jq -e 'all(.[]; .status | IN("protecting","pending","finalizing","processing","completed","failed"))'
+  ```
+- [ ] **소비자 fallback 의무(web-frontend 교차)**: 위 6종 밖의 미지 `status`를 받은 web-frontend는 이를 완료로 표시하지 않고 미완료(진행 중)로 안전 처리하며, `failed`는 사용자에게 실패(+사유)로 노출한다 (web-frontend 스펙의 아카이브 목록 UI 단언과 교차 판정)
 
 ---
 
@@ -483,12 +512,21 @@ Device object:
 
 - GET → `200` `[{"key":"site_url","value":"https://...","updatedAt":"..."}]`
 - PUT `/api/settings/{key}` (단건) → `200` `{key, value, updatedAt}` · 없는 key `404`
-- PUT `/api/settings` (벌크) → `200` `[{key, value, updatedAt}, ...]`(갱신된 전체) · 요청 내 **하나라도** 미지의 key면 `404`(아무 것도 저장 안 됨) · 값 검증 실패면 `400`(아무 것도 저장 안 됨)
+- PUT `/api/settings` (벌크) → `200` `[{key, value, updatedAt}, ...]`(갱신된 전체) · 요청 내 **하나라도** 미지의 key거나 값 검증(타입/범위/교차제약, 아래 표) 실패면 **`400`**(아무 것도 저장 안 됨). 벌크 검증 실패는 리소스-부재가 아니라 요청 무효이므로 `400`으로 **통일**한다 — 단건 `PUT /api/settings/{key}`의 미지 key `404`(경로 리소스 부재)와 구분. ⚠ 현행 코드가 벌크 미지 key에 `404`를 반환한다면 계약(`400`)에 맞춰 코드를 고친다
 
 ### 핵심 로직 (불변식)
 
 - PUT은 **기존 key만** 갱신 — 새 key 생성 불가 (`404`)
-- 알려진 key: `site_url` · `health.service_check_interval_sec`(def 30) · `health.service_down_threshold_sec`(def 90) · `health.sensor_alive_threshold_sec`(def 60)
+- 알려진 key (타입·유효범위·교차제약 — 무효값 판정 SSOT):
+
+| key | 타입 | 유효 범위 | 교차 제약 | 기본값 |
+|-----|------|-----------|-----------|--------|
+| `site_url` | string | 비어있지 않은 절대 `http(s)://` URL | — | — |
+| `health.service_check_interval_sec` | 정수(초) | 5 ~ 3600 | — | 30 |
+| `health.service_down_threshold_sec` | 정수(초) | 5 ~ 86400 | 반영 후 최종 상태 기준 `≥ health.service_check_interval_sec` | 90 |
+| `health.sensor_alive_threshold_sec` | 정수(초) | 5 ~ 86400 | — | 60 |
+
+  **무효값** = 위 타입/범위/교차제약 위반 — 비정수 문자열, 하한 미만(예: interval `< 5`), 상한 초과, `site_url` 파싱 실패(비-URL·비 http(s)), 또는 `service_down_threshold_sec < service_check_interval_sec`(교차제약 위반). 무효값·미지 key는 벌크에서 `400`(부분 저장 없음)
 - `site_url` 변경은 임시 링크 URL(계약 9)과 초대 이메일 링크(계약 10)에 즉시 반영
 - **벌크 저장은 원자적** — `PUT /api/settings`로 다건을 저장하면 단일 트랜잭션으로 **전부 성공 또는 전부 롤백**된다. 미지의 key/값 검증 실패가 하나라도 있으면 어떤 key도 변경되지 않는다(부분 저장 없음 — 순차 개별 PUT의 중간 실패로 인한 부분 반영을 대체). 단건 `PUT /api/settings/{key}`는 하위호환으로 유지
 
@@ -497,7 +535,8 @@ Device object:
 - [ ] `PUT /api/settings/nonexistent_key` → `404`
 - [ ] `PUT /api/settings/site_url` `{"value":"https://x.example"}` → `200` · 이후 temp link 생성 시 `url`이 `https://x.example/view/...`
 - [ ] user 토큰으로 GET → `403`
-- [ ] `PUT /api/settings`에 유효 `health.*` key 2개 + 미지의 key 1개 → `404`, 이후 `GET /api/settings`에서 그 2개 값도 **변경 전 그대로**(부분 저장 0)
+- [ ] `PUT /api/settings`에 유효 `health.*` key 2개 + 미지의 key 1개 → `400`, 이후 `GET /api/settings`에서 그 2개 값도 **변경 전 그대로**(부분 저장 0)
+- [ ] `PUT /api/settings`에 유효 key 1개 + 무효값 1개(예: `health.service_check_interval_sec:"abc"` 또는 `"2"`(<5), 또는 교차제약 위반) → `400`, 부분 저장 0
 - [ ] `PUT /api/settings`에 `health.*` 임계 3건을 모두 유효값으로 → `200`, 세 값 전부 반영
 
 ---
@@ -537,6 +576,7 @@ Device object:
 - 모니터 제외: web-backend 자기 자신, mosquitto(HTTP healthz 없음)
 - events는 **상태 전이 시점에만** 기록 (무변화 미기록 — 테이블 폭증 방지)
 - **unhealthy 전이의 능동 통지**: 감시 대상(서비스/센서)이 `healthy→unhealthy`로 전이하면 `health_events` 기록에 더해 admin에게 능동 push된다 — 접속 중 admin WS 클라이언트에 `system_alarm`(계약 14) 브로드캐스트. `unhealthy→healthy` 복귀도 동일. 통지 실패는 감시 루프를 막지 않음(best-effort). 폴링형 `GET /api/health`만으로는 관제 인프라 자체의 무응답이 조용히 방치될 수 있으므로 전이는 push로 표면화되어야 한다. (notifier 외부 팬아웃·자동 컨테이너 재시작은 인프라 경계로 결정 — 앱 계약에서 제외, 리뷰 항목 5 해소)
+- **재접속 admin에게 미해소 unhealthy 스냅샷 재전달 (⚠ 권장 채택)**: 위 전이 push는 전이 **순간 접속 중**인 admin에게만 닿으므로, 그때 미접속이던 admin은 통지를 영구 유실한다("조용히 방치 안 됨" 불변식과 상충). 이를 보정하기 위해 admin role WS가 새로 접속하면(계약 14 `connected` 직후) 서버는 현재 `unhealthy` 상태인 모든 감시 대상의 스냅샷을 그 admin에게만 `system_alarm`(계약 14, `details.status=="unhealthy"`)으로 재전달한다. 이로써 재접속 admin이 진행 중 미해소 unhealthy를 즉시 관측한다. (⚠ 현재 상태 스냅샷은 in-memory이므로 web-backend 재시작 직후에는 스냅샷이 비어 재평가로 다시 채워질 때까지 공백일 수 있음 — 이 한계는 감수한다.)
 
 ### 검증 단언 (TDD)
 
@@ -548,7 +588,9 @@ Device object:
 - [ ] 응답에 `id == "web-backend"`인 service 항목 없음
 - [ ] `entity_kind=sensor` 필터 → 모든 `entityKind == "sensor"`
 - [ ] 임의 서비스 컨테이너 중지 → threshold 경과 후 해당 항목 `unhealthy` + events에 전이 1행 추가 · 재시작 → healthy 전이 1행 추가 (전이당 정확히 1행)
-- [ ] admin WS 접속 상태에서 서비스 컨테이너 중지 → threshold 경과 후 그 admin WS가 `type=system_alarm` 메시지 1건 수신(unhealthy 전이 표면화); user(비-admin) WS는 미수신
+- [ ] admin WS 접속 상태에서 서비스 컨테이너 중지 → threshold 경과 후 그 admin WS가 `type=system_alarm` 메시지 1건 수신(`details.entityKind=="service"`·해당 `entityId`·`details.status=="unhealthy"`); user(비-admin) WS는 미수신
+- [ ] **센서 unhealthy 표면화**: admin WS 접속 상태에서 등록된 센서의 heartbeat가 끊겨 `health.sensor_alive_threshold_sec` 경과 → 그 admin WS가 `type=system_alarm`(`details.entityKind=="sensor"`·해당 `entityId`·`details.status=="unhealthy"`) 1건 수신; user WS는 미수신
+- [ ] **재접속 스냅샷 재전달(⚠ 권장)**: 어떤 대상이 `unhealthy`인 상태에서 admin WS가 새로 접속 → `connected` 직후 그 대상에 대한 `system_alarm`(`details.status=="unhealthy"`) 스냅샷 수신
 
 ---
 
@@ -659,12 +701,23 @@ Device object:
 | `connected` | 접속 본인 | `{userId, role, connectedAt}` |
 | `crisis_alert` | 전체 (admin/user/temp) | `{incidentId, siteId, description, occurredAt, isTest, site:{address,managerName,managerPhone}}` |
 | `incident_resolved` | 전체 (admin/user/temp) | `{incidentId, siteId, resolvedAt, resolvedByKind, resolvedById, resolvedByLabel}` |
-| `system_alarm` | admin 전용 | `{type, message, details}` — `POST /internal/alarms`(계약 13) 수신 시, **또는 HealthMonitor의 healthy↔unhealthy 전이 시**(계약 12) 발생 |
+| `system_alarm` | admin 전용 | `{type, message, details}` — `POST /internal/alarms`(계약 13) 수신 시, **또는 HealthMonitor의 healthy↔unhealthy 전이/재접속 스냅샷 시**(계약 12) 발생. health-출처 `details` 하위 스키마는 아래 고정 |
+
+**`system_alarm` payload 세부**
+
+- 공통 봉투: `{type, message, details}`. `message`는 사람 읽기용 텍스트(계약 아님).
+- `POST /internal/alarms`(계약 13) 출처: notifier가 보낸 `{type?, message?, details?}`를 그대로 전달(`details` 스키마는 notifier 재량).
+- **HealthMonitor 출처(계약 12 — 전이 push 및 재접속 스냅샷)**: `type == "system_alarm"`, `details`는 다음 하위 스키마로 **고정**한다:
+  ```json
+  { "entityKind": "service | sensor", "entityId": "hw-gateway | site1:VOICE-01", "status": "unhealthy | healthy" }
+  ```
+  즉 대상의 종류·식별자·(전이 후/스냅샷 시점) 상태를 담는다 — 수신 admin이 "무엇이 어떤 상태인지"를 payload만으로 판정할 수 있어야 한다(계약 12의 O2·센서·스냅샷 단언이 이 필드로 기술된다). `entityId`는 service면 서비스명, sensor면 `siteId:deviceId`(계약 12 `id`와 동일).
 
 ### 핵심 로직 (불변식)
 
 - 인증 실패(토큰 없음/서명 불일치/만료) 시 업그레이드 자체를 `401`로 거절. **회수(blacklist)된 temp 토큰의 업그레이드도 `401`로 거절된다** — WS 접면은 temp 토큰을 temp 종류로 식별해 접속 시점에 blacklist를 확인한다
-- **접속 후 주기적 재검증(회수·만료·자격변경 반영)**: 수립된 WS 연결은 최소 `N`초(계약 상한 `N ≤ 60`)마다 토큰 유효성을 재평가한다. (a) temp 토큰이 그 사이 폐기(`DELETE /api/links/{id}`)되었거나, (b) 토큰이 만료(`exp` 경과)되었거나, (c) 소유 사용자의 비밀번호 변경으로 자격증명 경계(계약 1)를 넘긴 경우 중 하나라도 성립하면 서버가 해당 연결을 능동 종료한다. → 폐기된 뷰어의 WS가 토큰 만료(최대 24h)까지 `crisis_alert`/`incident_resolved`를 계속 수신하는 일이 발생하지 않는다
+- **접속 후 주기적 재검증(회수·만료·자격변경 반영)**: 수립된 WS 연결은 최소 `N`초(계약 상한 `N ≤ 60`)마다 토큰 유효성을 재평가한다. (a) temp 토큰이 그 사이 폐기(`DELETE /api/links/{id}`)되었거나, (b) 토큰이 만료(`exp` 경과)되었거나, (c) 소유 사용자의 비밀번호 변경으로 자격증명 경계(계약 1, 토큰 `iat` < `users.password_changed_at`)를 넘긴 경우 중 하나라도 성립하면 서버가 해당 연결을 능동 종료한다. → 폐기된 뷰어의 WS가 토큰 만료(최대 24h)까지 `crisis_alert`/`incident_resolved`를 계속 수신하는 일이 발생하지 않는다. (권장 구현 노트: 별도 재검증 타이머를 두기보다 서버의 30초 ping 사이클(아래)에 편승하면 충분하다 — 계약 상한 `N ≤ 60`은 유지하되 별도 타이머는 과설계다.)
+- **admin 접속 시 unhealthy 스냅샷 재전달(⚠ 권장, 계약 12)**: admin role WS가 새로 접속하면 `connected` 직후, 현재 `unhealthy`인 모든 감시 대상에 대해 `system_alarm`(`details.status=="unhealthy"`)을 그 admin에게만 재전달한다 — 전이 순간 미접속이던 admin의 통지 유실을 보정한다.
 - 서버가 30초마다 ping — 클라이언트는 40초 내 pong 없으면 연결 종료
 - role은 JWT의 `role` 클레임에서 추출 (`admin`/`user`). temp link 토큰은 role 클레임이 없으나 WS 접면이 temp 종류로 식별해 role `"temp"`(read-only)를 부여한다 — `system_alarm`은 admin에게만 전달되고 temp/user에는 전달되지 않는다
 - `crisis_alert`는 `POST /api/incidents`(계약 13) 성공 시, `incident_resolved`는 웹 resolve(계약 2) 또는 센서 resolve(계약 13) 성공 시 발생. `system_alarm`은 (i) `POST /internal/alarms`(계약 13, notifier가 모든 외부 채널 실패 시 호출) 수신 시, 또는 (ii) 감시 대상(서비스/센서)의 healthy↔unhealthy 상태 전이 시(계약 12) admin에게만 발생
