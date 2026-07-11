@@ -35,6 +35,8 @@ services:
       - NOTIFIER_URL=http://notifier:8080
       - WEB_BACKEND_URL=http://web-backend:8080
       - HEARTBEAT_TIMEOUT_SEC=30
+      - EQUIPMENT_MAX_DEVICES=1000
+      - EQUIPMENT_EVICT_TTL_SEC=86400
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 30s
