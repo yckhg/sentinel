@@ -54,6 +54,16 @@ export default function CrisisAlertBanner() {
 
   const handleMessage = useCallback(
     (msg: { type: string; payload: Record<string, unknown>; timestamp: string }) => {
+      if (msg.type === "incident_resolved") {
+        // Live resolve (web operator OR sensor button): drop the banner now,
+        // while the socket stays connected. Reuse dismiss() so this incidentId
+        // also enters dismissedRef (#97) — a resolved incident must not
+        // resurrect on the next reconnect backfill.
+        const rawId = msg.payload.incidentId;
+        if (rawId === undefined || rawId === null || rawId === "") return;
+        dismiss(String(rawId));
+        return;
+      }
       if (msg.type !== "crisis_alert") return;
       const alert = toAlert(msg.payload);
       if (!alert) return; // malformed / no incidentId

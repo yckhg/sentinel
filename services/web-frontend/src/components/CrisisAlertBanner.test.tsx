@@ -38,6 +38,23 @@ function activeItem(incidentId: string | number, description: string) {
   return { incidentId, description, siteId: "site1", occurredAt: "2026-04-13 10:20:30" };
 }
 
+function resolvedFrame(incidentId: string | number) {
+  return {
+    data: JSON.stringify({
+      type: "incident_resolved",
+      payload: {
+        incidentId,
+        siteId: "site1",
+        resolvedAt: "2026-04-13T10:30:00Z",
+        resolvedByKind: "web",
+        resolvedById: "admin",
+        resolvedByLabel: "관리자",
+      },
+      timestamp: "2026-04-13T10:30:00Z",
+    }),
+  };
+}
+
 let backfill: Array<Record<string, unknown>> = [];
 
 function socket(): FakeWebSocket {
@@ -135,5 +152,32 @@ describe("CrisisAlertBanner dismissed-memory (#97)", () => {
     await fireReconnect();
 
     expect(await screen.findByText("질식 위험")).toBeInTheDocument();
+  });
+});
+
+describe("CrisisAlertBanner live resolve (⚠#3)", () => {
+  it("removes the banner on a live incident_resolved over the same socket (no reconnect)", async () => {
+    render(<CrisisAlertBanner />);
+    await fireReconnect(); // initial connect, empty backfill
+
+    // live crisis_alert arrives and is shown
+    await act(async () => {
+      socket().onmessage?.(crisisFrame("42", "가스 누출"));
+    });
+    expect(await screen.findByText("가스 누출")).toBeInTheDocument();
+
+    // incident_resolved for the SAME incidentId over the SAME socket — no reconnect
+    await act(async () => {
+      socket().onmessage?.(resolvedFrame("42"));
+    });
+    await waitFor(() =>
+      expect(screen.queryByText("가스 누출")).not.toBeInTheDocument(),
+    );
+
+    // reconnect backfill still (erroneously) lists 42 as active: dismissedRef
+    // gate must keep it from resurrecting.
+    backfill = [activeItem("42", "가스 누출")];
+    await fireReconnect();
+    expect(screen.queryByText("가스 누출")).not.toBeInTheDocument();
   });
 });
