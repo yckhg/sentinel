@@ -107,10 +107,9 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 
 | Method | Path | Auth | 입력 |
 |--------|------|------|------|
-| GET | `/api/incidents` | user | query: `page`(≥1, def 1) `limit`(def 20, max 100) `from` `to`(occurred_at, SQLite datetime) `status`(`open\|acknowledged\|resolved`) |
+| GET | `/api/incidents` | user | query: `page`(≥1, def 1) `limit`(def 20, max 100) `from` `to`(occurred_at, SQLite datetime) `status`(`open\|resolved`) |
 | GET | `/api/incidents/active` | user | — (미해결 사고 배너 backfill 전용) |
-| PATCH | `/api/incidents/{id}/acknowledge` | admin | 바디 없음 |
-| PATCH | `/api/incidents/{id}/resolve` | admin | `{resolutionNotes*: non-empty string}` |
+| PATCH | `/api/incidents/{id}/resolve` | admin | `{resolutionNotes?: string}` — **선택**(생략·빈 문자열·공백 허용) |
 | POST | `/api/incidents` | **none (internal)** | → 계약 13 |
 
 ### 출력 (계약)
@@ -123,7 +122,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
     "id": 12, "siteId": "site-001", "description": "gas leak",
     "occurredAt": "2026-04-13 10:20:30",
     "confirmedAt": null, "confirmedBy": null, "isTest": false,
-    "status": "open | acknowledged | resolved",
+    "status": "open | resolved",
     "resolvedAt": null, "resolvedBy": null, "resolutionNotes": null,
     "resolvedByKind": null, "resolvedById": null, "resolvedByLabel": null
   }],
@@ -131,7 +130,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 }
 ```
 
-`GET /api/incidents/active` → `200` — **미해결(open+acknowledged) 사고** 배열. 각 원소는 WS `crisis_alert` payload(계약 14)와 **동형**이다 — 배너 backfill이 실시간 push와 동일한 모양을 재구성하도록 계약된다(반쪽 배너 방지):
+`GET /api/incidents/active` → `200` — **미해결(open) 사고** 배열. 각 원소는 WS `crisis_alert` payload(계약 14)와 **동형**이다 — 배너 backfill이 실시간 push와 동일한 모양을 재구성하도록 계약된다(반쪽 배너 방지):
 
 ```json
 [{
@@ -140,21 +139,20 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
   "description": "gas leak",
   "occurredAt": "2026-04-13 10:20:30",
   "isTest": false,
-  "status": "open | acknowledged",
+  "status": "open",
   "site": { "address": "...", "managerName": "...", "managerPhone": "010-1234-5678" }
 }]
 ```
 
-- `PATCH .../acknowledge` → `200` `{"status":"acknowledged"}` · 이미 `resolved`면 `409`
-- `PATCH .../resolve` → `200` `{"status":"resolved", "resolvedByKind":"web", "resolvedById":"<username>", "resolvedByLabel":"..."}` · 이미 resolved면 `409` · notes 비어있으면 `400`
+- `PATCH .../resolve` → `200` `{"status":"resolved", "resolvedByKind":"web", "resolvedById":"<username>", "resolvedByLabel":"..."}` · 이미 resolved면 `409` · `resolutionNotes`는 **선택**(생략·빈 문자열·공백뿐이어도 `400`이 아니라 `200`으로 해소되며 빈 값/`null`로 저장)
 
 ### 핵심 로직 (불변식)
 
-- 상태 기계: `open → acknowledged → resolved` (resolved는 종단 — 재해결 `409`)
+- 상태 기계: `open → resolved` (중간 확인 상태 없음 — `acknowledged` 상태·확인 액션은 계약에서 제거됨; resolved는 종단 — 재해결 `409`)
 - **양방향 해소 attribution**: `resolvedByKind ∈ {"web", "sensor_button", null}` — 웹 해제는 본 계약, 센서 버튼 해제는 계약 13(`resolve-from-sensor`). 어느 경로든 동일 필드에 기록
 - resolve 성공 부작용 3종: (a) recording 아카이브 finalize 비동기 트리거 (b) hw-gateway `/api/alert/resolved`(계약 15) 경유 MQTT `safety/{siteId}/alert/resolved` 발행 (c) WS `incident_resolved` 브로드캐스트 (계약 14)
 - `limit > 100` 요청은 100으로 클램프 (에러 아님)
-- **`/api/incidents/active` (배너 backfill 계약)**: `status ∈ {open, acknowledged}`만 반환(resolved 제외), 발생시각 내림차순. 각 원소의 식별자는 계약 2 목록의 `id`가 아니라 `crisis_alert`와 동일하게 **`incidentId`**이며, 사고 site의 `{address, managerName, managerPhone}`를 **`site`로 중첩** 포함한다(sites 테이블(계약 4)에서 조인). 이 payload 동형성 보장으로 web-frontend가 접속/재접속 시 진행 중 위기 배너를 실시간 `crisis_alert`와 같은 모양으로 재구성하며, 현장 연락 정보가 결손된 반쪽 배너가 되지 않는다
+- **`/api/incidents/active` (배너 backfill 계약)**: `status ∈ {open}`만 반환(resolved 제외; `acknowledged`는 존재하지 않음), 발생시각 내림차순. 각 원소의 식별자는 계약 2 목록의 `id`가 아니라 `crisis_alert`와 동일하게 **`incidentId`**이며, 사고 site의 `{address, managerName, managerPhone}`를 **`site`로 중첩** 포함한다(sites 테이블(계약 4)에서 조인). 이 payload 동형성 보장으로 web-frontend가 접속/재접속 시 진행 중 위기 배너를 실시간 `crisis_alert`와 같은 모양으로 재구성하며, 현장 연락 정보가 결손된 반쪽 배너가 되지 않는다
 
 ### 검증 단언 (TDD)
 
@@ -166,14 +164,14 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 - [ ] `status=resolved` 필터 → `data[]`의 모든 `status == "resolved"`
 - [ ] open incident에 resolve(notes 있음) → `200`, `resolvedByKind == "web"`
 - [ ] 같은 incident에 resolve 재호출 → `409`
-- [ ] `resolutionNotes: ""` 로 resolve → `400`
-- [ ] user 토큰으로 acknowledge → `403`
+- [ ] `resolutionNotes: ""`(또는 생략·공백) 로 resolve → `400`이 아니라 `200`(노트 선택 — 빈 값/`null`로 저장)
+- [ ] user 토큰으로 resolve → `403` (해소는 admin 전용; 조회 `GET /api/incidents`는 user `200`)
 - [ ] resolve 성공 직후 WS 클라이언트가 `incident_resolved` 메시지 수신 (계약 14 단언과 교차)
-- [ ] `GET /api/incidents/active` → `200`, 모든 원소 `status ∈ {open, acknowledged}`(resolved 미포함), 각 원소에 `incidentId`·`site.address`·`site.managerName`·`site.managerPhone` 존재
+- [ ] `GET /api/incidents/active` → `200`, 모든 원소 `status == "open"`(resolved·acknowledged 미포함), 각 원소에 `incidentId`·`site.address`·`site.managerName`·`site.managerPhone` 존재
 - [ ] `GET /api/incidents/active` 원소의 키 집합이 `crisis_alert`(계약 14) payload와 동형 — `incidentId, siteId, description, occurredAt, isTest, site.{address,managerName,managerPhone}`
   ```bash
   curl -s -H "Authorization: Bearer $T" http://localhost:8080/api/incidents/active \
-    | jq -e 'all(.[]; has("incidentId") and (.status=="open" or .status=="acknowledged") and (.site|has("address") and has("managerName") and has("managerPhone")))'
+    | jq -e 'all(.[]; has("incidentId") and .status=="open" and (.site|has("address") and has("managerName") and has("managerPhone")))'
   ```
 
 ---
