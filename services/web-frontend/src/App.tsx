@@ -32,7 +32,7 @@ const PROTECTED_PATHS = Object.keys(PATH_TO_TAB);
 
 const tabs: { key: Tab; label: string; icon: string }[] = [
   { key: "cctv", label: "CCTV", icon: "📹" },
-  { key: "incidents", label: "사고이력", icon: "📋" },
+  { key: "incidents", label: "경보이력", icon: "📋" },
   { key: "management", label: "관리", icon: "⚙️" },
   { key: "settings", label: "설정", icon: "👤" },
 ];
