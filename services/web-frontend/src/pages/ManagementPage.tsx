@@ -1727,7 +1727,7 @@ export default function ManagementPage() {
           </div>
           <div className="mgmt-test-alert-section">
             <p className="mgmt-test-alert-desc">
-              테스트 비상 신호를 발송하여 전체 알림 체인(MQTT → hw-gateway → notifier → 각 알림 채널)을 검증합니다.
+              테스트 비상 신호를 발송하여 전체 알림 체인(MQTT → hw-gateway → notifier → KakaoTalk/SMS/이메일)을 검증합니다.
               모든 메시지에 [테스트] 접두사가 포함됩니다.
             </p>
             {testAlertError && <p className="mgmt-form-error">{testAlertError}</p>}
@@ -1747,7 +1747,7 @@ export default function ManagementPage() {
 
       {/* Notification channel test-send section (admin only) — spec notification-test-send §출력 13 */}
       {showAccounts && (
-        <>
+        <div data-testid="notify-test">
           <div className="mgmt-section-divider" />
           <div className="mgmt-header">
             <h2>알림 채널 테스트 발송</h2>
@@ -1815,7 +1815,7 @@ export default function ManagementPage() {
               </button>
             </div>
           </div>
-        </>
+        </div>
       )}
 
       {/* Storage & Archives section (admin only) */}
