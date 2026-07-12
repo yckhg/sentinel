@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1359,6 +1360,15 @@ func sanitizeHeader(s string) string {
 	}, s)
 }
 
+// smtpSendBudget bounds the ENTIRE SMTP exchange (dial + every protocol step) for a
+// single email so a configured-but-unresponsive host (accepts TCP, never replies)
+// terminates as an error within the per-channel budget (≤12s, §출력 9) instead of
+// blocking past the web-backend proxy hop (15s) and being mis-reported as a false
+// `502 upstream_unavailable`. Kept comfortably under 12s. net/smtp.SendMail sets no
+// deadline at all, so a blackholed host would hang indefinitely — this replaces it
+// with an explicit-deadline exchange that never leaks a goroutine.
+const smtpSendBudget = 11 * time.Second
+
 func sendEmail(cfg Config, to, subject, body string) error {
 	addr := fmt.Sprintf("%s:%s", cfg.SMTPHost, cfg.SMTPPort)
 
@@ -1371,10 +1381,62 @@ func sendEmail(cfg Config, to, subject, body string) error {
 	msg := []byte(fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n%s\r\n%s",
 		cfg.SMTPFrom, to, subject, mime, body))
 
-	auth := smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPHost)
-	if err := smtp.SendMail(addr, auth, cfg.SMTPFrom, []string{to}, msg); err != nil {
-		return fmt.Errorf("smtp send: %s", scrub(err.Error()))
+	// Bound dial and the whole exchange under one wall-clock budget. Measuring from
+	// `start` before the dial and setting the same absolute deadline on the conn
+	// means dial + HELO + STARTTLS + AUTH + MAIL/RCPT/DATA together finish by
+	// start+budget — no step can hang past the per-channel budget.
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", addr, smtpSendBudget)
+	if err != nil {
+		return fmt.Errorf("smtp dial: %s", scrub(err.Error()))
 	}
+	_ = conn.SetDeadline(start.Add(smtpSendBudget))
+
+	client, err := smtp.NewClient(conn, cfg.SMTPHost)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("smtp connect: %s", scrub(err.Error()))
+	}
+	defer client.Close() // closes the underlying conn on every return path
+
+	if err := client.Hello("localhost"); err != nil {
+		return fmt.Errorf("smtp helo: %s", scrub(err.Error()))
+	}
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(&tls.Config{ServerName: cfg.SMTPHost}); err != nil {
+			return fmt.Errorf("smtp starttls: %s", scrub(err.Error()))
+		}
+	}
+	if cfg.SMTPUser != "" {
+		// Auth was intended (SMTP_USER set). Match stdlib smtp.SendMail fail-loud
+		// semantics: if the server does not advertise AUTH, do NOT silently send
+		// unauthenticated — return an error so a misconfiguration surfaces as
+		// outcome=failed rather than a surprising `sent` (§출력 4 정직성).
+		if ok, _ := client.Extension("AUTH"); !ok {
+			return fmt.Errorf("smtp auth: server does not advertise AUTH but SMTP_USER is set")
+		}
+		auth := smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPHost)
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth: %s", scrub(err.Error()))
+		}
+	}
+	if err := client.Mail(cfg.SMTPFrom); err != nil {
+		return fmt.Errorf("smtp mail: %s", scrub(err.Error()))
+	}
+	if err := client.Rcpt(to); err != nil {
+		return fmt.Errorf("smtp rcpt: %s", scrub(err.Error()))
+	}
+	wc, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("smtp data: %s", scrub(err.Error()))
+	}
+	if _, err := wc.Write(msg); err != nil {
+		return fmt.Errorf("smtp write: %s", scrub(err.Error()))
+	}
+	if err := wc.Close(); err != nil {
+		return fmt.Errorf("smtp write close: %s", scrub(err.Error()))
+	}
+	_ = client.Quit()
 	return nil
 }
 
@@ -1438,6 +1500,139 @@ func handleSendEmail(cfg Config) http.HandlerFunc {
 	}
 }
 
+// --- Channel Test-Send (docs/spec/notification-test-send.md) ---
+//
+// Two internal endpoints back the admin test-send surface proxied by web-backend:
+//   GET  /internal/channel-status → {email:{usable,reason}, sms:{usable,reason}}
+//   POST /internal/test-send {channel,target} → {outcome} (sent|failed|not_configured)
+//
+// The usability rule (§출력 2) is the SINGLE judgment shared by status AND send, so
+// the two can never disagree: email is usable when SMTP_HOST and SMTP_FROM are both
+// present; SMS is usable when SMS_ENABLED=="true" AND its credentials exist (ENABLED
+// off ⇒ usable=false even with creds). A configured channel that then fails to send
+// reports `failed` (not not_configured); an unconfigured channel is never attempted
+// and reports not_configured (§출력 3·4). The single specified target is tried once —
+// the crisis fallback chain and contact fan-out are bypassed (§출력 5·6).
+
+type channelUsability struct {
+	Usable bool   `json:"usable"`
+	Reason string `json:"reason"`
+}
+
+// emailChannelUsable reports whether the email channel can attempt a send (§출력 2).
+func emailChannelUsable(cfg Config) bool {
+	return cfg.SMTPHost != "" && cfg.SMTPFrom != ""
+}
+
+// smsChannelUsable reports whether the SMS channel can attempt a send (§출력 2):
+// SMS_ENABLED=="true" AND credentials present. ENABLED off ⇒ false even with creds.
+func smsChannelUsable(cfg Config) bool {
+	return os.Getenv("SMS_ENABLED") == "true" && cfg.NHNAppKey != "" && cfg.NHNSecretKey != ""
+}
+
+func usabilityFor(usable bool) channelUsability {
+	if usable {
+		return channelUsability{Usable: true, Reason: ""}
+	}
+	return channelUsability{Usable: false, Reason: "not_configured"}
+}
+
+// handleChannelStatus serves GET /internal/channel-status. It reports each in-scope
+// channel's current runtime usability from THIS process's live env config, so a
+// notifier restart with new config is reflected on the next request without a
+// web-backend restart (§출력 7). KakaoTalk is not in the in-scope set (§출력 12).
+func handleChannelStatus(cfg Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !isInternalIP(r.RemoteAddr) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{"error": "access denied"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]channelUsability{
+			"email": usabilityFor(emailChannelUsable(cfg)),
+			"sms":   usabilityFor(smsChannelUsable(cfg)),
+		})
+	}
+}
+
+// handleTestSend serves POST /internal/test-send {channel,target}. It attempts a
+// single synchronous send on exactly one channel to exactly the given target,
+// bypassing the crisis fallback chain and contact fan-out, and returns the closed
+// outcome set {sent, failed, not_configured} (§출력 3·5·6). Unconfigured channels
+// are never attempted (not_configured); a configured channel that errors is
+// `failed` (§출력 4). Uses the operational credentials/transport (sendEmail /
+// sendSMSOnce), not a mock path.
+func handleTestSend(cfg Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !isInternalIP(r.RemoteAddr) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{"error": "access denied"})
+			return
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		var req struct {
+			Channel string `json:"channel"`
+			Target  string `json:"target"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid JSON payload"}`, http.StatusBadRequest)
+			return
+		}
+		req.Channel = strings.TrimSpace(req.Channel)
+		req.Target = strings.TrimSpace(req.Target)
+
+		writeOutcome := func(outcome, reason string) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			out := map[string]string{"outcome": outcome}
+			if reason != "" {
+				out["reason"] = reason
+			}
+			json.NewEncoder(w).Encode(out)
+		}
+
+		switch req.Channel {
+		case "email":
+			if !emailChannelUsable(cfg) {
+				writeOutcome("not_configured", "")
+				return
+			}
+			// Single test email via the operational transport (fan-out bypassed).
+			subject := "[Sentinel] 테스트 이메일"
+			body := `<html><body><p>Sentinel 알림 채널 테스트 이메일입니다.</p></body></html>`
+			if err := sendEmail(cfg, req.Target, subject, sanitizeHTML(body)); err != nil {
+				logf("[test-send] email FAILED to %s: %v", maskEmail(req.Target), err)
+				writeOutcome("failed", scrub(err.Error()))
+				return
+			}
+			logf("[test-send] email sent to %s", maskEmail(req.Target))
+			writeOutcome("sent", "")
+		case "sms":
+			if !smsChannelUsable(cfg) {
+				writeOutcome("not_configured", "")
+				return
+			}
+			// Single test SMS via the operational transport (fallback chain bypassed).
+			contact := Contact{Phone: req.Target, Name: "test"}
+			alert := AlertPayload{Description: "Sentinel 알림 채널 테스트", Type: "test", SiteID: "-", DeviceID: "-", Severity: "info", Timestamp: time.Now().UTC().Format(time.RFC3339), Test: true}
+			if _, err := sendSMSOnce(cfg, contact, alert, ""); err != nil {
+				logf("[test-send] sms FAILED to %s: %v", maskPhone(req.Target), err)
+				writeOutcome("failed", scrub(err.Error()))
+				return
+			}
+			logf("[test-send] sms sent to %s", maskPhone(req.Target))
+			writeOutcome("sent", "")
+		default:
+			http.Error(w, `{"error":"unsupported channel"}`, http.StatusBadRequest)
+		}
+	}
+}
+
 // --- Main ---
 
 func main() {
@@ -1455,6 +1650,11 @@ func main() {
 
 	mux.HandleFunc("POST /api/notify", handleNotify(cfg, dedup))
 	mux.HandleFunc("POST /api/send-email", handleSendEmail(cfg))
+
+	// Channel test-send (admin surface, proxied by web-backend over the internal
+	// Docker network) — runtime channel status + single synchronous test send.
+	mux.HandleFunc("GET /internal/channel-status", handleChannelStatus(cfg))
+	mux.HandleFunc("POST /internal/test-send", handleTestSend(cfg))
 
 	srv := newHTTPServer(maxBytesMiddleware(mux))
 

@@ -67,6 +67,21 @@ interface ActiveUser {
   createdAt: string;
 }
 
+interface ChannelUsability {
+  usable: boolean;
+  reason?: string;
+}
+
+interface ChannelStatus {
+  email: ChannelUsability;
+  sms: ChannelUsability;
+}
+
+interface NotifyTestResult {
+  msg: string;
+  error: boolean;
+}
+
 const PHONE_REGEX = /^01[016789]-\d{3,4}-\d{4}$/;
 
 function formatPhoneInput(value: string): string {
@@ -187,6 +202,17 @@ export default function ManagementPage() {
   const [testAlertLoading, setTestAlertLoading] = useState(false);
   const [testAlertError, setTestAlertError] = useState<string | null>(null);
   const [testAlertSuccess, setTestAlertSuccess] = useState<string | null>(null);
+
+  // Notification channel test-send (docs/spec/notification-test-send.md §출력 13).
+  // 요청 시점 설정 판정: GET /api/notifications/channels 로 채널 usable 상태를 읽어
+  // 미설정(usable=false) 채널은 안내 + 버튼 비활성. 발송은 POST /api/notifications/test.
+  const [channelStatus, setChannelStatus] = useState<ChannelStatus | null>(null);
+  const [notifyTestEmail, setNotifyTestEmail] = useState("");
+  const [notifyTestPhone, setNotifyTestPhone] = useState("");
+  const [notifyTestEmailLoading, setNotifyTestEmailLoading] = useState(false);
+  const [notifyTestSmsLoading, setNotifyTestSmsLoading] = useState(false);
+  const [notifyTestEmailResult, setNotifyTestEmailResult] = useState<NotifyTestResult | null>(null);
+  const [notifyTestSmsResult, setNotifyTestSmsResult] = useState<NotifyTestResult | null>(null);
 
   // System settings state
   const [siteUrl, setSiteUrl] = useState("");
@@ -436,6 +462,59 @@ export default function ManagementPage() {
       );
     } finally {
       setTestAlertLoading(false);
+    }
+  };
+
+  const fetchChannelStatus = async () => {
+    try {
+      const res = await fetchWithTimeout("/api/notifications/channels", { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: ChannelStatus = await res.json();
+      setChannelStatus(data);
+    } catch {
+      // notifier 미도달/조회 실패는 usability 미상 — null 유지(§출력 14, 거짓 미설정 강등 없음).
+      setChannelStatus(null);
+    }
+  };
+
+  // 채널별 단건 테스트 발송. 관리자가 그 자리에서 입력한 명시 단일 대상에게만 보낸다
+  // (등록 연락처 팬아웃 없음). outcome(sent/failed/not_configured)을 정직하게 표시한다.
+  const handleNotifyTest = async (channel: "email" | "sms", target: string) => {
+    const setLoading = channel === "email" ? setNotifyTestEmailLoading : setNotifyTestSmsLoading;
+    const setResult = channel === "email" ? setNotifyTestEmailResult : setNotifyTestSmsResult;
+    setLoading(true);
+    setResult(null);
+    try {
+      const res = await fetchWithTimeout("/api/notifications/test", {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ channel, target }),
+      });
+      const data = await res.json().catch(() => ({} as { outcome?: string; reason?: string; error?: string }));
+      if (!res.ok) {
+        const msg =
+          res.status === 400 ? "입력값이 올바르지 않습니다"
+          : res.status === 429 ? "잠시 후 다시 시도하세요 (분당 1건 제한)"
+          : res.status === 502 ? "발송 서비스에 연결할 수 없습니다"
+          : data.error || `발송 실패 (HTTP ${res.status})`;
+        setResult({ msg, error: true });
+        return;
+      }
+      const outcome = (data as { outcome?: string; reason?: string }).outcome;
+      if (outcome === "sent") {
+        setResult({ msg: "테스트 메시지를 발송했습니다", error: false });
+      } else if (outcome === "not_configured") {
+        setResult({ msg: "채널이 미설정 상태입니다", error: true });
+      } else if (outcome === "failed") {
+        const reason = (data as { reason?: string }).reason;
+        setResult({ msg: reason ? `발송 실패: ${reason}` : "발송에 실패했습니다", error: true });
+      } else {
+        setResult({ msg: "발송 결과를 확인할 수 없습니다", error: true });
+      }
+    } catch (err) {
+      setResult({ msg: isTimeoutError(err) ? timeoutMessage() : "발송 요청을 처리하지 못했습니다", error: true });
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -786,6 +865,7 @@ export default function ManagementPage() {
       fetchStorage();
       fetchArchives();
       fetchSettings();
+      fetchChannelStatus();
     }
   }, []);
 
@@ -1663,6 +1743,79 @@ export default function ManagementPage() {
             </div>
           </div>
         </>
+      )}
+
+      {/* Notification channel test-send section (admin only) — spec notification-test-send §출력 13 */}
+      {showAccounts && (
+        <div data-testid="notify-test">
+          <div className="mgmt-section-divider" />
+          <div className="mgmt-header">
+            <h2>알림 채널 테스트 발송</h2>
+          </div>
+          <div className="mgmt-form">
+            <p className="mgmt-form-hint">
+              입력한 단일 대상에게 채널별로 테스트 메시지 1건을 보내 실제 발송 동작을 확인합니다.
+              등록된 비상연락처로 발송되지 않습니다.
+            </p>
+
+            {/* 이메일 채널 */}
+            <div className="mgmt-form-field">
+              <label>이메일 테스트 대상</label>
+              <input
+                type="email"
+                value={notifyTestEmail}
+                onChange={(e) => { setNotifyTestEmail(e.target.value); setNotifyTestEmailResult(null); }}
+                placeholder="test@example.com"
+              />
+              {channelStatus && !channelStatus.email.usable && (
+                <span className="mgmt-form-hint">이메일 채널 미설정 — 테스트를 보낼 수 없습니다</span>
+              )}
+            </div>
+            {notifyTestEmailResult && (
+              <p className={notifyTestEmailResult.error ? "mgmt-form-error" : "mgmt-form-success"}>
+                {notifyTestEmailResult.msg}
+              </p>
+            )}
+            <div className="mgmt-form-actions">
+              <button
+                className="mgmt-btn mgmt-btn-primary"
+                onClick={() => handleNotifyTest("email", notifyTestEmail.trim())}
+                disabled={notifyTestEmailLoading || (channelStatus ? !channelStatus.email.usable : false)}
+              >
+                {notifyTestEmailLoading ? "발송 중..." : "이메일 테스트 전송"}
+              </button>
+            </div>
+
+            {/* SMS 채널 */}
+            <div className="mgmt-form-field">
+              <label>SMS 테스트 대상</label>
+              <input
+                type="tel"
+                value={notifyTestPhone}
+                onChange={(e) => { setNotifyTestPhone(formatPhoneInput(e.target.value)); setNotifyTestSmsResult(null); }}
+                placeholder="010-1234-5678"
+                maxLength={13}
+              />
+              {channelStatus && !channelStatus.sms.usable && (
+                <span className="mgmt-form-hint">SMS 채널 미설정 — 테스트를 보낼 수 없습니다</span>
+              )}
+            </div>
+            {notifyTestSmsResult && (
+              <p className={notifyTestSmsResult.error ? "mgmt-form-error" : "mgmt-form-success"}>
+                {notifyTestSmsResult.msg}
+              </p>
+            )}
+            <div className="mgmt-form-actions">
+              <button
+                className="mgmt-btn mgmt-btn-primary"
+                onClick={() => handleNotifyTest("sms", notifyTestPhone.trim())}
+                disabled={notifyTestSmsLoading || (channelStatus ? !channelStatus.sms.usable : false)}
+              >
+                {notifyTestSmsLoading ? "발송 중..." : "SMS 테스트 전송"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Storage & Archives section (admin only) */}
