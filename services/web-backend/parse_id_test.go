@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,19 +11,27 @@ import (
 // integer with 400. fmt.Sscanf("%d") used to accept inputs like "5abc" or "5/9"
 // as 5 (silently approving/rejecting user 5); strconv.ParseInt rejects them.
 //
-// Only invalid inputs are exercised — parsing happens before any DB access, so a
-// nil *sql.DB is safe (a valid numeric id would proceed to the DB and is out of
-// scope here).
+// A real (seeded) DB is used rather than a nil *sql.DB: requireAdmin now runs a
+// password_changed_at boundary query (#83) on every admin verification, before
+// the parse logic, so the handler must reach a live DB to get past auth. The
+// seeded admin (id=1) has a NULL boundary, so the freshly minted admin token is
+// valid and the request reaches — and is rejected by — the strict-ID parsing.
 func TestApproveRejectStrictIDParsing(t *testing.T) {
-	jwtSecret = []byte("test-secret-strict-parse")
+	db := newTestDB(t)
+	if _, err := db.Exec(
+		"INSERT INTO users (id, username, password_hash, name, role, status) VALUES (1, 'admin', 'h', 'Admin', 'admin', 'active')",
+	); err != nil {
+		t.Fatalf("seed admin user: %v", err)
+	}
+
 	token, err := generateJWT(1, "admin")
 	if err != nil {
 		t.Fatalf("generateJWT: %v", err)
 	}
 
 	handlers := map[string]http.HandlerFunc{
-		"approve": handleApproveUser((*sql.DB)(nil)),
-		"reject":  handleRejectUser((*sql.DB)(nil)),
+		"approve": handleApproveUser(db),
+		"reject":  handleRejectUser(db),
 	}
 
 	// Inputs the old fmt.Sscanf(%d) parse would silently accept as an int (or
