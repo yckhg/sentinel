@@ -467,15 +467,20 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
   const selFromTime = fractionToTime(selStart);
   const selToTime = fractionToTime(selEnd);
 
-  // Split archives by readiness. `completed` archives are the ready-to-download
-  // set: they are surfaced in an always-visible "준비됨" section so a prepared
-  // download stays reachable (단위B: completed → 활성 다운로드 + 준비됨 + completedAt).
-  // Every non-completed archive (in-progress 4종 / failed / unknown) is gated
-  // behind the collapsible 보관 목록 — no ready affordance, matching the download
-  // gate (단언 B1/B4/B6). Splitting also avoids a completed row appearing in both
-  // places (which would duplicate the download control).
+  // Split archives into three surfaces:
+  //  - `completed` → always-visible "준비됨" ready section (활성 다운로드 + completedAt).
+  //  - `failed`    → always-visible failure section with lastError, so a failure
+  //    that arrives after the user re-collapses/reloads is never hidden behind
+  //    the collapsible list (단언 B4 — 실패는 조용히 사라지지 않는다).
+  //  - everything else (in-progress 4종 / unknown) → collapsible 보관 목록.
+  // Neither ready nor failed exposes a stale collapse; only in-progress/unknown
+  // are gated behind the toggle. Splitting also avoids a row appearing twice.
   const readyArchives = archives.filter((a) => normalizeArchiveState(a.status) === "completed");
-  const pendingArchives = archives.filter((a) => normalizeArchiveState(a.status) !== "completed");
+  const failedArchives = archives.filter((a) => normalizeArchiveState(a.status) === "failed");
+  const pendingArchives = archives.filter((a) => {
+    const s = normalizeArchiveState(a.status);
+    return s !== "completed" && s !== "failed";
+  });
 
   return (
     <div className="rec-timeline-container" onClick={(e) => e.stopPropagation()}>
@@ -699,9 +704,39 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
             </div>
           )}
 
-          {/* Collapsible list of non-completed archives (in-progress / failed /
-              unknown). None expose a download or a "준비됨/완료" ready state — the
-              download affordance is gated on `completed` only (단언 B1/B4/B6). */}
+          {/* Failed archives — surfaced in the always-visible area (like the
+              ready section) with the lastError reason, so a failure is never
+              hidden behind the collapsed list or lost on reload (단언 B4). No
+              download control is offered (download gated on `completed` only). */}
+          {failedArchives.length > 0 && (
+            <div className="rec-timeline-archives-failed">
+              {failedArchives.map((a) => (
+                <div key={a.id} className="rec-timeline-archive-item">
+                  <div className="rec-timeline-archive-info">
+                    <span className="rec-timeline-archive-time">
+                      {formatTime(new Date(a.from))} ~ {formatTime(new Date(a.to))}
+                    </span>
+                    <span
+                      className="rec-timeline-archive-status failed"
+                      data-archive-state="failed"
+                    >
+                      실패
+                    </span>
+                    <span
+                      className="rec-timeline-archive-error"
+                      title={a.lastError || "보관 처리 중 오류가 발생했습니다"}
+                    >
+                      {a.lastError || "보관 처리 중 오류가 발생했습니다"}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Collapsible list of in-progress / unknown archives. None expose a
+              download or a "준비됨/완료" ready state — the download affordance is
+              gated on `completed` only (단언 B1/B6). */}
           <button
             className="rec-timeline-archives-toggle"
             onClick={() => setShowArchives(!showArchives)}
@@ -725,14 +760,6 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
                         {state === "completed" ? "준비됨" : ARCHIVE_STATE_LABEL[state]}
                       </span>
                     </div>
-                    {state === "failed" && (
-                      <span
-                        className="rec-timeline-archive-error"
-                        title={a.lastError || "보관 처리 중 오류가 발생했습니다"}
-                      >
-                        {a.lastError || "보관 처리 중 오류가 발생했습니다"}
-                      </span>
-                    )}
                   </div>
                 );
               })}
