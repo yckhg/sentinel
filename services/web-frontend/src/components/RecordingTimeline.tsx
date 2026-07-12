@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchWithTimeout } from "../utils/fetchWithTimeout";
-import { parseServerDate, formatKstClock } from "../utils/datetime";
+import { parseServerDate, formatKstClock, formatKstTime } from "../utils/datetime";
 
 interface TimeRange {
   start: string;
@@ -17,7 +17,13 @@ interface ArchiveInfo {
   sizeBytes: number;
   filePath: string;
   status: string;
-  error?: string;
+  // completedAt: RFC3339 UTC instant recorded when the archive reached `completed`
+  // (non-null only for completed archives). Displayed as local (KST) ready time
+  // — the UTC value is the source of truth (archive-download-ux 단위B 출력계약, 단언 B8).
+  completedAt?: string;
+  // lastError: human-readable failure reason for `failed` archives (recording
+  // wire field `lastError`; 단언 B4).
+  lastError?: string;
 }
 
 interface IncidentMarker {
@@ -61,6 +67,14 @@ function normalizeArchiveState(status: string): ArchiveState {
     default:
       return "unknown";
   }
+}
+
+// Terminal states end the neutral-transition lifecycle: once an archive is
+// completed/failed there is nothing left to "확인" — a stale/needsCheck marker
+// on it must self-heal (단언 B7, banner↔list 무모순).
+function isTerminalState(status: string): boolean {
+  const s = normalizeArchiveState(status);
+  return s === "completed" || s === "failed";
 }
 
 interface RecordingTimelineProps {
@@ -114,12 +128,21 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
     message: string;
     archiveId?: string;
     sizeBytes?: number;
+    // needsCheck: the polling window (5min) elapsed without a terminal
+    // (completed/failed) observation. The banner then shows a neutral
+    // "확인 필요 / 새로고침 유도" affordance instead of an infinite "처리 중"
+    // spinner (archive-download-ux 단위B 핵심로직 L101, 단언 B7).
+    needsCheck?: boolean;
   } | null>(null);
 
   // Archives list
   const [archives, setArchives] = useState<ArchiveInfo[]>([]);
   const [showArchives, setShowArchives] = useState(false);
   const [downloading, setDownloading] = useState<string | null>(null);
+  // Archives whose polling window expired while still non-terminal. Such rows
+  // must NOT stay stuck on "처리 중" forever — they transition to a neutral
+  // "확인 필요" label with a manual re-poll control (단언 B7).
+  const [staleArchiveIds, setStaleArchiveIds] = useState<Set<string>>(() => new Set());
 
   // Incident markers
   const [incidents, setIncidents] = useState<IncidentMarker[]>([]);
@@ -190,7 +213,33 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
       });
       if (res.ok) {
         const data: ArchiveInfo[] = await res.json();
-        setArchives(data.filter((a) => a.streamKey === streamKey));
+        const mine = data.filter((a) => a.streamKey === streamKey);
+        setArchives(mine);
+        // Self-heal the neutral-transition surfaces. This minute-level fetch is
+        // independent of the (possibly stopped) polling window: if it observes
+        // that a tracked archive has since reached a terminal state, clear the
+        // stale row marker and the "확인할 수 없습니다" banner so the UI never
+        // contradicts itself (banner "확인 불가" while the list shows 준비됨 +
+        // 다운로드). Banner self-heals without a manual 새로고침 (단언 B7).
+        const terminalIds = new Set(mine.filter((a) => isTerminalState(a.status)).map((a) => a.id));
+        if (terminalIds.size > 0) {
+          setStaleArchiveIds((s) => {
+            let changed = false;
+            const n = new Set(s);
+            for (const id of s) {
+              if (terminalIds.has(id)) {
+                n.delete(id);
+                changed = true;
+              }
+            }
+            return changed ? n : s;
+          });
+          setArchiveResult((r) =>
+            r && r.needsCheck && r.archiveId && terminalIds.has(r.archiveId)
+              ? { ...r, needsCheck: false }
+              : r,
+          );
+        }
       }
     } catch {
       // silent
@@ -370,6 +419,67 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
     }
   };
 
+  // Poll /api/archives until the target archive reaches a terminal state
+  // (completed/failed), then reflect it. Reusable so the neutral "확인 필요"
+  // state's manual refresh control can restart a fresh polling window.
+  const startPolling = useCallback((archiveId: string) => {
+    stopPolling();
+    // Clear any stale/neutral marker and needsCheck banner for a fresh window.
+    setStaleArchiveIds((s) => {
+      if (!s.has(archiveId)) return s;
+      const n = new Set(s);
+      n.delete(archiveId);
+      return n;
+    });
+    setArchiveResult((r) => (r && r.needsCheck ? { ...r, needsCheck: false } : r));
+
+    pollIntervalRef.current = setInterval(async () => {
+      try {
+        const pollRes = await fetchWithTimeout("/api/archives", {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        // Transport-layer 5xx (recording restart → web-backend proxy 502) is
+        // NOT an archive failure: skip this tick and retry next one, keeping
+        // "처리 중" (단위B 핵심로직 L100 — 전송 계층 오류 ≠ 아카이브 실패).
+        if (pollRes.ok) {
+          const data: ArchiveInfo[] = await pollRes.json();
+          const myArchives = data.filter((a) => a.streamKey === streamKey);
+          setArchives(myArchives);
+          const target = myArchives.find((a) => a.id === archiveId);
+          if (!target || target.status === "completed" || target.status === "failed") {
+            stopPolling();
+            if (target?.status === "failed") {
+              setArchiveResult({
+                success: false,
+                message: target.lastError || "보관 처리 중 오류가 발생했습니다",
+              });
+            }
+          }
+        }
+      } catch {
+        // F2: transient transport error (network blip / timeout / thrown 5xx).
+        // Do NOT stop polling and do NOT mark the archive failed — keep
+        // "처리 중" and retry on the next tick. Only the 5-min cap below ends
+        // polling, transitioning the row to the neutral 확인 필요 state — never
+        // a transient throw (단위B 핵심로직 L100, 단언 B7: 전송 오류 → 처리 중 유지+재시도).
+      }
+    }, 3000);
+
+    // Bounded polling window. Reaching a terminal state clears this timeout via
+    // stopPolling(), so if this fires the archive is still non-terminal: do NOT
+    // strand the user in "처리 중" — transition to a neutral 확인 필요 state that
+    // prompts a manual re-poll (단위B 핵심로직 L101, 단언 B7).
+    pollTimeoutRef.current = setTimeout(() => {
+      stopPolling();
+      setStaleArchiveIds((s) => {
+        const n = new Set(s);
+        n.add(archiveId);
+        return n;
+      });
+      setArchiveResult((r) => (r && r.archiveId === archiveId ? { ...r, needsCheck: true } : r));
+    }, 5 * 60 * 1000);
+  }, [stopPolling, streamKey, token]);
+
   // Archive the selected range
   const handleArchive = async () => {
     setArchiving(true);
@@ -400,35 +510,29 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
           message: `보관 요청 완료: ${formatTime(from)} ~ ${formatTime(to)} (${formatDuration(from, to)})`,
           archiveId: archive?.id,
         });
-        // Poll for archive completion. Handles live in refs so the component's
-        // unmount cleanup can stop them (#93).
-        stopPolling();
-        pollIntervalRef.current = setInterval(async () => {
-          try {
-            const pollRes = await fetchWithTimeout("/api/archives", {
-              headers: token ? { Authorization: `Bearer ${token}` } : {},
-            });
-            if (pollRes.ok) {
-              const data: ArchiveInfo[] = await pollRes.json();
-              const myArchives = data.filter((a) => a.streamKey === streamKey);
-              setArchives(myArchives);
-              const target = myArchives.find((a) => a.id === archive?.id);
-              if (!target || target.status === "completed" || target.status === "failed") {
-                stopPolling();
-                if (target?.status === "failed") {
-                  setArchiveResult({
-                    success: false,
-                    message: target.error || "보관 처리 중 오류가 발생했습니다",
-                  });
-                }
-              }
-            }
-          } catch {
+        // Auto-expand the archive list on request so the user observes the
+        // status transition (요청됨/처리 중 → 준비됨) without extra navigation
+        // (archive-download-ux 단위B 출력계약 자동 펼침, 단언 B5).
+        setShowArchives(true);
+        // Poll for archive completion (handles live in refs so unmount cleanup
+        // can stop them, #93). Transport errors keep polling (F2); the bounded
+        // window ends in a neutral 확인 필요 state, never infinite 처리 중 (F1/B7).
+        if (archive?.id) {
+          startPolling(archive.id);
+        } else {
+          // Defensive: a 2xx create WITHOUT a usable id (contract violation).
+          // We can't poll a specific archive, but a row for it can still be
+          // surfaced by the independent fetchArchives and would otherwise render
+          // "처리 중" forever with no route to the neutral state. Arm a bounded
+          // window keyed off the request itself so the neutral 확인 필요 path is
+          // always reachable — on expiry the banner flips to needsCheck with a
+          // manual 새로고침 (→ fetchArchives). Never a stranded spinner (단언 B7).
+          stopPolling();
+          pollTimeoutRef.current = setTimeout(() => {
             stopPolling();
-          }
-        }, 3000);
-        // Safety: stop polling after 5 minutes
-        pollTimeoutRef.current = setTimeout(() => stopPolling(), 5 * 60 * 1000);
+            setArchiveResult((r) => (r && r.success ? { ...r, needsCheck: true } : r));
+          }, 5 * 60 * 1000);
+        }
       } else {
         const data = await res.json().catch(() => ({}));
         setArchiveResult({
@@ -456,6 +560,21 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
 
   const selFromTime = fractionToTime(selStart);
   const selToTime = fractionToTime(selEnd);
+
+  // Split archives into three surfaces:
+  //  - `completed` → always-visible "준비됨" ready section (활성 다운로드 + completedAt).
+  //  - `failed`    → always-visible failure section with lastError, so a failure
+  //    that arrives after the user re-collapses/reloads is never hidden behind
+  //    the collapsible list (단언 B4 — 실패는 조용히 사라지지 않는다).
+  //  - everything else (in-progress 4종 / unknown) → collapsible 보관 목록.
+  // Neither ready nor failed exposes a stale collapse; only in-progress/unknown
+  // are gated behind the toggle. Splitting also avoids a row appearing twice.
+  const readyArchives = archives.filter((a) => normalizeArchiveState(a.status) === "completed");
+  const failedArchives = archives.filter((a) => normalizeArchiveState(a.status) === "failed");
+  const pendingArchives = archives.filter((a) => {
+    const s = normalizeArchiveState(a.status);
+    return s !== "completed" && s !== "failed";
+  });
 
   return (
     <div className="rec-timeline-container" onClick={(e) => e.stopPropagation()}>
@@ -620,36 +739,139 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
         </div>
       </div>
 
-      {/* Archive result */}
+      {/* Archive result. When the polling window elapsed without a terminal
+          state (needsCheck), show a neutral "확인 필요 / 새로고침 유도" affordance
+          instead of an infinite "처리 중" — the user is never stranded and can
+          re-poll manually (단위B 핵심로직 L101, 단언 B7). */}
       {archiveResult && (
-        <div className={`rec-timeline-result ${archiveResult.success ? "success" : "error"}`}>
-          <span>{archiveResult.message}</span>
-          {archiveResult.success && archiveResult.archiveId && (
-            <button
-              className="rec-timeline-download-link"
-              onClick={() => handleDownload(archiveResult.archiveId!)}
-              disabled={downloading === archiveResult.archiveId}
-            >
-              {downloading === archiveResult.archiveId ? "다운로드 중..." : "다운로드"}
-            </button>
+        <div
+          className={`rec-timeline-result ${
+            archiveResult.needsCheck ? "neutral" : archiveResult.success ? "success" : "error"
+          }`}
+        >
+          {archiveResult.needsCheck ? (
+            <>
+              <span>상태를 확인할 수 없습니다 — 새로고침해 주세요</span>
+              {/* Always reachable: with a tracked id, restart one bounded
+                  polling window; without one (id-less create fallback), a plain
+                  list refresh still routes out of the neutral state (단언 B7). */}
+              <button
+                className="rec-timeline-repoll-btn"
+                onClick={() =>
+                  archiveResult.archiveId
+                    ? startPolling(archiveResult.archiveId)
+                    : fetchArchives()
+                }
+              >
+                새로고침
+              </button>
+            </>
+          ) : (
+            <>
+              <span>{archiveResult.message}</span>
+              {archiveResult.success && archiveResult.archiveId && (
+                <button
+                  className="rec-timeline-download-link"
+                  onClick={() => handleDownload(archiveResult.archiveId!)}
+                  disabled={downloading === archiveResult.archiveId}
+                >
+                  {downloading === archiveResult.archiveId ? "다운로드 중..." : "다운로드"}
+                </button>
+              )}
+            </>
           )}
         </div>
       )}
 
-      {/* Archives list toggle */}
+      {/* Archives */}
       {archives.length > 0 && (
         <div className="rec-timeline-archives">
+          {/* Ready-to-download (completed) archives — always visible so a prepared
+              download is reachable without expanding the list. Each shows the
+              "준비됨" ready state, the local (KST) ready time, and an active
+              download action (단언 B2/B3/B8). */}
+          {readyArchives.length > 0 && (
+            <div className="rec-timeline-archives-ready">
+              {readyArchives.map((a) => (
+                <div key={a.id} className="rec-timeline-archive-item">
+                  <div className="rec-timeline-archive-info">
+                    <span className="rec-timeline-archive-time">
+                      {formatTime(new Date(a.from))} ~ {formatTime(new Date(a.to))}
+                    </span>
+                    <span
+                      className="rec-timeline-archive-status completed"
+                      data-archive-state="completed"
+                    >
+                      준비됨
+                    </span>
+                    {/* completedAt (UTC RFC3339) → local (KST). 고아 필드 방지, 값의 정본은 UTC (B8). */}
+                    {a.completedAt && (
+                      <span className="rec-timeline-archive-completed-at">
+                        {formatKstTime(a.completedAt)}
+                      </span>
+                    )}
+                    <span className="rec-timeline-archive-size">
+                      {formatBytes(a.sizeBytes)}
+                    </span>
+                  </div>
+                  <button
+                    className="rec-timeline-archive-download"
+                    onClick={() => handleDownload(a.id)}
+                    disabled={downloading === a.id}
+                  >
+                    {downloading === a.id ? "..." : "다운로드"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Failed archives — surfaced in the always-visible area (like the
+              ready section) with the lastError reason, so a failure is never
+              hidden behind the collapsed list or lost on reload (단언 B4). No
+              download control is offered (download gated on `completed` only). */}
+          {failedArchives.length > 0 && (
+            <div className="rec-timeline-archives-failed">
+              {failedArchives.map((a) => (
+                <div key={a.id} className="rec-timeline-archive-item">
+                  <div className="rec-timeline-archive-info">
+                    <span className="rec-timeline-archive-time">
+                      {formatTime(new Date(a.from))} ~ {formatTime(new Date(a.to))}
+                    </span>
+                    <span
+                      className="rec-timeline-archive-status failed"
+                      data-archive-state="failed"
+                    >
+                      실패
+                    </span>
+                    <span
+                      className="rec-timeline-archive-error"
+                      title={a.lastError || "보관 처리 중 오류가 발생했습니다"}
+                    >
+                      {a.lastError || "보관 처리 중 오류가 발생했습니다"}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Collapsible list of in-progress / unknown archives. None expose a
+              download or a "준비됨/완료" ready state — the download affordance is
+              gated on `completed` only (단언 B1/B6). A row whose polling window
+              expired while still non-terminal shows a neutral "확인 필요" label
+              with a manual re-poll control instead of a stuck "처리 중" (단언 B7). */}
           <button
             className="rec-timeline-archives-toggle"
             onClick={() => setShowArchives(!showArchives)}
           >
             보관 목록 ({archives.length}) {showArchives ? "▲" : "▼"}
           </button>
-          {showArchives && (
+          {showArchives && pendingArchives.length > 0 && (
             <div className="rec-timeline-archives-list">
-              {archives.map((a) => {
+              {pendingArchives.map((a) => {
                 const state = normalizeArchiveState(a.status);
-                const isCompleted = state === "completed";
+                const isStale = staleArchiveIds.has(a.id);
                 return (
                   <div key={a.id} className="rec-timeline-archive-item">
                     <div className="rec-timeline-archive-info">
@@ -657,31 +879,24 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
                         {formatTime(new Date(a.from))} ~ {formatTime(new Date(a.to))}
                       </span>
                       <span
-                        className={`rec-timeline-archive-status ${state}`}
-                        data-archive-state={state}
+                        className={`rec-timeline-archive-status ${isStale ? "needs-check" : state}`}
+                        data-archive-state={isStale ? "needs-check" : state}
                       >
-                        {isCompleted
-                          ? formatBytes(a.sizeBytes)
-                          : ARCHIVE_STATE_LABEL[state]}
+                        {isStale
+                          ? "확인 필요"
+                          : state === "completed"
+                            ? "준비됨"
+                            : ARCHIVE_STATE_LABEL[state]}
                       </span>
+                      {isStale && (
+                        <button
+                          className="rec-timeline-repoll-btn"
+                          onClick={() => startPolling(a.id)}
+                        >
+                          새로고침
+                        </button>
+                      )}
                     </div>
-                    {isCompleted && (
-                      <button
-                        className="rec-timeline-archive-download"
-                        onClick={() => handleDownload(a.id)}
-                        disabled={downloading === a.id}
-                      >
-                        {downloading === a.id ? "..." : "다운로드"}
-                      </button>
-                    )}
-                    {state === "failed" && (
-                      <span
-                        className="rec-timeline-archive-error"
-                        title={a.error || "보관 처리 중 오류가 발생했습니다"}
-                      >
-                        {a.error || "보관 처리 중 오류가 발생했습니다"}
-                      </span>
-                    )}
                   </div>
                 );
               })}

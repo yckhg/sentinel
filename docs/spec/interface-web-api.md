@@ -408,7 +408,8 @@ Device object:
 
 - 이 그룹에서 web-backend가 보장하는 것은 **인증 게이트 + 투명 프록시** 두 가지뿐 — 바디 변형·필터링 없음
 - JWT 없이는 어떤 프록시 경로도 통과 불가
-- **아카이브 status 소비자 계약**: `GET /api/archives` 응답 각 항목의 `status`는 recording 스펙([`docs/spec/recording.md`](recording.md) §출력·§HTTP API)이 **정의를 소유**하는 enum 6종 `{protecting, pending, finalizing, processing, completed, failed}` 중 하나다(값 정의 SSOT=recording 스펙, 본 계약은 값을 재정의하지 않음). 이 enum을 소비하는 web-frontend는 다음을 **의무로** 지킨다 — (a) 6종 **전부**를 처리한다, (b) 이 6종에 없는 **미지 상태가 오면 안전 fallback**한다: 미완료(진행 중)로 취급하며 임의로 완료(`completed`)로 표시하지 않는다, (c) `failed`는 오류 종단으로 **사용자에게 노출**한다(실패 표기+사유). recording 기동 복구(recording 스펙 단언 P/P-2) 도입으로 재시작 직후 `finalizing`·`processing`·`failed`가 노출될 확률이 증가하므로 이 소비자 의무를 판정 가능한 계약으로 고정한다.
+- **아카이브 status 소비자 계약**: `GET /api/archives` 응답 각 항목의 `status`는 recording 스펙([`docs/spec/recording.md`](recording.md) §출력·§HTTP API)이 **정의를 소유**하는 enum 6종 `{protecting, pending, finalizing, processing, completed, failed}` 중 하나다(값 정의 SSOT=recording 스펙, 본 계약은 값을 재정의하지 않음). 이 enum을 소비하는 web-frontend는 다음을 **의무로** 지킨다 — (a) 6종 **전부**를 처리한다, (b) 이 6종에 없는 **미지 상태가 오면 안전 fallback**한다: 미완료(진행 중)로 취급하며 임의로 완료(`completed`)로 표시하지 않는다, (c) `failed`는 오류 종단으로 **사용자에게 노출**한다(실패 표기+사유 `lastError`), (d) `completed` 항목의 `completedAt`(RFC3339 **UTC**)을 **로컬 시각으로 변환해 표시**한다(값의 정본은 UTC, 고아 필드 방지). recording 기동 복구(recording 스펙 단언 P/P-2) 도입으로 재시작 직후 `finalizing`·`processing`·`failed`가 노출될 확률이 증가하므로 이 소비자 의무를 판정 가능한 계약으로 고정한다.
+- **아카이브 다운로드 게이트(투명 프록시)**: `GET /api/archives/{id}/download`는 recording의 다운로드 계약을 그대로 통과시킨다 — `completed`만 `video/mp4` 서빙, 그 외 모든 비-`completed`(미완료 4종 **및** `failed`)는 **409**, 아카이브 부재는 **404**. web-backend는 이 응답(상태 코드·헤더·바디)을 변형 없이 forward하며 recording 통신 실패 시에만 `502`를 낸다. `completedAt`/`lastError` 신규 필드도 생산자(recording)가 만들고 본 프록시는 그대로 통과시킨다(투명 프록시는 새 응답 필드를 만들지 않음).
 
 ### 검증 단언 (TDD)
 
