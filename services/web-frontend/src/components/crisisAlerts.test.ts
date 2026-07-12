@@ -1,43 +1,36 @@
 import { describe, it, expect } from "vitest";
-import { crisisAlertId, reduceCrisisAlerts, type CrisisAlert } from "./crisisAlerts";
+import { reduceCrisisAlerts } from "./crisisAlerts";
 
-function alert(id: string): CrisisAlert {
-  return { id, description: "d", occurredAt: "t", siteId: "s" };
+// Matches the banner's incidentId-keyed model (①). The reducer is generic over
+// `{ incidentId: string }`, so this minimal shape exercises the wired path.
+type Alert = { incidentId: string; description: string };
+
+function alert(incidentId: string): Alert {
+  return { incidentId, description: "d" };
 }
 
-describe("crisisAlertId (#97)", () => {
-  it("keys on incidentId when present", () => {
-    expect(crisisAlertId({ incidentId: 42 }, 1)).toBe("incident:42");
-    expect(crisisAlertId({ incidentId: "abc" }, 1)).toBe("incident:abc");
-  });
-
-  it("falls back to the local sequence when incidentId is absent/empty", () => {
-    expect(crisisAlertId({}, 7)).toBe("local:7");
-    expect(crisisAlertId({ incidentId: "" }, 8)).toBe("local:8");
-    expect(crisisAlertId({ incidentId: null }, 9)).toBe("local:9");
-  });
-
-  it("gives distinct ids for same-millisecond alerts without incidentId", () => {
-    expect(crisisAlertId({}, 1)).not.toBe(crisisAlertId({}, 2));
-  });
-});
-
-describe("reduceCrisisAlerts (#97)", () => {
+describe("reduceCrisisAlerts (#97 — wired single reducer)", () => {
   it("prepends a new alert", () => {
-    const next = reduceCrisisAlerts([alert("incident:1")], alert("incident:2"), new Set());
-    expect(next.map((a) => a.id)).toEqual(["incident:2", "incident:1"]);
+    const next = reduceCrisisAlerts([alert("1")], alert("2"), new Set());
+    expect(next.map((a) => a.incidentId)).toEqual(["2", "1"]);
   });
 
-  it("dedupes a re-sent incident", () => {
-    const prev = [alert("incident:1")];
-    const next = reduceCrisisAlerts(prev, alert("incident:1"), new Set());
-    expect(next).toBe(prev); // unchanged reference
-  });
-
-  it("does not resurrect a dismissed alert", () => {
-    const prev: CrisisAlert[] = [];
-    const dismissed = new Set(["incident:1"]);
-    const next = reduceCrisisAlerts(prev, alert("incident:1"), dismissed);
+  it("dedupes a re-sent incidentId (unchanged reference)", () => {
+    const prev = [alert("1")];
+    const next = reduceCrisisAlerts(prev, alert("1"), new Set());
     expect(next).toBe(prev);
+  });
+
+  it("does not add an incidentId in the dismissed set (unchanged reference)", () => {
+    const prev: Alert[] = [];
+    const dismissed = new Set(["1"]);
+    const next = reduceCrisisAlerts(prev, alert("1"), dismissed);
+    expect(next).toBe(prev);
+  });
+
+  it("still adds a genuinely new incidentId even when others are dismissed", () => {
+    const dismissed = new Set(["1"]);
+    const next = reduceCrisisAlerts([], alert("2"), dismissed);
+    expect(next.map((a) => a.incidentId)).toEqual(["2"]);
   });
 });

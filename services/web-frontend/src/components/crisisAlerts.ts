@@ -1,41 +1,23 @@
-export interface CrisisAlert {
-  id: string;
-  description: string;
-  occurredAt: string;
-  siteId: string;
-}
-
 /**
- * Build a stable, unique id for a crisis alert.
+ * Merge an incoming crisis alert into the current banner list.
  *
- * When the payload carries an incidentId we key on it so the same incident
- * re-sent over a WebSocket reconnect dedupes to one banner. When it doesn't,
- * we fall back to a monotonic local sequence (never Date.now(), which collides
- * when two alerts arrive in the same millisecond and breaks React keys).
- */
-export function crisisAlertId(
-  payload: Record<string, unknown>,
-  fallbackSeq: number,
-): string {
-  const inc = payload.incidentId;
-  if (inc !== undefined && inc !== null && String(inc) !== "") {
-    return `incident:${String(inc)}`;
-  }
-  return `local:${fallbackSeq}`;
-}
-
-/**
- * Merge an incoming alert into the current list:
- *  - drop it if the id was already dismissed (don't resurrect on re-send),
- *  - drop it if an alert with the same id is already showing (dedup),
+ * Single reducer for BOTH add paths (live `crisis_alert` push AND
+ * `/api/incidents/active` reconnect backfill):
+ *  - drop it if its incidentId was already dismissed this session
+ *    (no resurrection on WS re-send/backfill — #97 dismissed-memory),
+ *  - drop it if a banner with the same incidentId is already showing (dedup),
  *  - otherwise prepend it.
+ *
+ * Keyed strictly on `incidentId` — the same key CrisisAlertBanner uses for its
+ * React keys, dedup and dismiss (①'s model). Payloads without an incidentId
+ * never reach here (the banner's `toAlert()` drops them upstream).
  */
-export function reduceCrisisAlerts(
-  prev: CrisisAlert[],
-  incoming: CrisisAlert,
+export function reduceCrisisAlerts<T extends { incidentId: string }>(
+  prev: T[],
+  incoming: T,
   dismissed: ReadonlySet<string>,
-): CrisisAlert[] {
-  if (dismissed.has(incoming.id)) return prev;
-  if (prev.some((a) => a.id === incoming.id)) return prev;
+): T[] {
+  if (dismissed.has(incoming.incidentId)) return prev;
+  if (prev.some((a) => a.incidentId === incoming.incidentId)) return prev;
   return [incoming, ...prev];
 }

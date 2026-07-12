@@ -1,7 +1,8 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import useWebSocket, { type WsState } from "../hooks/useWebSocket";
 import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 import { formatKstTime } from "../utils/datetime";
+import { reduceCrisisAlerts } from "./crisisAlerts";
 import EmergencyCallButton from "./EmergencyCallButton";
 
 interface SiteInfo {
@@ -44,6 +45,12 @@ function toAlert(p: Record<string, unknown>): CrisisAlert | null {
 
 export default function CrisisAlertBanner() {
   const [alerts, setAlerts] = useState<CrisisAlert[]>([]);
+  // Session-/component-lifetime dismissed-memory keyed by incidentId (#97).
+  // A dismissed incident stays dismissed across WS reconnects and backfills, so
+  // a still-unresolved alert the operator closed never resurrects. A ref (not
+  // state) because it only gates add decisions — mutating it must not itself
+  // trigger a re-render, and callbacks must read its latest value.
+  const dismissedRef = useRef<Set<string>>(new Set());
 
   const handleMessage = useCallback(
     (msg: { type: string; payload: Record<string, unknown>; timestamp: string }) => {
@@ -51,11 +58,8 @@ export default function CrisisAlertBanner() {
       const alert = toAlert(msg.payload);
       if (!alert) return; // malformed / no incidentId
       if (!alert.occurredAt) alert.occurredAt = msg.timestamp;
-      setAlerts((prev) => {
-        // dedup strictly by incidentId (no Date.now fallback)
-        if (prev.some((a) => a.incidentId === alert.incidentId)) return prev;
-        return [alert, ...prev];
-      });
+      // Single reducer: dismissed-gate (#97) + dedup by incidentId + prepend.
+      setAlerts((prev) => reduceCrisisAlerts(prev, alert, dismissedRef.current));
     },
     []
   );
@@ -79,10 +83,14 @@ export default function CrisisAlertBanner() {
         setAlerts((prev) => {
           // (3) remove stale: banners whose incidentId no longer unresolved.
           const kept = prev.filter((a) => activeIds.has(a.incidentId));
-          const keptIds = new Set(kept.map((a) => a.incidentId));
-          // (1)/(2) add missing without duplicating already-shown banners.
-          const additions = backfilled.filter((a) => !keptIds.has(a.incidentId));
-          return [...additions, ...kept];
+          // (1)/(2) add missing active incidents through the SAME single reducer
+          // as the live path: dedups against `kept` and, crucially for #97,
+          // skips any incidentId in dismissedRef so a dismissed-but-still-active
+          // incident does NOT resurrect on reconnect backfill.
+          return backfilled.reduce(
+            (acc, a) => reduceCrisisAlerts(acc, a, dismissedRef.current),
+            kept,
+          );
         });
       })
       .catch(() => {
@@ -93,6 +101,9 @@ export default function CrisisAlertBanner() {
   const { wsState } = useWebSocket(handleMessage, handleReconnect);
 
   const dismiss = (incidentId: string) => {
+    // Persist the dismissal for the session so reconnect backfill can't
+    // re-add this still-unresolved incident (#97 dismissed-memory).
+    dismissedRef.current.add(incidentId);
     setAlerts((prev) => prev.filter((a) => a.incidentId !== incidentId));
   };
 
