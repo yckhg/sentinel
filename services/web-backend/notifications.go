@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -53,6 +54,31 @@ type notifChannelsResponse struct {
 type notifTestRequest struct {
 	Channel string `json:"channel"`
 	Target  string `json:"target"`
+}
+
+// testSendLimiters collects every (channel,target) rate limiter created by
+// handleNotificationTest so main() can wire them into the periodic cleanup. Unlike
+// the IP-keyed auth limiters, this one is keyed by channel+target, so without
+// eviction its entry map grows unbounded. A FRESH limiter is still created per
+// handler construction (the gate suite relies on clean per-server state); each is
+// registered here so startRateLimitCleanup can evict its stale windows.
+var (
+	testSendLimitersMu sync.Mutex
+	testSendLimiters   []*rateLimiter
+)
+
+func registerTestSendLimiter(rl *rateLimiter) {
+	testSendLimitersMu.Lock()
+	testSendLimiters = append(testSendLimiters, rl)
+	testSendLimitersMu.Unlock()
+}
+
+// testSendLimiterList returns a snapshot of the registered test-send limiters for
+// wiring into startRateLimitCleanup.
+func testSendLimiterList() []*rateLimiter {
+	testSendLimitersMu.Lock()
+	defer testSendLimitersMu.Unlock()
+	return append([]*rateLimiter(nil), testSendLimiters...)
 }
 
 // handleNotificationChannels serves GET /api/notifications/channels (admin-only).
@@ -104,6 +130,7 @@ func handleNotificationTest(db *sql.DB) http.HandlerFunc {
 	// Created here (not per-request) so it persists across requests; created per
 	// handler-construction so each mounted server starts with an empty limiter.
 	limiter := newRateLimiter(1, time.Minute)
+	registerTestSendLimiter(limiter) // wire into periodic cleanup (F3, unbounded key)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if getAuthUser(r).Role != "admin" {
@@ -158,10 +185,22 @@ func handleNotificationTest(db *sql.DB) http.HandlerFunc {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
 
+		// A notifier SERVER-SIDE failure (5xx) carries no closed-set outcome we can
+		// trust — treat it as an upstream failure (502) rather than project a
+		// {outcome} smuggled by a non-2xx body, which would be a §출력 14-forbidden
+		// downgrade of notifier미도달 to not_configured/sent (mirrors the channels
+		// handler's non-200 guard). A legitimate 200 with outcome=not_configured
+		// (email SMTP未설정 mapping) still passes through below.
+		if resp.StatusCode >= 500 {
+			log.Printf("notification test: notifier returned status %d", resp.StatusCode)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "notifier error", "reason": "upstream_unavailable"})
+			return
+		}
+
 		// The email test path reuses the notifier's send-email (503 when SMTP未설정),
-		// which the notifier maps to outcome not_configured. A transport-level 5xx
-		// that carries no closed-set outcome is treated as upstream failure (502) so
-		// notifier미도달 is never downgraded. A 2xx with an outcome is projected as-is.
+		// which the notifier maps to outcome not_configured. A response that carries
+		// no closed-set outcome is treated as upstream failure (502) so notifier미도달
+		// is never downgraded. A 2xx with an outcome is projected as-is.
 		var nr struct {
 			Outcome string `json:"outcome"`
 			Reason  string `json:"reason"`
