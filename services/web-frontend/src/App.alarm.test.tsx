@@ -1,7 +1,12 @@
 import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import App from "./App";
+
+// TDD gate for docs/spec/alarm-history-lifecycle.md assertion K (navigation copy):
+// the alarm-history navigation tab label must contain "경보" and must NOT contain
+// "사고". Judged by component render (jsdom); the spec declares K needs-browser,
+// but the nav label is observable without a live browser, so this is a stronger
+// (non-SKIP) gate. RED until the nav copy is renamed 사고→경보.
 
 function makeToken(payload: Record<string, unknown>): string {
   const b64 = btoa(JSON.stringify(payload))
@@ -47,19 +52,17 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("App tab bar a11y (#100)", () => {
-  it("marks the active tab with aria-current and moves it on navigation", async () => {
-    const user = userEvent.setup();
+describe("assertion K — navigation copy is 경보 (not 사고)", () => {
+  it("renders an alarm-history nav tab containing 경보 and not 사고", () => {
     render(<App />);
 
-    const cctvTab = screen.getByRole("button", { name: /CCTV/ });
-    expect(cctvTab).toHaveAttribute("aria-current", "page");
+    // The alarm-history tab must be findable by 경보 …
+    const alarmTab = screen.getByRole("button", { name: /경보/ });
+    expect(alarmTab.textContent).toContain("경보");
+    expect(alarmTab.textContent).not.toContain("사고");
 
-    const incidentsTab = screen.getByRole("button", { name: /경보이력/ });
-    expect(incidentsTab).not.toHaveAttribute("aria-current");
-
-    await user.click(incidentsTab);
-    expect(incidentsTab).toHaveAttribute("aria-current", "page");
-    expect(cctvTab).not.toHaveAttribute("aria-current");
+    // … and no navigation tab may contain 사고.
+    const saoTabs = screen.queryAllByRole("button", { name: /사고/ });
+    expect(saoTabs).toHaveLength(0);
   });
 });

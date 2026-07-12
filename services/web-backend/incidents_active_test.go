@@ -11,8 +11,9 @@ import (
 )
 
 // TestActiveIncidents verifies GET /api/incidents/active (contract 2): only
-// open+acknowledged (resolved excluded), occurred_at DESC, each element
-// isomorphic to the crisis_alert payload (incidentId + nested site) plus status.
+// status 'open' (resolved excluded; the intermediate 'acknowledged' state was
+// removed), occurred_at DESC, each element isomorphic to the crisis_alert payload
+// (incidentId + nested site) plus status.
 func TestActiveIncidents(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
@@ -25,7 +26,7 @@ func TestActiveIncidents(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO incidents (site_id, description, occurred_at, is_test, status) VALUES
 		('s1','older open','2026-07-11 10:00:00',0,'open'),
-		('s1','newer ack','2026-07-11 11:00:00',0,'acknowledged'),
+		('s1','newer open','2026-07-11 11:00:00',0,'open'),
 		('s1','resolved one','2026-07-11 12:00:00',0,'resolved')`); err != nil {
 		t.Fatalf("seed incidents: %v", err)
 	}
@@ -45,15 +46,15 @@ func TestActiveIncidents(t *testing.T) {
 	if len(arr) != 2 {
 		t.Fatalf("expected 2 unresolved incidents, got %d", len(arr))
 	}
-	// Ordered occurred_at DESC → newer ack first.
-	if arr[0]["description"] != "newer ack" || arr[1]["description"] != "older open" {
+	// Ordered occurred_at DESC → newer open first.
+	if arr[0]["description"] != "newer open" || arr[1]["description"] != "older open" {
 		t.Fatalf("wrong order: %v, %v", arr[0]["description"], arr[1]["description"])
 	}
 
 	for _, e := range arr {
-		// resolved must not appear
+		// only 'open' appears (resolved excluded; acknowledged no longer exists)
 		st, _ := e["status"].(string)
-		if st != "open" && st != "acknowledged" {
+		if st != "open" {
 			t.Fatalf("unexpected status %q", st)
 		}
 		// crisis_alert isomorphism: identifier is incidentId (not id)

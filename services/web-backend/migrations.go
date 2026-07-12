@@ -230,6 +230,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_alert_id ON incidents(alert_id) 
 		// pre-change token does not resurrect after a container restart.
 		sql: `ALTER TABLE users ADD COLUMN password_changed_at DATETIME;`,
 	},
+	{
+		version: 20,
+		name:    "promote_legacy_acknowledged_incidents",
+		// Alarm-history-lifecycle: the intermediate 'acknowledged' state is removed
+		// from the contract (state machine open→resolved only). Legacy rows still
+		// carrying status='acknowledged' are promoted back to 'open' (in-progress =
+		// unresolved, row preserved — no deletion) and their confirmed_at/confirmed_by
+		// attribution is NULLed so the "confirmedAt/confirmedBy are always null"
+		// contract holds for promoted rows too. After this runs, no 'acknowledged'
+		// value exists anywhere in the incidents table.
+		sql: `UPDATE incidents SET status = 'open', confirmed_at = NULL, confirmed_by = NULL WHERE status = 'acknowledged';`,
+	},
 }
 
 // migrationTimeout bounds each individual migration (and the bookkeeping steps)

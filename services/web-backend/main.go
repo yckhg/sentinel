@@ -146,7 +146,6 @@ func main() {
 	// Incidents (any authenticated user)
 	apiMux.HandleFunc("GET /api/incidents", handleListIncidents(db))
 	apiMux.HandleFunc("GET /api/incidents/active", handleActiveIncidents(db))
-	apiMux.HandleFunc("PATCH /api/incidents/{id}/acknowledge", handleAcknowledgeIncident(db))
 	apiMux.HandleFunc("PATCH /api/incidents/{id}/resolve", handleResolveIncident(db))
 
 	// Equipment restart (any authenticated user)
