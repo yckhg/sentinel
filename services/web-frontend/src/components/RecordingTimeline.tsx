@@ -69,6 +69,14 @@ function normalizeArchiveState(status: string): ArchiveState {
   }
 }
 
+// Terminal states end the neutral-transition lifecycle: once an archive is
+// completed/failed there is nothing left to "확인" — a stale/needsCheck marker
+// on it must self-heal (단언 B7, banner↔list 무모순).
+function isTerminalState(status: string): boolean {
+  const s = normalizeArchiveState(status);
+  return s === "completed" || s === "failed";
+}
+
 interface RecordingTimelineProps {
   streamKey: string;
   onPlaybackRequest: (url: string | null) => void;
@@ -205,7 +213,33 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
       });
       if (res.ok) {
         const data: ArchiveInfo[] = await res.json();
-        setArchives(data.filter((a) => a.streamKey === streamKey));
+        const mine = data.filter((a) => a.streamKey === streamKey);
+        setArchives(mine);
+        // Self-heal the neutral-transition surfaces. This minute-level fetch is
+        // independent of the (possibly stopped) polling window: if it observes
+        // that a tracked archive has since reached a terminal state, clear the
+        // stale row marker and the "확인할 수 없습니다" banner so the UI never
+        // contradicts itself (banner "확인 불가" while the list shows 준비됨 +
+        // 다운로드). Banner self-heals without a manual 새로고침 (단언 B7).
+        const terminalIds = new Set(mine.filter((a) => isTerminalState(a.status)).map((a) => a.id));
+        if (terminalIds.size > 0) {
+          setStaleArchiveIds((s) => {
+            let changed = false;
+            const n = new Set(s);
+            for (const id of s) {
+              if (terminalIds.has(id)) {
+                n.delete(id);
+                changed = true;
+              }
+            }
+            return changed ? n : s;
+          });
+          setArchiveResult((r) =>
+            r && r.needsCheck && r.archiveId && terminalIds.has(r.archiveId)
+              ? { ...r, needsCheck: false }
+              : r,
+          );
+        }
       }
     } catch {
       // silent
@@ -485,6 +519,19 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
         // window ends in a neutral 확인 필요 state, never infinite 처리 중 (F1/B7).
         if (archive?.id) {
           startPolling(archive.id);
+        } else {
+          // Defensive: a 2xx create WITHOUT a usable id (contract violation).
+          // We can't poll a specific archive, but a row for it can still be
+          // surfaced by the independent fetchArchives and would otherwise render
+          // "처리 중" forever with no route to the neutral state. Arm a bounded
+          // window keyed off the request itself so the neutral 확인 필요 path is
+          // always reachable — on expiry the banner flips to needsCheck with a
+          // manual 새로고침 (→ fetchArchives). Never a stranded spinner (단언 B7).
+          stopPolling();
+          pollTimeoutRef.current = setTimeout(() => {
+            stopPolling();
+            setArchiveResult((r) => (r && r.success ? { ...r, needsCheck: true } : r));
+          }, 5 * 60 * 1000);
         }
       } else {
         const data = await res.json().catch(() => ({}));
@@ -705,14 +752,19 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
           {archiveResult.needsCheck ? (
             <>
               <span>상태를 확인할 수 없습니다 — 새로고침해 주세요</span>
-              {archiveResult.archiveId && (
-                <button
-                  className="rec-timeline-repoll-btn"
-                  onClick={() => startPolling(archiveResult.archiveId!)}
-                >
-                  새로고침
-                </button>
-              )}
+              {/* Always reachable: with a tracked id, restart one bounded
+                  polling window; without one (id-less create fallback), a plain
+                  list refresh still routes out of the neutral state (단언 B7). */}
+              <button
+                className="rec-timeline-repoll-btn"
+                onClick={() =>
+                  archiveResult.archiveId
+                    ? startPolling(archiveResult.archiveId)
+                    : fetchArchives()
+                }
+              >
+                새로고침
+              </button>
             </>
           ) : (
             <>
