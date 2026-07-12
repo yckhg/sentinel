@@ -105,7 +105,7 @@ describe("assertion O — acknowledge UI removed, note optional", () => {
 
     // Open the resolve modal (card action button).
     const resolveButtons = screen.getAllByRole("button", { name: "조치 완료" });
-    await user.click(resolveButtons[0]);
+    await user.click(resolveButtons[0]!);
 
     // The modal must not label the note field as required.
     await waitFor(() => expect(screen.getByText("조치 완료 처리")).toBeInTheDocument());
@@ -113,7 +113,7 @@ describe("assertion O — acknowledge UI removed, note optional", () => {
 
     // Submit with the note left empty → a PATCH request must be issued.
     const modalButtons = screen.getAllByRole("button", { name: "조치 완료" });
-    await user.click(modalButtons[modalButtons.length - 1]);
+    await user.click(modalButtons[modalButtons.length - 1]!);
 
     await waitFor(() => expect(patchSpy).toHaveBeenCalled());
   });
