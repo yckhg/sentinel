@@ -29,7 +29,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 - 인증 스킴: `Authorization: Bearer <JWT>` · WS는 `?token=<jwt>` 쿼리 파라미터
 - role: `admin` · `user` · `temp`(임시 링크, read-only)
 - 성공: `200` / `201` / `204` · 에러 바디: `{"error": "<message>"}`
-- 에러 코드 매핑: `400` 잘못된 입력 · `401` 인증 실패/만료 · `403` 권한 부족 · `404` 없음 · `409` 상태 충돌 · `429` 레이트 리밋(login/register 한정) · `502` 하위 서비스 통신 실패
+- 에러 코드 매핑: `400` 잘못된 입력 · `401` 인증 실패/만료 · `403` 권한 부족 · `404` 없음 · `409` 상태 충돌 · `429` 레이트 리밋(login/register 및 테스트 발송 `(channel,target)` 분당 1건) · `502` 하위 서비스 통신 실패(recording · hw-gateway · notifier)
 - `/api/*` 경로는 인증 미들웨어 통과 필수(단, 무인증 internal 예외는 §계약 13에 명시). `/auth/pending|approve|reject|users`는 `/api/` 프리픽스가 아니며 핸들러가 직접 admin JWT를 검증
 
 **공통 검증 단언**
@@ -796,6 +796,72 @@ MQTT 발행 페이로드 스키마의 SSOT는 `docs/spec/interface-mqtt.md` — 
 - [ ] mosquitto 정지 상태에서 hw-gateway를 (재)기동한 직후 — 최초 브로커 연결 미성립 — `POST /api/restart`(유효 바디) → `503` `{"error":"MQTT broker not connected"}`
 - [ ] 브로커 연결이 한 번 성립한 뒤 mosquitto 중지 → `curl --max-time 5 -X POST http://hw-gateway:8080/api/restart`(유효 바디)가 5초 내 미응답 (curl exit 28 — `503` 아님, hw-gateway.md 단언 O2와 교차)
 - [ ] `GET /api/equipment/status` → `200` JSON 배열, 모든 항목 `alertState ∈ {none, active}`
+
+---
+
+## 계약 16: Notifications — 채널별 테스트 발송 (`/api/notifications/*`)
+
+관리자가 저장해 둔 알림 채널(이메일·SMS)이 실제로 동작하는지 **채널마다 한 번씩** 확인하는 접면. 단위 계약의 정본은 `docs/spec/notification-test-send.md`이며, 본 계약은 그 web-api 접면을 고정한다. 채널 사용가능 판정과 실제 발송은 **동일 소스(notifier 실행 config)** 를 참조한다 — web-backend는 notifier 조회 결과를 **그대로 투사**하고 자체 판정하지 않는다. notifier internal 접면(`/internal/channel-status`·`/internal/test-send`)은 `docs/spec/notifier.md`가 소유한다.
+
+### 입력
+
+| Method | Path | Auth | 입력 |
+|--------|------|------|------|
+| GET | `/api/notifications/channels` | admin | — (in-scope 채널별 사용가능 상태 조회) |
+| POST | `/api/notifications/test` | admin | `{channel, target}` — `channel ∈ {email, sms}`, `target`은 관리자가 입력한 명시 단일 값(이메일 주소/전화번호; contactId 아님) |
+
+- **지원 채널 집합은 정확히 `{email, sms}`**. `channel ∉ {email, sms}`(예: `kakaotalk`)은 `400`(발송 0건).
+- `target` 형식: email은 `local@domain.tld`, sms는 전화번호 `01[016789]-\d{3,4}-\d{4}`. 형식 위반·부재는 `400`(발송 0건).
+
+### 출력 (계약)
+
+`GET /api/notifications/channels` → `200`:
+
+```json
+{ "email": { "usable": true, "reason": "" }, "sms": { "usable": false, "reason": "not_configured" } }
+```
+
+- 채널 집합은 **정확히 `email`·`sms` 두 키뿐**이다 — `kakaotalk` 키는 존재하지 않는다.
+- `usable`은 web-backend의 자체 추측이 아니라 **notifier의 현재 실행 config 조회 결과를 그대로 투사**한 것이다(status 소스 = 발송 소스 = notifier 동일).
+- notifier 무응답/비-200(중단·재시작 창) → `502` `{"error": "...", "reason": "upstream_unavailable"}`. **거짓 `not_configured`(또는 이유 없는 `usable=false`)로 강등하지 않는다** — 미설정과 도달불가는 구분되는 사유다.
+
+`POST /api/notifications/test` → `200`:
+
+```json
+{ "outcome": "sent" }          // 또는 { "outcome": "failed", "reason": "..." } · { "outcome": "not_configured" }
+```
+
+- `outcome ∈ {sent, failed, not_configured}`(폐집합). `failed`는 `reason`을 동반한다.
+  - `sent` — 실제 발송 경로로 시도했고 채널/전송이 수락.
+  - `failed`(+`reason`) — 실제 발송 경로로 시도했으나 전송/공급자 오류.
+  - `not_configured` — 요청 시점 판정상 채널 미설정(필수 자격 값 부재) — **발송을 시도하지 않는다**. (이메일은 notifier `POST /api/send-email`의 `503`(SMTP 미설정)이 `not_configured`로 매핑된다.)
+- **처리 순서**: admin 관문 → 입력/채널 지원 검증(`400`, **레이트리밋보다 먼저**·`400`은 토큰 미소모) → `(channel, target)` 레이트리밋(`429`, 발송 0건) → notifier `/internal/test-send` 프록시.
+- `channel ∉ {email, sms}`(예: `kakaotalk`) → `400`(발송 0건). 입력 형식 위반 → `400`(발송 0건). 이 `400`들은 레이트리밋 토큰을 소모하지 않으므로 직후의 유효 요청은 `429`가 되지 않는다.
+- 같은 `(channel, target)`로 분당 1건 초과 → `429`(발송 0건). 스코프가 `(channel, target)`이므로 다른 `target` 요청은 이 리밋에 걸리지 않는다.
+- notifier 자체 미도달/5xx → `502` `{"reason": "upstream_unavailable"}`. **폐집합 `{sent, failed, not_configured}` 어디에도 맞지 않으므로 outcome을 만들지 않는다** — `not_configured`/`sent`로 강등하지 않는다.
+
+### 핵심 로직 (불변식)
+
+- **투사(projection)**: web-backend는 채널 usability를 자체 판정하지 않고 notifier의 `/internal/channel-status` 결과를 그대로 투사한다. 응답 구조체가 `email`·`sms`만 담아 notifier가 다른 채널 키를 실어도 표면화되지 않는다(KakaoTalk 부재).
+- **status 소스 = 발송 소스**: 사용가능 상태 조회와 실제 발송 분기(미설정/설정)는 notifier의 동일 config를 참조하므로 어긋날 수 없다. notifier config는 배포 시점 env이나, notifier 재시작 후에는 **web-backend 재시작 없이** 다음 요청부터 새 판정이 반영된다.
+- **발송 대상 격리(스팸 방지)**: 테스트는 관리자가 지정한 단일 대상 1건에게만 도달한다 — 등록 비상연락처(contactId)로의 팬아웃 0건. 위기 경로의 fallback 체인(KakaoTalk→SMS→시스템알람)과 연락처 팬아웃은 우회하되, 운영 발송기의 자격증명·전송 구현은 공유한다.
+- **채널 독립**: 이메일 테스트는 이메일만, SMS 테스트는 SMS만 시도한다(교차 발동 없음).
+- **프록시 홉 타임아웃 규율**: web-backend→notifier 프록시 홉(channels·test 모두)의 클라이언트 타임아웃은 채널 예산(≤12s, `notifier.md` §출력 7)보다 크게(≥15s) 둔다 — notifier의 정상 지연 응답을 조기 `502`로 오종결하지 않기 위함. 진짜 도달불가만 `502`로 종결.
+- **권한**: 두 표면 모두 **연락처 CUD(POST/PUT/DELETE `/api/contacts`)와 동일한 admin 권한**을 요구한다(`GET /api/contacts`의 user 권한과 구분). 비-admin `403`, 무인증 `401` — 어느 경우에도 발송 0건.
+
+### 검증 단언 (TDD)
+
+- [ ] `GET /api/notifications/channels`(admin) → `200`, 키 집합이 정확히 `{email, sms}`(kakaotalk 없음), 각 채널에 `usable`(boolean)·`reason` 존재
+  ```bash
+  curl -s -H "Authorization: Bearer $ADMIN" http://localhost:8080/api/notifications/channels \
+    | jq -e '(keys|sort)==["email","sms"] and (.email|has("usable")) and (.sms|has("usable"))'
+  ```
+- [ ] `POST /api/notifications/test` `{"channel":"kakaotalk","target":"..."}` → `400`(발송 0건)
+- [ ] 미설정 이메일 채널로 `POST /api/notifications/test` `{"channel":"email","target":"a@b.c"}` → `200` `{"outcome":"not_configured"}`(발송 0건)
+- [ ] user 토큰으로 `GET /api/notifications/channels`·`POST /api/notifications/test` → `403`; 무인증 → `401`(발송 0건)
+- [ ] 같은 `(channel, target)`로 분당 2번째 유효 요청 → `429`(발송 0건); 다른 `target`은 비-`429`
+- [ ] 입력 형식 위반(`400`) 직후 같은 `(channel, target)`의 유효 요청 → `429`가 아님(400은 토큰 미소모)
+- [ ] notifier 중단 상태에서 `GET /api/notifications/channels`·`POST /api/notifications/test` → `502` + `reason == "upstream_unavailable"`(거짓 `not_configured`/`sent` 강등 없음)
 
 ---
 

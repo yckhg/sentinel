@@ -31,8 +31,8 @@
 | 403 | 권한 부족 (admin 필요 등) |
 | 404 | 리소스 없음 |
 | 409 | 상태 충돌 (예: 이미 resolved된 incident) |
-| 429 | 레이트 리밋 초과 (login/register 한정) |
-| 502 | 하위 서비스(recording, hw-gateway) 통신 실패 |
+| 429 | 레이트 리밋 초과 (login/register 및 테스트 발송 `(channel,target)` 분당 1건) |
+| 502 | 하위 서비스(recording, hw-gateway, notifier) 통신 실패 |
 
 ---
 
@@ -336,6 +336,37 @@ Response `204`. 이미 삭제되었거나 없으면 `404`.
 ### POST /api/devices/{id}/restore
 
 Response `200`: `{"id": 1, "status": "restored"}`.
+
+---
+
+## 6.6. Notifications (채널별 테스트 발송)
+
+관리자가 저장한 알림 채널(이메일·SMS)이 실제로 동작하는지 채널마다 한 번씩 확인한다. 지원 채널 집합은 정확히 `{email, sms}`(KakaoTalk 제외). web-backend는 채널 사용가능 여부를 **자체 판정하지 않고** notifier의 실행 config 조회 결과를 그대로 투사한다(status 소스 = 발송 소스 = notifier 동일). 단위 계약의 정본은 [`docs/spec/notification-test-send.md`](../spec/notification-test-send.md), 접면 계약은 [`interface-web-api.md` §계약 16](../spec/interface-web-api.md).
+
+| Method | Path | Auth | 설명 |
+|--------|------|------|------|
+| GET | `/api/notifications/channels` | admin | 채널별 사용가능 상태 조회 |
+| POST | `/api/notifications/test` | admin | 지정 채널·단일 대상에게 테스트 1건 발송 |
+
+권한: 두 표면 모두 **연락처 CUD(POST/PUT/DELETE `/api/contacts`)와 동일한 admin 전용**(`GET /api/contacts`의 user 권한과 구분). 비-admin `403`, 무인증 `401`.
+
+### GET /api/notifications/channels (admin)
+
+Response `200`:
+```json
+{ "email": { "usable": true, "reason": "" }, "sms": { "usable": false, "reason": "not_configured" } }
+```
+채널 키는 정확히 `email`·`sms` 둘뿐(KakaoTalk 없음). notifier 무응답/비-200 → `502` `{"reason": "upstream_unavailable"}` (거짓 `not_configured`로 강등하지 않음).
+
+### POST /api/notifications/test (admin)
+
+Request: `{"channel": "email | sms", "target": "이메일 주소 또는 전화번호"}`
+Response `200`: `{"outcome": "sent | failed | not_configured"}` (`failed`는 `reason` 동반).
+
+- 처리 순서: admin 관문 → 입력·채널 지원 검증(`400`, 레이트리밋보다 먼저·`400`은 토큰 미소모) → `(channel, target)` 레이트리밋(`429`, 발송 0건) → notifier `/internal/test-send` 프록시.
+- `channel ∉ {email, sms}`(예: `kakaotalk`) → `400`(발송 0건).
+- notifier 자체 미도달/5xx → `502` `{"reason": "upstream_unavailable"}` — 폐집합 `{sent, failed, not_configured}` 어디에도 맞지 않으므로 outcome을 만들지 않는다(`not_configured`/`sent`로 강등 금지).
+- 발송은 관리자가 지정한 단일 대상 1건에게만 도달 — 등록 연락처 팬아웃 0건.
 
 ---
 
