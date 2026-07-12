@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchWithTimeout } from "../utils/fetchWithTimeout";
-import { parseServerDate, formatKstClock } from "../utils/datetime";
+import { parseServerDate, formatKstClock, formatKstTime } from "../utils/datetime";
 
 interface TimeRange {
   start: string;
@@ -17,7 +17,13 @@ interface ArchiveInfo {
   sizeBytes: number;
   filePath: string;
   status: string;
-  error?: string;
+  // completedAt: RFC3339 UTC instant recorded when the archive reached `completed`
+  // (non-null only for completed archives). Displayed as local (KST) ready time
+  // — the UTC value is the source of truth (archive-download-ux 단위B 출력계약, 단언 B8).
+  completedAt?: string;
+  // lastError: human-readable failure reason for `failed` archives (recording
+  // wire field `lastError`; 단언 B4).
+  lastError?: string;
 }
 
 interface IncidentMarker {
@@ -400,6 +406,10 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
           message: `보관 요청 완료: ${formatTime(from)} ~ ${formatTime(to)} (${formatDuration(from, to)})`,
           archiveId: archive?.id,
         });
+        // Auto-expand the archive list on request so the user observes the
+        // status transition (요청됨/처리 중 → 준비됨) without extra navigation
+        // (archive-download-ux 단위B 출력계약 자동 펼침, 단언 B5).
+        setShowArchives(true);
         // Poll for archive completion. Handles live in refs so the component's
         // unmount cleanup can stop them (#93).
         stopPolling();
@@ -418,7 +428,7 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
                 if (target?.status === "failed") {
                   setArchiveResult({
                     success: false,
-                    message: target.error || "보관 처리 중 오류가 발생했습니다",
+                    message: target.lastError || "보관 처리 중 오류가 발생했습니다",
                   });
                 }
               }
@@ -456,6 +466,16 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
 
   const selFromTime = fractionToTime(selStart);
   const selToTime = fractionToTime(selEnd);
+
+  // Split archives by readiness. `completed` archives are the ready-to-download
+  // set: they are surfaced in an always-visible "준비됨" section so a prepared
+  // download stays reachable (단위B: completed → 활성 다운로드 + 준비됨 + completedAt).
+  // Every non-completed archive (in-progress 4종 / failed / unknown) is gated
+  // behind the collapsible 보관 목록 — no ready affordance, matching the download
+  // gate (단언 B1/B4/B6). Splitting also avoids a completed row appearing in both
+  // places (which would duplicate the download control).
+  const readyArchives = archives.filter((a) => normalizeArchiveState(a.status) === "completed");
+  const pendingArchives = archives.filter((a) => normalizeArchiveState(a.status) !== "completed");
 
   return (
     <div className="rec-timeline-container" onClick={(e) => e.stopPropagation()}>
@@ -636,20 +656,62 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
         </div>
       )}
 
-      {/* Archives list toggle */}
+      {/* Archives */}
       {archives.length > 0 && (
         <div className="rec-timeline-archives">
+          {/* Ready-to-download (completed) archives — always visible so a prepared
+              download is reachable without expanding the list. Each shows the
+              "준비됨" ready state, the local (KST) ready time, and an active
+              download action (단언 B2/B3/B8). */}
+          {readyArchives.length > 0 && (
+            <div className="rec-timeline-archives-ready">
+              {readyArchives.map((a) => (
+                <div key={a.id} className="rec-timeline-archive-item">
+                  <div className="rec-timeline-archive-info">
+                    <span className="rec-timeline-archive-time">
+                      {formatTime(new Date(a.from))} ~ {formatTime(new Date(a.to))}
+                    </span>
+                    <span
+                      className="rec-timeline-archive-status completed"
+                      data-archive-state="completed"
+                    >
+                      준비됨
+                    </span>
+                    {/* completedAt (UTC RFC3339) → local (KST). 고아 필드 방지, 값의 정본은 UTC (B8). */}
+                    {a.completedAt && (
+                      <span className="rec-timeline-archive-completed-at">
+                        {formatKstTime(a.completedAt)}
+                      </span>
+                    )}
+                    <span className="rec-timeline-archive-size">
+                      {formatBytes(a.sizeBytes)}
+                    </span>
+                  </div>
+                  <button
+                    className="rec-timeline-archive-download"
+                    onClick={() => handleDownload(a.id)}
+                    disabled={downloading === a.id}
+                  >
+                    {downloading === a.id ? "..." : "다운로드"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Collapsible list of non-completed archives (in-progress / failed /
+              unknown). None expose a download or a "준비됨/완료" ready state — the
+              download affordance is gated on `completed` only (단언 B1/B4/B6). */}
           <button
             className="rec-timeline-archives-toggle"
             onClick={() => setShowArchives(!showArchives)}
           >
             보관 목록 ({archives.length}) {showArchives ? "▲" : "▼"}
           </button>
-          {showArchives && (
+          {showArchives && pendingArchives.length > 0 && (
             <div className="rec-timeline-archives-list">
-              {archives.map((a) => {
+              {pendingArchives.map((a) => {
                 const state = normalizeArchiveState(a.status);
-                const isCompleted = state === "completed";
                 return (
                   <div key={a.id} className="rec-timeline-archive-item">
                     <div className="rec-timeline-archive-info">
@@ -660,26 +722,15 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
                         className={`rec-timeline-archive-status ${state}`}
                         data-archive-state={state}
                       >
-                        {isCompleted
-                          ? formatBytes(a.sizeBytes)
-                          : ARCHIVE_STATE_LABEL[state]}
+                        {state === "completed" ? "준비됨" : ARCHIVE_STATE_LABEL[state]}
                       </span>
                     </div>
-                    {isCompleted && (
-                      <button
-                        className="rec-timeline-archive-download"
-                        onClick={() => handleDownload(a.id)}
-                        disabled={downloading === a.id}
-                      >
-                        {downloading === a.id ? "..." : "다운로드"}
-                      </button>
-                    )}
                     {state === "failed" && (
                       <span
                         className="rec-timeline-archive-error"
-                        title={a.error || "보관 처리 중 오류가 발생했습니다"}
+                        title={a.lastError || "보관 처리 중 오류가 발생했습니다"}
                       >
-                        {a.error || "보관 처리 중 오류가 발생했습니다"}
+                        {a.lastError || "보관 처리 중 오류가 발생했습니다"}
                       </span>
                     )}
                   </div>
