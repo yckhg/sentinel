@@ -115,13 +115,13 @@
 아래는 이 단위가 목표상태(`{open, resolved}` 두 상태·노트 선택·"경보" 표기)에 도달하기 위한 변경분이다. 본문·단언은 목표상태(positive)로 기술하고, 제거 개념은 여기에 모은다.
 
 **상태집합·엔드포인트 (acknowledged 제거) — 코드+본 스펙**
-- **레거시 행 마이그레이션 (배포 계약)**: 배포 시 기존 `status='acknowledged'` 행은 `open`으로 승격한다(진행 중=미해소 보존). 배포 후 **어떤 시점에도** `acknowledged` 값 행은 DB·API 응답에 존재하지 않음을 게이트로 강제한다(단언 M).
+- **레거시 행 마이그레이션 (배포 계약)**: 배포 시 기존 `status='acknowledged'` 행은 **동일 행을 유지한 채**(행 유실 없음) `status='open'`으로 승격하고, **그와 동시에 그 행의 `confirmed_at`·`confirmed_by`를 `NULL`로 정리**한다(진행 중=미해소 보존). 이 NULL화로 `confirmedAt`/`confirmedBy` "항상 null" 계약(레거시 승격 행 포함)이 봉합된다. 배포 후 **어떤 시점에도** `acknowledged` 값 행은 DB·API 응답에 존재하지 않음을 게이트로 강제한다(단언 M).
 - **엔드포인트 제거**: `PATCH /api/incidents/{id}/acknowledge` 라우트·핸들러·성공 응답을 제거한다. 확인 전이를 유발하는 경로가 없다.
 - **enum 축소**: `status` 값 집합 `{open, acknowledged, resolved}` → **`{open, resolved}`**. 목록 필터·응답 스키마·`/active` 집합에서 `acknowledged`를 제거한다.
 - **status 필터 화이트리스트**: `GET /api/incidents?status=`는 `{open, resolved}`만 수용하고, 그 외 값(예 `?status=acknowledged`)은 **`400`**으로 거절한다(단언 N).
 
 **센서 해소 폴백 술어 정정 — 코드**
-- resolve-from-sensor 폴백 매칭 및 재해소 방어 술어를 `status != 'resolved'` → **`status = 'open'`**으로 정정한다. 마이그레이션(C1)으로 `acknowledged`가 소거된 뒤 폴백은 `open`만을 대상으로 매칭한다(순서의존은 단언 I 참조).
+- resolve-from-sensor 폴백 매칭 및 재해소 방어 술어를 `status != 'resolved'` → **`status = 'open'`**으로 정정한다. 마이그레이션 게이트 M으로 `acknowledged`가 소거된 뒤 폴백은 `open`만을 대상으로 매칭한다(순서의존은 단언 I 참조).
 
 **해제 노트 선택화 — 코드+본 스펙**
 - `PATCH .../resolve` 입력 `{resolutionNotes*: non-empty string}` → **`{resolutionNotes?: string}`**. 노트 부재·빈 문자열·공백은 `400`이 아니라 `200`이며 빈 값(또는 `null`)으로 저장된다(단언 B).
@@ -135,7 +135,7 @@
 ## 핵심 로직 (동작)
 
 - **상태 기계**: `open → resolved` 단일 전이. `resolved`는 종단(재해소 `409`). 중간 상태 없음 — 시스템에 `acknowledged` 상태 값도, 그 전이를 유발하는 액션도 존재하지 않는다.
-- **레거시 상태 마이그레이션**: 배포 시 기존 `acknowledged` 행은 `open`으로 승격되며(진행 중=미해소 보존), 배포 후 어떤 시점에도 `acknowledged` 값 행은 DB·API에 존재하지 않는다(단언 M 게이트). 이 소거가 완료된 뒤에야 센서 폴백(`status='open'` 술어)이 open만을 대상으로 올바르게 매칭한다.
+- **레거시 상태 마이그레이션**: 배포 시 기존 `acknowledged` 행은 **동일 행을 보존한 채** `open`으로 승격되며, **동시에 그 행의 `confirmed_at`·`confirmed_by`도 `NULL`로 정리**된다(진행 중=미해소 보존 + 승격 행의 confirmedAt/By null 계약 봉합). 배포 후 어떤 시점에도 `acknowledged` 값 행은 DB·API에 존재하지 않는다(단언 M 게이트). 이 소거가 완료된 뒤에야 센서 폴백(`status='open'` 술어)이 open만을 대상으로 올바르게 매칭한다.
 - **직접 해소**: `open` 경보는 선행 확인 없이 해소 가능. 확인 단계를 거치도록 강제하지 않는다.
 - **해제 노트는 선택 메타데이터**: 노트 유무·공백 여부는 해소 성공/실패에 영향을 주지 않는다. 빈 노트로 해소해도 `resolved` 상태가 확정된다.
 - **양방향 해소 attribution 유지**: `resolvedByKind ∈ {"web", "sensor_button", null}`. 웹 해제(본 계약 `resolve`)와 센서 버튼 해제(`resolve-from-sensor`)가 동일 필드에 기록된다.
@@ -153,11 +153,15 @@
   ```
 - **B (핵심, mutating·terminal)** — 해제 노트는 선택: 다음 본문 변형이 **모두 `400`이 아니라 `200`**이고 저장 상태 `resolved`, 노트는 빈 값(또는 `null`)으로 저장된다 — ① 요청 본문 부재, ② 빈 본문, ③ `{}`, ④ `resolutionNotes` 필드 생략, ⑤ `{"resolutionNotes":""}`, ⑥ `{"resolutionNotes":"   "}`. `resolve`는 종단(재해소 `409`)이므로 **각 변형마다 새 `open` incident를 시딩**해 그 id로 1회 호출한다(변형 간 incident 공유 금지).
   ```bash
+  # 산문 6변형과 1:1 대응(①본문부재 ②빈본문 ③{} ④필드생략 ⑤"" ⑥"   ").
+  # 센티널 __ABSENT__ = -d 없이 호출(요청 본문 부재). 나머지는 그대로 -d 전달.
+  # ④필드생략은 resolutionNotes 키가 없는 다른-키 객체({"x":1})로 표현.
   # 각 변형마다 격리 스택에 새 open incident 시딩(내부 POST /api/incidents) → 그 id에 1회 resolve → 200 기대
-  for body in '' '{}' '{"resolutionNotes":""}' '{"resolutionNotes":"   "}'; do
+  for body in '__ABSENT__' '' '{}' '{"x":1}' '{"resolutionNotes":""}' '{"resolutionNotes":"   "}'; do
     ID=$(seed_open_incident)   # 케이스별 신선한 open incident
+    [ "$body" = '__ABSENT__' ] && args=() || args=(-d "$body")   # 본문 부재 = -d 없음
     curl -s -o /dev/null -w '%{http_code}\n' -X PATCH -H "Authorization: Bearer $ADMIN" \
-      http://localhost:8080/api/incidents/$ID/resolve ${body:+-d "$body"}   # → 200 (본문 부재 = -d 없음)
+      http://localhost:8080/api/incidents/$ID/resolve "${args[@]}"   # → 200 (6케이스 모두)
   done
   ```
 - **C (핵심)** — 계약에 **acknowledge 전이가 없다**: `PATCH /api/incidents/{id}/acknowledge` 시도는 계약된 성공 응답(`200 {"status":"acknowledged"}`)을 반환하지 않는다(라우트 부재로 `404`/`405`). 그리고 어떤 `GET /api/incidents` 응답에도 `status == "acknowledged"`인 원소가 없다.
@@ -181,14 +185,32 @@
 - **F** — `GET /api/incidents?status=resolved` → `data[]`의 모든 `status == "resolved"`. `status=open` → 모든 `status == "open"`.
 - **G (핵심)** — 같은 경보에 `resolve` 재호출 → `409`(resolved는 종단).
 - **H (핵심)** — 해소 성공 직후 접속 중 WS 클라이언트가 `type == "incident_resolved"` 메시지를 수신하고 `payload.incidentId`가 해소한 경보의 id와 일치(계약 14 교차).
-- **I (핵심, mutating·terminal)** — 센서 버튼 해소 경로 유지: `open` 경보에 대한 `POST /api/incidents/{id}/resolve-from-sensor`(유효 바디) → `200`, `resolvedByKind == "sensor_button"`, 이후 그 경보의 `status == "resolved"`. `open → resolved`로 직접 전이한다(중간 확인 없음). **순서의존**: C1 마이그레이션 후(`acknowledged` 0건 상태)에 폴백 매칭(`status='open'` 술어)이 `open`만을 대상으로 함을 전제로 판정한다.
+- **I (핵심, mutating·terminal)** — 센서 버튼 해소 경로 유지: `open` 경보에 대한 `POST /api/incidents/{id}/resolve-from-sensor`(유효 바디) → `200`, `resolvedByKind == "sensor_button"`, 이후 그 경보의 `status == "resolved"`. `open → resolved`로 직접 전이한다(중간 확인 없음). **순서의존**: 마이그레이션 게이트 M 적용 후(`acknowledged` 0건 상태)에 폴백 매칭(`status='open'` 술어)이 `open`만을 대상으로 함을 전제로 판정한다.
 - **J** — 해소 부작용 관측: 웹 해소 성공 시 (a) 해당 site로 hw-gateway `/api/alert/resolved` 발행(MQTT `safety/{siteId}/alert/resolved` 관측 가능) (c) WS `incident_resolved` 브로드캐스트가 각각 1회 발생. (아카이브 finalize (b)는 비동기 트리거이므로 recording 접면에서 별도 관측.)
 - **K (핵심)** — 사용자 대면 표기: web-frontend의 경보 이력 탭/네비/페이지 제목 렌더 텍스트가 문자열 **"경보"**를 포함하고 **"사고"를 포함하지 않는다**(브라우저에서 관측 가능한 UI 텍스트 단언 — 예: 이력 탭 라벨의 textContent에 "경보" 포함, "사고" 미포함).
 - **L** — user 토큰으로 `PATCH /api/incidents/{id}/resolve` → `403`(해소는 admin 전용; 조회 `GET /api/incidents`는 user `200`).
-- **M (핵심)** — 레거시 마이그레이션 게이트: 배포/마이그레이션 적용 후 `GET /api/incidents?limit=100` 응답에 `status == "acknowledged"`인 행이 **0건**이다(기존 `acknowledged` 행은 `open`으로 승격됨). 최소 1개 시드가 존재하는 DB에서 판정(빈 테스트 DB의 vacuous OK 방지).
+- **M (핵심, mutating — 직접 SQL 시드 + 마이그레이션)** — 레거시 마이그레이션 게이트(승격+보존+null화). 단순 "acknowledged 부재" 카운트는 무력하다(삭제 마이그레이션도 통과, 클린 DB선 vacuous). 그러므로 **반증가능한 승격·보존 검증**으로 판정한다:
+  1. **마이그레이션 이전** 직접 SQL로 `status='acknowledged'` 행 **1건을 시드**하고 그 **고유 `id`를 기록**한다(그리고 `confirmed_at`·`confirmed_by`를 non-null로 채워 두어 null화가 실제로 일어남을 반증가능하게 한다). 시드 직전의 `incidents` 총 행수 `N`도 기록한다.
+  2. 마이그레이션(게이트 M)을 **적용**한다.
+  3. **동일한 그 `id`** 행이 여전히 존재하고(행 유실 없음), `status == 'open'`으로 승격되었으며, 그 행의 `confirmed_at`·`confirmed_by`가 **모두 `NULL`**이다. 그리고 마이그레이션 후 총 행수가 `N+1`(시드분 포함, 행수 보존 — 삭제 마이그레이션이면 여기서 NOK)이다.
+  4. 전역으로 `status='acknowledged'` 행이 **0건**이다.
   ```bash
-  curl -s -H "Authorization: Bearer $T" 'http://localhost:8080/api/incidents?limit=100' \
-    | jq -e '([.data[] | select(.status=="acknowledged")] | length) == 0 and (.data | length) >= 1'
+  DB=/data/sentinel.db
+  # (1) 마이그레이션 이전: acknowledged 1건 시드(고유 id·non-null attribution)
+  BEFORE=$(sqlite3 "$DB" "SELECT COUNT(*) FROM incidents;")
+  SID=$(sqlite3 "$DB" "INSERT INTO incidents(site_id,description,occurred_at,status,confirmed_at,confirmed_by) \
+    VALUES('site-mtest','M-gate seed','2026-01-01 00:00:00','acknowledged','2026-01-01 00:01:00','legacy-user'); \
+    SELECT last_insert_rowid();")
+  # (2) 마이그레이션 적용 (배포 마이그레이션 러너 실행)
+  run_migration
+  # (3) 동일 id가 open으로 승격 + attribution null화 + 행 보존
+  sqlite3 "$DB" "SELECT (status='open') AND (confirmed_at IS NULL) AND (confirmed_by IS NULL) \
+    FROM incidents WHERE id=$SID;"                       # → 1
+  test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM incidents WHERE id=$SID;")" = "1"    # 행 유실 없음
+  AFTER=$(sqlite3 "$DB" "SELECT COUNT(*) FROM incidents;")
+  test "$AFTER" = "$((BEFORE+1))"                        # 행수 보존(삭제 마이그레이션이면 NOK)
+  # (4) 전역 acknowledged 0건
+  test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM incidents WHERE status='acknowledged';")" = "0"
   ```
 - **N** — status 필터 화이트리스트: `GET /api/incidents?status=acknowledged`(및 `{open,resolved}` 밖의 임의 값) → `400`. `?status=open`·`?status=resolved`는 `200`.
   ```bash
@@ -202,3 +224,4 @@
 - **K** — 사유: 브라우저 렌더 텍스트 단언으로 Playwright 세션이 필요(web-frontend needs-browser 계열). API 계층만으로는 판정 불가. · 중요도: **핵심(load-bearing)** (표기 리네임이 이 단위의 3대 보장 중 하나) · 해소 조건: Playwright 세션 실행 시 즉시 판정(INDEX.md SKIP 해제 조건 4와 동류).
 - **O** — 사유: 브라우저 렌더 관측 필요(web-frontend needs-browser). acknowledge UI 미노출·ResolveModal 노트 선택화는 API로 판정 불가. · 중요도: **핵심(load-bearing)** · 해소 조건: Playwright 세션 실행 시 즉시 판정(K와 동류).
 - **A · B · G · I** — 사유: mutating·terminal 단언 — 경보를 `resolved`로 종단 전이시키거나 재해소 `409`를 유발하므로 **격리 스택 + `ADMIN_TOKEN` + 케이스별 새 `open` incident 시딩**이 필요하다(공유 DB에 부작용 잔존). · 중요도: **핵심** · 기본 **SKIP** 대상이며 격리 스택이 준비되면 판정한다.
+- **M** — 사유: mutating 단언 — **마이그레이션 이전** 직접 SQL로 `acknowledged` 행을 시드하고 **마이그레이션 러너를 적용**해야 판정 가능하다(DB 스키마·행에 비가역 부작용, 마이그레이션 1회성). 공유 DB가 아니라 **격리 스택 + 마이그레이션 이전 상태에서 시작**해야 한다. · 중요도: **핵심(load-bearing)** (레거시 승격+보존+null화 봉합이 이 단위의 마이그레이션 계약 핵심) · 기본 **SKIP** 대상이며 마이그레이션-이전 상태의 격리 스택이 준비되면 판정한다.
