@@ -1003,6 +1003,13 @@ func (am *ArchiveManager) markCompleted(archiveID string, sizeBytes int64, fileP
 func (am *ArchiveManager) updateStatus(archiveID, status, errMsg string) {
 	am.mu.Lock()
 	defer am.mu.Unlock()
+	// Invariant guard: every `failed` transition carries a non-empty lastError
+	// (단언 A4 — 모든 failed 종단 전이 → non-empty lastError). The wire field uses
+	// `omitempty`, so an empty reason would silently drop the field; substitute a
+	// human-readable default rather than let A4's invariant break unobserved.
+	if status == "failed" && errMsg == "" {
+		errMsg = "archive failed (no reason reported)"
+	}
 	for i, a := range am.archives {
 		if a.ID == archiveID {
 			if isTerminalStatus(a.Status) {
