@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"time"
 )
 
 // -----------------------------------------------------------------------------
@@ -85,11 +86,22 @@ func handleGetHealthSummary(mon *HealthMonitor) http.HandlerFunc {
 		// changes take effect without restart (assertion H).
 		threshold := mon.readIntSetting("health.sensor_alive_threshold_sec", 60)
 
+		// Freeze a single reference `now` (unix seconds) in Go and BIND it to BOTH
+		// queries. SQLite only freezes `'now'` within one statement, not across
+		// statements in a transaction — so inline strftime('%s','now') in each query
+		// could evaluate at two different instants and let a device cross the offline
+		// threshold between the counts read and the exceptions read (mis-derived
+		// exceptionsOverflow, or an exceptions row absent from the offline count). A
+		// bound `now` gives counts and exceptions ONE consistent instant (assertion
+		// A/I: "카운트와 예외 목록이 서로 다른 시점을 보지 않는다").
+		now := time.Now().Unix()
+
 		ctx, cancel := dbCtx(r.Context())
 		defer cancel()
 
-		// Single consistent snapshot: counts and exceptions in one read tx so they
-		// never see different points in time (assertion A/I note).
+		// Single consistent snapshot: counts and exceptions in one read tx, both
+		// keyed off the same bound `now`, so they never see different points in time
+		// (assertion A/I note).
 		tx, err := mon.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 		if err != nil {
 			log.Printf("health summary begin tx error: %v", err)
@@ -99,7 +111,7 @@ func handleGetHealthSummary(mon *HealthMonitor) http.HandlerFunc {
 		defer tx.Rollback()
 
 		// Counts via set aggregate (SQL SUM/CASE) — healthy devices are never
-		// individually materialized. age in whole seconds via strftime('%s').
+		// individually materialized. age = (bound now) - last_seen, in whole seconds.
 		var counts healthSummaryCounts
 		err = tx.QueryRowContext(ctx, `
 			SELECT
@@ -108,30 +120,31 @@ func handleGetHealthSummary(mon *HealthMonitor) http.HandlerFunc {
 			  COALESCE(SUM(CASE WHEN age >  ? THEN 1 ELSE 0 END), 0)
 			FROM (
 			  SELECT alert_state,
-			         (strftime('%s','now') - strftime('%s', last_seen)) AS age
+			         (? - strftime('%s', last_seen)) AS age
 			  FROM devices WHERE deleted_at IS NULL
 			)
-		`, threshold, threshold, threshold).Scan(&counts.Healthy, &counts.Abnormal, &counts.Offline)
+		`, threshold, threshold, threshold, now).Scan(&counts.Healthy, &counts.Abnormal, &counts.Offline)
 		if err != nil {
 			log.Printf("health summary counts error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 			return
 		}
 
-		// Exceptions: abnormal or offline only, capped. Most-stale first so the
-		// cap keeps the worst offenders. exception condition = age>threshold (offline)
-		// OR alert_state active (abnormal-while-alive).
+		// Exceptions: abnormal or offline only, capped, keyed off the SAME bound
+		// `now`. Most-stale first so the cap keeps the worst offenders. exception
+		// condition = age>threshold (offline) OR alert_state active (abnormal-while-
+		// alive).
 		exceptions := []healthSummaryException{}
 		rows, err := tx.QueryContext(ctx, `
 			SELECT site_id, device_id, alias, alert_state, age FROM (
 			  SELECT site_id, device_id, alias, alert_state,
-			         (strftime('%s','now') - strftime('%s', last_seen)) AS age
+			         (? - strftime('%s', last_seen)) AS age
 			  FROM devices WHERE deleted_at IS NULL
 			)
 			WHERE age > ? OR alert_state = 'active'
 			ORDER BY age DESC, site_id ASC, device_id ASC
 			LIMIT ?
-		`, threshold, summaryExceptionsCap)
+		`, now, threshold, summaryExceptionsCap)
 		if err != nil {
 			log.Printf("health summary exceptions error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
