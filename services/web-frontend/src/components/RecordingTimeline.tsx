@@ -27,6 +27,42 @@ interface IncidentMarker {
   isTest: boolean;
 }
 
+// Archive status enum consumer contract (interface-web-api.md §계약8 L409,
+// web-frontend 단언 R). The 6 canonical statuses are owned by recording spec;
+// (a) handle all 6, (b) any out-of-enum status → 미완료(진행 중), NEVER completed
+// (no download affordance), (c) `failed` surfaced as an error terminal + reason.
+type ArchiveState =
+  | "protecting"
+  | "pending"
+  | "finalizing"
+  | "processing"
+  | "completed"
+  | "failed"
+  | "unknown";
+
+const ARCHIVE_STATE_LABEL: Record<Exclude<ArchiveState, "completed">, string> = {
+  protecting: "보호 중",
+  pending: "대기 중",
+  finalizing: "마무리 중",
+  processing: "처리 중...",
+  failed: "실패",
+  unknown: "미완료(진행 중)",
+};
+
+function normalizeArchiveState(status: string): ArchiveState {
+  switch (status) {
+    case "protecting":
+    case "pending":
+    case "finalizing":
+    case "processing":
+    case "completed":
+    case "failed":
+      return status;
+    default:
+      return "unknown";
+  }
+}
+
 interface RecordingTimelineProps {
   streamKey: string;
   onPlaybackRequest: (url: string | null) => void;
@@ -611,38 +647,44 @@ export default function RecordingTimeline({ streamKey, onPlaybackRequest, isPlay
           </button>
           {showArchives && (
             <div className="rec-timeline-archives-list">
-              {archives.map((a) => (
-                <div key={a.id} className="rec-timeline-archive-item">
-                  <div className="rec-timeline-archive-info">
-                    <span className="rec-timeline-archive-time">
-                      {formatTime(new Date(a.from))} ~ {formatTime(new Date(a.to))}
-                    </span>
-                    <span className={`rec-timeline-archive-status ${a.status}`}>
-                      {a.status === "completed"
-                        ? formatBytes(a.sizeBytes)
-                        : a.status === "processing"
-                          ? "처리 중..."
-                          : a.status === "failed"
-                            ? "실패"
-                            : "대기"}
-                    </span>
+              {archives.map((a) => {
+                const state = normalizeArchiveState(a.status);
+                const isCompleted = state === "completed";
+                return (
+                  <div key={a.id} className="rec-timeline-archive-item">
+                    <div className="rec-timeline-archive-info">
+                      <span className="rec-timeline-archive-time">
+                        {formatTime(new Date(a.from))} ~ {formatTime(new Date(a.to))}
+                      </span>
+                      <span
+                        className={`rec-timeline-archive-status ${state}`}
+                        data-archive-state={state}
+                      >
+                        {isCompleted
+                          ? formatBytes(a.sizeBytes)
+                          : ARCHIVE_STATE_LABEL[state]}
+                      </span>
+                    </div>
+                    {isCompleted && (
+                      <button
+                        className="rec-timeline-archive-download"
+                        onClick={() => handleDownload(a.id)}
+                        disabled={downloading === a.id}
+                      >
+                        {downloading === a.id ? "..." : "다운로드"}
+                      </button>
+                    )}
+                    {state === "failed" && (
+                      <span
+                        className="rec-timeline-archive-error"
+                        title={a.error || "보관 처리 중 오류가 발생했습니다"}
+                      >
+                        {a.error || "보관 처리 중 오류가 발생했습니다"}
+                      </span>
+                    )}
                   </div>
-                  {a.status === "completed" && (
-                    <button
-                      className="rec-timeline-archive-download"
-                      onClick={() => handleDownload(a.id)}
-                      disabled={downloading === a.id}
-                    >
-                      {downloading === a.id ? "..." : "다운로드"}
-                    </button>
-                  )}
-                  {a.status === "failed" && a.error && (
-                    <span className="rec-timeline-archive-error" title={a.error}>
-                      {a.error}
-                    </span>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

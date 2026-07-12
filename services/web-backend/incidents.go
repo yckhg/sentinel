@@ -178,12 +178,7 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Fetch site info for the broadcast payload
-		var address, managerName, managerPhone string
-		row := db.QueryRowContext(ctx, "SELECT address, manager_name, manager_phone FROM sites LIMIT 1")
-		if err := row.Scan(&address, &managerName, &managerPhone); err != nil {
-			// Site info may not exist yet — use empty values
-			log.Printf("site info not found for broadcast: %v", err)
-		}
+		address, managerName, managerPhone := fetchSiteInfo(ctx, db, req.SiteID)
 
 		occurredAt := req.OccurredAt
 		if occurredAt == "" {
@@ -194,18 +189,10 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 		log.Printf("incident created: id=%d siteId=%s description=%s", incidentID, req.SiteID, req.Description)
 
 		// Broadcast crisis_alert to all WebSocket clients
-		BroadcastCrisisAlert(map[string]any{
-			"incidentId":  incidentID,
-			"siteId":      req.SiteID,
-			"description": req.Description,
-			"occurredAt":  occurredAt,
-			"isTest":      req.IsTest,
-			"site": map[string]string{
-				"address":      address,
-				"managerName":  managerName,
-				"managerPhone": managerPhone,
-			},
-		})
+		BroadcastCrisisAlert(crisisAlertPayload(
+			incidentID, req.SiteID, req.Description, occurredAt, req.IsTest,
+			address, managerName, managerPhone,
+		))
 
 		writeJSON(w, http.StatusCreated, map[string]any{
 			"id":          incidentID,
@@ -322,6 +309,86 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 				"total": total,
 			},
 		})
+	}
+}
+
+// fetchSiteInfo returns the site contact fields joined for an incident payload.
+// The sites table holds a single deployment site (no site_id join key), so the
+// same LIMIT 1 lookup the crisis_alert broadcast has always used is reused here
+// verbatim to keep the /active payload isomorphic with the live push.
+func fetchSiteInfo(ctx context.Context, db *sql.DB, siteID string) (address, managerName, managerPhone string) {
+	row := db.QueryRowContext(ctx, "SELECT address, manager_name, manager_phone FROM sites LIMIT 1")
+	if err := row.Scan(&address, &managerName, &managerPhone); err != nil {
+		// Site info may not exist yet — use empty values.
+		log.Printf("site info not found: %v", err)
+	}
+	return address, managerName, managerPhone
+}
+
+// crisisAlertPayload builds the crisis_alert WS payload (contract 14). The
+// /api/incidents/active backfill endpoint (contract 2) reuses this exact shape
+// so a reconstructed banner is isomorphic with the live push (no half-banner).
+func crisisAlertPayload(incidentID int64, siteID, description, occurredAt string, isTest bool, address, managerName, managerPhone string) map[string]any {
+	return map[string]any{
+		"incidentId":  incidentID,
+		"siteId":      siteID,
+		"description": description,
+		"occurredAt":  occurredAt,
+		"isTest":      isTest,
+		"site": map[string]string{
+			"address":      address,
+			"managerName":  managerName,
+			"managerPhone": managerPhone,
+		},
+	}
+}
+
+// activeIncidentsLimit caps the unresolved-banner backfill. Like GET /api/incidents
+// (which clamps to 100), the banner only needs the most-recent unresolved
+// incidents; without a cap a polluted table (tens of thousands of stale open rows)
+// would be streamed in full. The most-recent-N (occurred_at DESC) is sufficient to
+// reconstruct the in-progress banner.
+const activeIncidentsLimit = 200
+
+// handleActiveIncidents handles GET /api/incidents/active — the unresolved-banner
+// backfill (contract 2). Returns the most-recent open+acknowledged incidents
+// (resolved excluded), occurred_at DESC, capped at activeIncidentsLimit. Each
+// element is isomorphic to the crisis_alert payload plus a status field. The
+// identifier is incidentId (not the list `id`).
+func handleActiveIncidents(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		rows, err := db.QueryContext(ctx,
+			`SELECT id, site_id, description, datetime(occurred_at), is_test, status
+			 FROM incidents
+			 WHERE status IN ('open', 'acknowledged')
+			 ORDER BY datetime(occurred_at) DESC
+			 LIMIT ?`, activeIncidentsLimit)
+		if err != nil {
+			log.Printf("list active incidents error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+		defer rows.Close()
+
+		out := []map[string]any{}
+		for rows.Next() {
+			var id int64
+			var siteID, description, occurredAt, status string
+			var isTest int
+			if err := rows.Scan(&id, &siteID, &description, &occurredAt, &isTest, &status); err != nil {
+				log.Printf("scan active incident error: %v", err)
+				continue
+			}
+			address, managerName, managerPhone := fetchSiteInfo(ctx, db, siteID)
+			payload := crisisAlertPayload(id, siteID, description, occurredAt, isTest == 1, address, managerName, managerPhone)
+			payload["status"] = status
+			out = append(out, payload)
+		}
+
+		writeJSON(w, http.StatusOK, out)
 	}
 }
 
@@ -712,4 +779,3 @@ func requestArchiveFinalize(siteID, occurredAt, resolvedAt string) {
 		log.Printf("[archive-finalize] Finalize request failed: status %d, body: %s", resp.StatusCode, string(body))
 	}
 }
-

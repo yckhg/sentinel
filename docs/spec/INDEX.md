@@ -17,14 +17,14 @@
 
 | Spec | 테스트 위치 | 최근 판정 (2026-07-10) |
 |---|---|---|
-| [hw-gateway.md](hw-gateway.md) | `tests/spec/hw-gateway/` | OK 1 · NOK 0 · SKIP 16 |
+| [hw-gateway.md](hw-gateway.md) | `tests/spec/hw-gateway/` | **OK 22코어+f2/e2 · NOK 0 · SKIP 1 (a3 per-topic SUBACK=load-bearing, 유닛 대체커버)** (2026-07-11 spec/followup-2 재검증, Go unit 9/9) |
 | [notifier.md](notifier.md) | `tests/spec/notifier/` | OK 8 · NOK 0 · SKIP 2 (최후 보루 79/79 401 = 드리프트) |
 | [streaming.md](streaming.md) | `tests/spec/streaming/` | OK 3 · NOK 0 · SKIP 5 (healthz 게이트 false-NOK 버그) |
 | [cctv-adapter.md](cctv-adapter.md) | `tests/spec/cctv-adapter/` | OK 2 · NOK 0 · SKIP 9 (카메라 0대 구성) |
-| [youtube-adapter.md](youtube-adapter.md) | `tests/spec/youtube-adapter/` | OK 4 · NOK 0 · SKIP 5 |
-| [recording.md](recording.md) | `tests/spec/recording/` | OK 13 · NOK 0 · SKIP 2 (운영 데이터 이상 다수) |
+| [youtube-adapter.md](youtube-adapter.md) | `tests/spec/youtube-adapter/` | **OK J·J-2·C·B·F부분 · NOK 0 · SKIP G(reload mock 부재)·F완전** (2026-07-11 재검증, #72 인코딩 env, encode_test.go PASS) |
+| [recording.md](recording.md) | `tests/spec/recording/` | **OK P·P-2·O·F·G·M 외 · NOK 0 · SKIP D(⚠#1 삭제시 보호미해제=pre-existing 설계판단)** (2026-07-11 재검증, #75 기동복구, recovery_test.go 4/4 PASS) |
 | [web-backend.md](web-backend.md) | `tests/spec/web-backend/` | OK 3 · NOK 0 · SKIP 16 (admin fixture 부재; 보안 CRITICAL 2) |
-| [web-frontend.md](web-frontend.md) | `tests/spec/web-frontend/` | OK 2 · NOK 0 · SKIP 12 (needs-browser; Playwright 별도 세션) |
+| [web-frontend.md](web-frontend.md) | `tests/spec/web-frontend/` | **OK O/P/Q/R + 실로그인 회귀 = Playwright 19 pass · NOK 0 · SKIP ⚠#2 세션중401·⚠#3 라이브 incident_resolved(설계자)** (2026-07-11 #92/#104/R 재검증; 로그인 되튕김 CRITICAL 회귀 발견·flushSync fix) |
 
 ## 공용 헬퍼
 

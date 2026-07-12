@@ -5,8 +5,10 @@
 #   /healthz 200 유지. 재시도 간격 단조 증가 & ≤30s.
 set -u
 
-if [ "${SPEC_TDD_ALLOW_MUTATING:-0}" != "1" ]; then
-  echo "SKIPPED: requires fixture container that pushes a test stream to production streaming."
+# 게이트 변수 일관화: SPEC_TDD_ALLOW_MUTATING(스트리밍군 정본) 또는 ALLOW_MUTATING 중
+#   하나라도 1 이면 youtube 게이트군(C/F/G/J/J-2)이 함께 켜진다(조용한 부분초록 방지).
+if [ "${SPEC_TDD_ALLOW_MUTATING:-0}" != "1" ] && [ "${ALLOW_MUTATING:-0}" != "1" ]; then
+  echo "SKIPPED: requires fixture container that pushes a test stream. Set SPEC_TDD_ALLOW_MUTATING=1 to run."
   exit 2
 fi
 

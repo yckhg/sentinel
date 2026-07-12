@@ -36,6 +36,112 @@ var equipmentStore = struct {
 
 var heartbeatTimeout = 30 * time.Second
 
+// maxDevices caps the in-memory equipment store (LRU eviction guarantees the
+// no-unbounded-growth invariant). evictTTL is the visibility-only TTL that
+// REMOVES a device unseen past the TTL (distinct from dead-marking, which keeps
+// the device). Both are set in init() from env with the startup invariant
+// evictTTL > heartbeatTimeout enforced.
+var (
+	maxDevices = 1000
+	evictTTL   = 86400 * time.Second
+)
+
+// --- MQTT topics ---
+const (
+	topicAlert     = "safety/+/alert"
+	topicHeartbeat = "safety/+/heartbeat"
+	topicResolved  = "safety/+/alert/resolved"
+	topicCandidate = "safety/+/event/candidate"
+)
+
+// requiredHealthTopics are the alert-safety subscriptions that must be
+// SUBACK-granted for /healthz to report healthy. candidate is a lossy reference
+// channel and is deliberately excluded (its non-establishment must not degrade).
+var requiredHealthTopics = []string{topicAlert, topicHeartbeat, topicResolved}
+
+// subackFailure is the MQTT SUBACK return code meaning "subscription failed".
+const subackFailure byte = 0x80
+
+// healthState tracks the live MQTT connection + per-topic SUBACK-granted state so
+// that /healthz reflects the real ability to receive field alerts, not merely
+// that the HTTP server is up. All access is in-memory (no network round-trip),
+// so /healthz always returns within 1s (never blocks on the broker).
+type healthState struct {
+	sync.RWMutex
+	connected bool
+	grants    map[string]byte // topic → SUBACK granted QoS (0x80 = failure)
+}
+
+func newHealthState() *healthState {
+	return &healthState{grants: make(map[string]byte)}
+}
+
+// setConnected records the connection state. On disconnect, all subscription
+// grants are cleared — a dropped connection un-establishes every subscription,
+// and re-subscription SUBACKs must be re-received after reconnect.
+func (h *healthState) setConnected(v bool) {
+	h.Lock()
+	h.connected = v
+	if !v {
+		h.grants = make(map[string]byte)
+	}
+	h.Unlock()
+}
+
+func (h *healthState) setGrant(topic string, granted byte) {
+	h.Lock()
+	h.grants[topic] = granted
+	h.Unlock()
+}
+
+func (h *healthState) snapshot() (bool, map[string]byte) {
+	h.RLock()
+	defer h.RUnlock()
+	g := make(map[string]byte, len(h.grants))
+	for k, v := range h.grants {
+		g[k] = v
+	}
+	return h.connected, g
+}
+
+// health is the process-wide MQTT health state consumed by /healthz.
+var health = newHealthState()
+
+// isHealthy is the pure health-state computation: healthy iff connected AND every
+// required alert-safety topic was SUBACK-granted a valid QoS (not 0x80 failure).
+// candidate grants are ignored. Pure over its inputs for unit-testability.
+func isHealthy(connected bool, grants map[string]byte) bool {
+	if !connected {
+		return false
+	}
+	for _, t := range requiredHealthTopics {
+		g, ok := grants[t]
+		if !ok || g == subackFailure {
+			return false
+		}
+	}
+	return true
+}
+
+// recordGrant inspects a completed Subscribe token and records the SUBACK-granted
+// QoS for the topic in the health state. A token error or 0x80 result marks the
+// topic as not established (so /healthz stays degraded until a clean re-SUBACK).
+func recordGrant(token mqtt.Token, topic string) {
+	if token.Error() != nil {
+		health.setGrant(topic, subackFailure)
+		return
+	}
+	if st, ok := token.(*mqtt.SubscribeToken); ok {
+		if g, ok := st.Result()[topic]; ok {
+			health.setGrant(topic, g)
+			return
+		}
+	}
+	// No per-topic result available: treat the completed, error-free subscribe as
+	// granted at QoS 0 (established). Defensive fallback — paho populates Result().
+	health.setGrant(topic, 0)
+}
+
 // publishTimeout bounds how long a publish HTTP handler waits for the MQTT
 // broker to accept a message. Designer-approved change: when the broker was
 // connected once but then dropped (auto-reconnect in progress), Publish().Wait()
@@ -166,12 +272,65 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-func init() {
-	if v := os.Getenv("HEARTBEAT_TIMEOUT_SEC"); v != "" {
-		if sec, err := strconv.Atoi(v); err == nil && sec > 0 {
-			heartbeatTimeout = time.Duration(sec) * time.Second
+// parsePositiveIntEnv parses raw as a positive integer, returning fallback when
+// raw is empty or not a positive integer (env contract: "positive int only").
+func parsePositiveIntEnv(raw string, fallback int) int {
+	if raw == "" {
+		return fallback
+	}
+	if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+		return n
+	}
+	return fallback
+}
+
+// resolveEvictTTL enforces the startup invariant evictTTL > heartbeatTimeout so a
+// dead-marked device stays queryable for a while before TTL removal. On violation
+// (ttl <= heartbeatTimeout) it forces the default and reports forced=true so the
+// caller can warn. Pure for unit-testability.
+func resolveEvictTTL(ttl, heartbeatTimeout, defaultTTL time.Duration) (time.Duration, bool) {
+	if ttl <= heartbeatTimeout {
+		return defaultTTL, true
+	}
+	return ttl, false
+}
+
+// lruVictim returns the key of the least-recently-seen device (smallest lastSeen),
+// or "" if the map is empty. Used to keep the store within EQUIPMENT_MAX_DEVICES.
+func lruVictim(devices map[string]*DeviceStatus) string {
+	var victim string
+	var oldest time.Time
+	for k, ds := range devices {
+		if victim == "" || ds.lastSeen.Before(oldest) {
+			victim = k
+			oldest = ds.lastSeen
 		}
 	}
+	return victim
+}
+
+// ttlExpiredKeys returns keys whose lastSeen is older than ttl relative to now
+// (visibility-only TTL removal — distinct from dead-marking which retains).
+func ttlExpiredKeys(devices map[string]*DeviceStatus, now time.Time, ttl time.Duration) []string {
+	var expired []string
+	for k, ds := range devices {
+		if now.Sub(ds.lastSeen) > ttl {
+			expired = append(expired, k)
+		}
+	}
+	return expired
+}
+
+func init() {
+	heartbeatTimeout = time.Duration(parsePositiveIntEnv(os.Getenv("HEARTBEAT_TIMEOUT_SEC"), 30)) * time.Second
+	maxDevices = parsePositiveIntEnv(os.Getenv("EQUIPMENT_MAX_DEVICES"), 1000)
+
+	ttl := time.Duration(parsePositiveIntEnv(os.Getenv("EQUIPMENT_EVICT_TTL_SEC"), 86400)) * time.Second
+	resolved, forced := resolveEvictTTL(ttl, heartbeatTimeout, 86400*time.Second)
+	if forced {
+		log.Printf("[CONFIG] EQUIPMENT_EVICT_TTL_SEC (%v) must be > HEARTBEAT_TIMEOUT_SEC (%v); forcing default 86400s", ttl, heartbeatTimeout)
+	}
+	evictTTL = resolved
 }
 
 func main() {
@@ -189,15 +348,24 @@ func main() {
 	opts := mqtt.NewClientOptions().
 		AddBroker(brokerURL).
 		SetClientID("sentinel-hw-gateway").
-		SetCleanSession(true).
-		SetKeepAlive(60 * time.Second).
+		// Persistent session (clean=false) + fixed clientID: on the reconnect
+		// boundary the broker redelivers queued QoS1/2 messages so a receiver-side
+		// alert is not lost (spec §회복력, assertion S; interface-mqtt §브로커 접속 계약).
+		SetCleanSession(false).
+		// Short keep-alive (≤5s) so a silent broker-down is detected within the
+		// keep-alive boundary, aligning the /healthz degraded transition with the
+		// 5s publish timeout (spec §헬스체크 단절 감지, assertion O2).
+		SetKeepAlive(5 * time.Second).
 		SetAutoReconnect(true).
 		SetMaxReconnectInterval(60 * time.Second).
 		SetConnectionLostHandler(func(_ mqtt.Client, err error) {
 			log.Printf("[MQTT] Connection lost: %v", err)
+			// Surface the disconnect to /healthz (degraded) and drop all grants.
+			health.setConnected(false)
 		}).
 		SetOnConnectHandler(func(client mqtt.Client) {
 			log.Println("[MQTT] Connected to broker")
+			health.setConnected(true)
 			subscribeTopics(client, notifierURL, webBackendURL)
 		})
 
@@ -210,8 +378,17 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok","service":"hw-gateway"}`))
+		// In-memory flag read only — never blocks on the broker, so this always
+		// returns within 1s even while the broker is down (spec assertions A2/O2).
+		connected, grants := health.snapshot()
+		w.Header().Set("Content-Type", "application/json")
+		if isHealthy(connected, grants) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"ok","service":"hw-gateway"}`))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"status":"degraded","service":"hw-gateway"}`))
 	})
 
 	mux.HandleFunc("POST /api/restart", func(w http.ResponseWriter, r *http.Request) {
@@ -289,48 +466,56 @@ func connectWithRetry(client mqtt.Client) {
 }
 
 func subscribeTopics(client mqtt.Client, notifierURL, webBackendURL string) {
-	// Subscribe to alert topic (QoS 2 — exactly once)
-	alertToken := client.Subscribe("safety/+/alert", 2, func(_ mqtt.Client, msg mqtt.Message) {
+	// Alert topic (QoS 2 — exactly once). Persistent-session redelivery of a
+	// QoS2 alert published while the gateway was briefly offline (assertion S).
+	alertToken := client.Subscribe(topicAlert, 2, func(_ mqtt.Client, msg mqtt.Message) {
 		handleAlert(msg, notifierURL, webBackendURL)
 	})
 	alertToken.Wait()
+	recordGrant(alertToken, topicAlert)
 	if alertToken.Error() != nil {
-		log.Printf("[MQTT] Failed to subscribe to safety/+/alert: %v", alertToken.Error())
+		log.Printf("[MQTT] Failed to subscribe to %s: %v", topicAlert, alertToken.Error())
 	} else {
-		log.Println("[MQTT] Subscribed to safety/+/alert (QoS 2)")
+		log.Printf("[MQTT] Subscribed to %s (QoS 2)", topicAlert)
 	}
 
-	// Subscribe to heartbeat topic (QoS 0 — at most once)
-	hbToken := client.Subscribe("safety/+/heartbeat", 0, func(_ mqtt.Client, msg mqtt.Message) {
+	// Heartbeat topic (QoS 1 subscription — persistent session; published at QoS0
+	// so no offline queueing/flood, but the subscription is granted at QoS1).
+	hbToken := client.Subscribe(topicHeartbeat, 1, func(_ mqtt.Client, msg mqtt.Message) {
 		handleHeartbeat(msg, webBackendURL)
 	})
 	hbToken.Wait()
+	recordGrant(hbToken, topicHeartbeat)
 	if hbToken.Error() != nil {
-		log.Printf("[MQTT] Failed to subscribe to safety/+/heartbeat: %v", hbToken.Error())
+		log.Printf("[MQTT] Failed to subscribe to %s: %v", topicHeartbeat, hbToken.Error())
 	} else {
-		log.Println("[MQTT] Subscribed to safety/+/heartbeat (QoS 0)")
+		log.Printf("[MQTT] Subscribed to %s (QoS 1)", topicHeartbeat)
 	}
 
-	// Subscribe to alert/resolved topic (QoS 1 — bidirectional sync, see mqtt-publisher-guide.md §5.5)
-	resolvedToken := client.Subscribe("safety/+/alert/resolved", 1, func(_ mqtt.Client, msg mqtt.Message) {
+	// alert/resolved topic (QoS 1 — bidirectional sync). Redelivery on the
+	// reconnect boundary is idempotency-safe downstream (spec §재연결 중복).
+	resolvedToken := client.Subscribe(topicResolved, 1, func(_ mqtt.Client, msg mqtt.Message) {
 		handleAlertResolvedSubscription(msg, webBackendURL)
 	})
 	resolvedToken.Wait()
+	recordGrant(resolvedToken, topicResolved)
 	if resolvedToken.Error() != nil {
-		log.Printf("[MQTT] Failed to subscribe to safety/+/alert/resolved: %v", resolvedToken.Error())
+		log.Printf("[MQTT] Failed to subscribe to %s: %v", topicResolved, resolvedToken.Error())
 	} else {
-		log.Println("[MQTT] Subscribed to safety/+/alert/resolved (QoS 1)")
+		log.Printf("[MQTT] Subscribed to %s (QoS 1)", topicResolved)
 	}
 
-	// Subscribe to event/candidate topic (QoS 0 — best-effort, high frequency)
-	candidateToken := client.Subscribe("safety/+/event/candidate", 0, func(_ mqtt.Client, msg mqtt.Message) {
+	// event/candidate topic (QoS 0 — best-effort lossy reference channel; excluded
+	// from /healthz judgment).
+	candidateToken := client.Subscribe(topicCandidate, 0, func(_ mqtt.Client, msg mqtt.Message) {
 		handleCandidate(msg, webBackendURL)
 	})
 	candidateToken.Wait()
+	recordGrant(candidateToken, topicCandidate)
 	if candidateToken.Error() != nil {
-		log.Printf("[MQTT] Failed to subscribe to safety/+/event/candidate: %v", candidateToken.Error())
+		log.Printf("[MQTT] Failed to subscribe to %s: %v", topicCandidate, candidateToken.Error())
 	} else {
-		log.Println("[MQTT] Subscribed to safety/+/event/candidate (QoS 0)")
+		log.Printf("[MQTT] Subscribed to %s (QoS 0)", topicCandidate)
 	}
 }
 
@@ -583,6 +768,17 @@ func handleHeartbeat(msg mqtt.Message, webBackendURL string) {
 	equipmentStore.Lock()
 	ds, exists := equipmentStore.devices[key]
 	if !exists {
+		// LRU cap eviction — the sole guarantee of the no-unbounded-growth
+		// invariant. Evict least-recently-seen devices until adding one keeps the
+		// store <= EQUIPMENT_MAX_DEVICES (spec §장비 스토어 보존 상한, assertion Q).
+		for len(equipmentStore.devices) >= maxDevices {
+			victim := lruVictim(equipmentStore.devices)
+			if victim == "" {
+				break
+			}
+			delete(equipmentStore.devices, victim)
+			log.Printf("[EVICT] LRU cap (%d) exceeded, evicted least-recently-seen device: %s", maxDevices, victim)
+		}
 		ds = &DeviceStatus{
 			DeviceID: hb.DeviceID,
 			SiteID:   hb.SiteID,
@@ -736,6 +932,17 @@ func heartbeatChecker() {
 			}
 			equipmentStore.Unlock()
 		}
+
+		// Phase 3: TTL eviction — REMOVE devices unseen past evictTTL (visibility
+		// cleanup, distinct from dead-marking above which keeps the device). With
+		// the startup invariant evictTTL > heartbeatTimeout, a dead-marked device
+		// stays queryable until the TTL elapses (spec assertions R/C/T).
+		equipmentStore.Lock()
+		for _, key := range ttlExpiredKeys(equipmentStore.devices, now, evictTTL) {
+			delete(equipmentStore.devices, key)
+			log.Printf("[EVICT] TTL (%v) exceeded, removed device from store: %s", evictTTL, key)
+		}
+		equipmentStore.Unlock()
 	}
 }
 

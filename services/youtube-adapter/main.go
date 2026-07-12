@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -56,6 +57,93 @@ func validateYouTubeURL(rawURL string) error {
 	return nil
 }
 
+// encodeParams holds the FFmpeg re-encoding parameters. Each field maps to a
+// single FFmpeg argument value and is injected from an environment variable at
+// startup (with an in-code default). Codec normalization (H.264 + AAC) is
+// independent of these values and always applied — these only tune bitrate/GOP/
+// preset. See docs/spec/youtube-adapter.md §입력 (ENCODE_* vars) + §단언 J/J-2.
+type encodeParams struct {
+	VideoBitrate string // -b:v   (default 300k)
+	GOP          string // -g     (default 60)
+	AudioBitrate string // -b:a   (default 48k)
+	Preset       string // -preset (default ultrafast)
+}
+
+func defaultEncodeParams() encodeParams {
+	return encodeParams{
+		VideoBitrate: "300k",
+		GOP:          "60",
+		AudioBitrate: "48k",
+		Preset:       "ultrafast",
+	}
+}
+
+// x264Presets is the known libx264 preset set. An ENCODE_PRESET value outside
+// this set is treated as invalid and falls back to the default.
+var x264Presets = map[string]bool{
+	"ultrafast": true, "superfast": true, "veryfast": true, "faster": true,
+	"fast": true, "medium": true, "slow": true, "slower": true,
+	"veryslow": true, "placebo": true,
+}
+
+// bitratePattern accepts an integer optionally suffixed with 'k' (e.g. 300k, 500).
+var bitratePattern = regexp.MustCompile(`^\d+k?$`)
+
+// validBitrate reports whether s is a well-formed, positive bitrate string.
+func validBitrate(s string) bool {
+	if !bitratePattern.MatchString(s) {
+		return false
+	}
+	n, err := strconv.Atoi(strings.TrimSuffix(s, "k"))
+	return err == nil && n > 0
+}
+
+// validGOP reports whether s is a positive integer GOP length.
+func validGOP(s string) bool {
+	n, err := strconv.Atoi(s)
+	return err == nil && n > 0
+}
+
+// parseEncodeParams builds encodeParams from environment values (via getenv).
+// Unset variables use the default. Set-but-invalid variables fall back to the
+// default with a warning appended to the returned slice (fallback is per-variable
+// and independent). This prevents an invalid value from causing an FFmpeg crash
+// loop. See §단언 J-2.
+func parseEncodeParams(getenv func(string) string) (encodeParams, []string) {
+	ep := defaultEncodeParams()
+	var warnings []string
+
+	if v := getenv("ENCODE_VIDEO_BITRATE"); v != "" {
+		if validBitrate(v) {
+			ep.VideoBitrate = v
+		} else {
+			warnings = append(warnings, fmt.Sprintf("invalid ENCODE_VIDEO_BITRATE %q, falling back to default %s", v, ep.VideoBitrate))
+		}
+	}
+	if v := getenv("ENCODE_GOP"); v != "" {
+		if validGOP(v) {
+			ep.GOP = v
+		} else {
+			warnings = append(warnings, fmt.Sprintf("invalid ENCODE_GOP %q (must be a positive integer), falling back to default %s", v, ep.GOP))
+		}
+	}
+	if v := getenv("ENCODE_AUDIO_BITRATE"); v != "" {
+		if validBitrate(v) {
+			ep.AudioBitrate = v
+		} else {
+			warnings = append(warnings, fmt.Sprintf("invalid ENCODE_AUDIO_BITRATE %q, falling back to default %s", v, ep.AudioBitrate))
+		}
+	}
+	if v := getenv("ENCODE_PRESET"); v != "" {
+		if x264Presets[v] {
+			ep.Preset = v
+		} else {
+			warnings = append(warnings, fmt.Sprintf("invalid ENCODE_PRESET %q (unknown x264 preset), falling back to default %s", v, ep.Preset))
+		}
+	}
+	return ep, warnings
+}
+
 // YouTubeSource represents a single YouTube video to stream
 type YouTubeSource struct {
 	ID         string `json:"id"`
@@ -97,14 +185,16 @@ type StreamManager struct {
 	streams map[string]*streamState
 	sources []YouTubeSource
 	rtmpURL string
+	encode  encodeParams   // FFmpeg re-encoding parameters (env-injected)
 	wg      sync.WaitGroup // tracks running manageStream goroutines for graceful shutdown
 }
 
-func NewStreamManager(sources []YouTubeSource, rtmpURL string) *StreamManager {
+func NewStreamManager(sources []YouTubeSource, rtmpURL string, encode encodeParams) *StreamManager {
 	return &StreamManager{
 		streams: make(map[string]*streamState),
 		sources: sources,
 		rtmpURL: rtmpURL,
+		encode:  encode,
 	}
 }
 
@@ -258,7 +348,7 @@ func (m *StreamManager) manageStream(src YouTubeSource, state *streamState) {
 		state.loopCount++
 		state.Unlock()
 
-		ffErr := runFFmpeg(streamURL, rtmpDest, src.LocalFile != "", state.stopCh)
+		ffErr := runFFmpeg(streamURL, rtmpDest, src.LocalFile != "", m.encode, state.stopCh)
 
 		select {
 		case <-state.stopCh:
@@ -379,11 +469,10 @@ func resolveStreamURL(youtubeURL string, stopCh <-chan struct{}) (string, error)
 	return strings.TrimSpace(string(out)), nil
 }
 
-// runFFmpeg streams from sourceURL to rtmpDest.
-// Video is re-encoded with libx264 (no B-frames) because nginx-rtmp module v1.2.2
-// drops connections when H.264 B-frame composition time offsets are present in FLV.
-// Audio is re-encoded to AAC 48k for consistent FLV compatibility.
-func runFFmpeg(sourceURL, rtmpDest string, isLocalFile bool, stopCh chan struct{}) error {
+// buildFFmpegArgs builds the FFmpeg argument list for a push. Codec normalization
+// is fixed (libx264 video + aac audio, always re-encoded — never copy), while the
+// bitrate/GOP/preset values come from the env-injected encodeParams. See §단언 J.
+func buildFFmpegArgs(sourceURL, rtmpDest string, isLocalFile bool, ep encodeParams) []string {
 	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
@@ -395,16 +484,25 @@ func runFFmpeg(sourceURL, rtmpDest string, isLocalFile bool, stopCh chan struct{
 	args = append(args,
 		"-i", sourceURL,
 		"-c:v", "libx264",
-		"-preset", "ultrafast",
+		"-preset", ep.Preset,
 		"-tune", "zerolatency",
-		"-b:v", "300k",
-		"-g", "60",
+		"-b:v", ep.VideoBitrate,
+		"-g", ep.GOP,
 		"-c:a", "aac",
-		"-b:a", "48k",
+		"-b:a", ep.AudioBitrate,
 		"-f", "flv",
 		"-flvflags", "no_duration_filesize",
 		rtmpDest,
 	)
+	return args
+}
+
+// runFFmpeg streams from sourceURL to rtmpDest.
+// Video is re-encoded with libx264 and audio to AAC for consistent FLV
+// compatibility (the streaming hub accepts H.264 with or without B-frames).
+// Encoding tuning (bitrate/GOP/preset) is supplied via encodeParams.
+func runFFmpeg(sourceURL, rtmpDest string, isLocalFile bool, ep encodeParams, stopCh chan struct{}) error {
+	args := buildFFmpegArgs(sourceURL, rtmpDest, isLocalFile, ep)
 	cmd := exec.Command("ffmpeg", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -545,7 +643,16 @@ func main() {
 
 	log.Printf("Loaded %d YouTube source(s)", len(sources))
 
-	manager := NewStreamManager(sources, rtmpURL)
+	// Resolve encoding parameters from env (invalid values fall back to defaults
+	// with a one-time warning — never a crash loop). See §단언 J / J-2.
+	encode, encWarnings := parseEncodeParams(os.Getenv)
+	for _, w := range encWarnings {
+		log.Printf("WARNING: %s", w)
+	}
+	log.Printf("Encoding params: -b:v %s -g %s -b:a %s -preset %s",
+		encode.VideoBitrate, encode.GOP, encode.AudioBitrate, encode.Preset)
+
+	manager := NewStreamManager(sources, rtmpURL, encode)
 	manager.StartAll()
 
 	// HTTP handlers

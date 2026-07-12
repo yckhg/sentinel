@@ -137,7 +137,7 @@ func getSiteURL(db *sql.DB) string {
 // (not proxied externally), used by notifier.
 func handleCreateTempLink(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAdmin(w, r) == nil {
+		if requireAdmin(db, w, r) == nil {
 			return
 		}
 		label, ok := readTempLinkLabel(w, r)

@@ -284,6 +284,33 @@ body {
   gap: 2px;
 }
 
+/* WS connection status indicator (socket-only state, 단언 O) */
+.ws-status-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+}
+.ws-status-indicator .ws-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.ws-status-indicator[data-ws-state="connected"] {
+  background: #2e7d32; /* green */
+}
+.ws-status-indicator[data-ws-state="disconnected"] {
+  background: #b71c1c; /* red */
+}
+.ws-status-indicator[data-ws-state="reconnecting"] {
+  background: #ef6c00; /* amber */
+}
+
 .crisis-banner {
   display: flex;
   align-items: center;
@@ -1904,4 +1931,29 @@ body {
 .mgmt-incident-archive-key {
   color: #aaa;
   min-width: 80px;
+}
+
+/* 404 not-found view (unknown path, never absorbed into main app) */
+.content.not-found {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+  text-align: center;
+}
+.not-found-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.not-found-code {
+  font-size: 64px;
+  font-weight: 800;
+  margin: 0;
+  color: #90a4ae;
+}
+.not-found-text {
+  color: #546e7a;
+  margin: 0;
 }

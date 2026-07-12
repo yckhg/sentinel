@@ -19,9 +19,19 @@ if [ "${ALLOW_MUTATING:-0}" != "1" ]; then
   exit 2
 fi
 
-# 전제: b_heartbeat_register.sh 직후. HEARTBEAT_TIMEOUT_SEC=30 기준 40초 대기.
-echo "40초 대기..."; sleep 40
-entry=$(gw_get /api/equipment/status | grep -o "{\"deviceId\":\"T-B1\"[^}]*}")
+# F5: C 전용 deviceId(T-C1) — B(T-B1)/D 와 키 공유 금지(공유 키는 dead 타이머 리셋 → C 교차오염).
+#     C는 자체적으로 T-C1 을 등록한 뒤 재수신을 중단해 dead 판정을 격리 관측한다.
+# 격리: R의 소TTL(EQUIPMENT_EVICT_TTL_SEC≈10) 설정 인스턴스와 같은 인스턴스에서 돌리지 않는다 —
+#       기본 설정(TTL 86400 ≫ HEARTBEAT_TIMEOUT_SEC 30)에서 실행해 TTL 제거와 분리한다.
+DEV="T-C1"; SITE="site1"
+$PUB -q 0 -t "safety/$SITE/heartbeat" \
+  -m "{\"deviceId\":\"$DEV\",\"siteId\":\"$SITE\",\"status\":\"running\",\"alertState\":\"none\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+sleep 2
+gw_get /api/equipment/status | grep -q "\"deviceId\":\"$DEV\"" || { echo "NOK: $DEV 등록 실패 (전제 불충족)"; exit 1; }
+
+# HEARTBEAT_TIMEOUT_SEC=30 기준 40초(=timeout+10) 재수신 중단 대기.
+echo "40초 대기 (dead 판정)..."; sleep 40
+entry=$(gw_get /api/equipment/status | grep -o "{\"deviceId\":\"$DEV\"[^}]*}")
 echo "entry=$entry"
-[ -n "$entry" ] || { echo "NOK: 목록에서 제거됨"; exit 1; }
-echo "$entry" | grep -q "\"alive\":false" && { echo OK; exit 0; } || { echo "NOK: alive=true 유지"; exit 1; }
+[ -n "$entry" ] || { echo "NOK: 목록에서 제거됨 (TTL 미도달인데 사라짐)"; exit 1; }
+echo "$entry" | grep -q "\"alive\":false" && { echo OK; exit 0; } || { echo "NOK: alive=true 유지 (dead 미마킹)"; exit 1; }

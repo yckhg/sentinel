@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"os/signal"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -109,6 +111,16 @@ type Config struct {
 	SMTPUser          string
 	SMTPPass          string
 	SMTPFrom          string
+
+	// DedupWindow is the incident dedup window (§출력 12). <=0 disables dedup.
+	DedupWindow time.Duration
+	// ChannelRetryMax / ChannelRetryBackoff drive the pre-fallback same-channel
+	// retry on fast transient errors (§출력 13).
+	ChannelRetryMax     int
+	ChannelRetryBackoff time.Duration
+	// ArchiveProtectTimeout bounds the background recording-protect HTTP request so a
+	// hung/slow recording endpoint cannot accumulate goroutines. <=0 → 5s default.
+	ArchiveProtectTimeout time.Duration
 }
 
 func loadConfig() Config {
@@ -128,12 +140,34 @@ func loadConfig() Config {
 		SMTPUser:          getEnv("SMTP_USER", ""),
 		SMTPPass:          getEnv("SMTP_PASS", ""),
 		SMTPFrom:          getEnv("SMTP_FROM", ""),
+
+		// §출력 12: default a conservative short window (60s); 0 disables dedup.
+		DedupWindow: time.Duration(getEnvInt("DEDUP_WINDOW_SECONDS", 60)) * time.Second,
+		// §출력 13: default a small retry cap (1) + short backoff (200ms) so the
+		// retry stays inside the §출력 7 per-channel 12s budget. 0 → immediate fallback.
+		ChannelRetryMax:     getEnvInt("CHANNEL_RETRY_MAX", 1),
+		ChannelRetryBackoff: time.Duration(getEnvInt("CHANNEL_RETRY_BACKOFF_MS", 200)) * time.Millisecond,
+		// Bound the background protect delivery to a few seconds (default 5s) so a
+		// recording outage cannot hang/leak goroutines. Alert path stays unaffected.
+		ArchiveProtectTimeout: time.Duration(getEnvInt("ARCHIVE_PROTECT_TIMEOUT_MS", 5000)) * time.Millisecond,
 	}
 }
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+// getEnvInt reads an integer env var, falling back on unset/unparseable values.
+// A literal "0" is honored (returns 0), which is how the dedup/retry knobs are
+// explicitly disabled.
+func getEnvInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return n
+		}
 	}
 	return fallback
 }
@@ -267,6 +301,117 @@ var httpClient = &http.Client{
 	},
 }
 
+// --- Incident Dedup (§출력 12 / assertion N) ---
+//
+// Same incident key (siteId,deviceId,type) re-received within DEDUP_WINDOW_SECONDS
+// is suppressed: no contact dispatch, no system alarm, no archive-protect. The very
+// first event of a key is never suppressed, test:true events are excluded entirely
+// (never judged, never recorded — so a test injection cannot poison the cache and
+// swallow a real crisis right after), the check-and-record is atomic under a mutex,
+// and expired entries are evicted so the cache cannot grow without bound.
+
+type dedupCache struct {
+	mu      sync.Mutex
+	entries map[string]time.Time
+}
+
+func newDedupCache() *dedupCache {
+	return &dedupCache{entries: make(map[string]time.Time)}
+}
+
+// dedupKey builds the incident dedup key from the alert.
+func dedupKey(alert AlertPayload) string {
+	return alert.SiteID + "\x1f" + alert.DeviceID + "\x1f" + alert.Type
+}
+
+// checkAndRecord atomically decides whether key is a duplicate within window and,
+// if not, records now as its latest sighting. Returns true when the event must be
+// suppressed (a live entry already exists), false for the first/expired sighting.
+// window <= 0 disables dedup (always returns false, records nothing). Expired
+// entries are evicted on every call so the map stays bounded.
+func (d *dedupCache) checkAndRecord(key string, window time.Duration, now time.Time) bool {
+	if window <= 0 {
+		return false // dedup disabled — every event is a "first"
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Evict everything outside the window first; whatever remains is a live hit.
+	for k, t := range d.entries {
+		if now.Sub(t) >= window {
+			delete(d.entries, k)
+		}
+	}
+	if _, live := d.entries[key]; live {
+		return true // duplicate inside window → suppress
+	}
+	d.entries[key] = now
+	return false
+}
+
+// --- External-Channel Retry (§출력 13 / assertion O) ---
+
+// isTimeoutErr reports whether err is a request timeout (response-header/overall
+// deadline). Timeouts are NOT retried — the time budget is already spent, so a
+// retry would only add crisis latency; we fall back immediately instead.
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return ne.Timeout()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return os.IsTimeout(err)
+}
+
+// perChannelCap bounds one external channel's total wall time incl. retries (§출력 7).
+const perChannelCap = 12 * time.Second
+
+// sendChannelWithRetry drives a single external channel with immediate same-channel
+// retry (§출력 13). `once` performs one send attempt and returns (retryable, err):
+// retryable is true only for FAST transient failures (5xx / connection-refused) —
+// timeouts and permanent failures (channel disabled, credentials missing) return
+// retryable=false and fall back immediately. Retries are capped by max, spaced by
+// backoff, and never started if they would breach the §출력 7 12s per-channel cap.
+func sendChannelWithRetry(channel, name, phone string, max int, backoff time.Duration, once func() (bool, error)) error {
+	if max < 0 {
+		max = 0
+	}
+	start := time.Now()
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		retryable, err := once()
+		if err == nil {
+			if attempt > 0 {
+				logf("[%s] Retry succeeded on attempt %d for %s (%s)", channel, attempt+1, name, phone)
+			}
+			return nil
+		}
+		lastErr = err
+		if !retryable {
+			// Timeout or permanent failure → no retry, immediate fallback.
+			return lastErr
+		}
+		if attempt >= max {
+			if max > 0 {
+				logf("[%s] Retries exhausted (max=%d) for %s (%s), falling back: %v", channel, max, name, phone, err)
+			}
+			return lastErr
+		}
+		if time.Since(start)+backoff >= perChannelCap {
+			logf("[%s] Retry budget (12s) reached for %s (%s), falling back: %v", channel, name, phone, err)
+			return lastErr
+		}
+		logf("[%s] Transient failure for %s (%s), retrying same channel (attempt %d/%d): %v",
+			channel, name, phone, attempt+1, max, err)
+		time.Sleep(backoff)
+	}
+}
+
 // --- Settings Fetching ---
 
 // fetchSiteURL reads site_url from web-backend's internal settings API.
@@ -344,10 +489,15 @@ func requestTempLink(cfg Config, label string) (*TempLinkResponse, error) {
 
 // --- KakaoTalk 알림톡 Sending ---
 
-func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
+// sendKakaoTalkOnce performs a single KakaoTalk send attempt and classifies the
+// failure for the retry driver (§출력 13): the first return value is `retryable` —
+// true only for fast transient errors (5xx or a non-timeout transport error such
+// as connection-refused). Timeouts and permanent failures (unconfigured channel)
+// return retryable=false so the caller falls back immediately without retrying.
+func sendKakaoTalkOnce(cfg Config, contact Contact, alert AlertPayload, cctvLink string) (bool, error) {
 	if cfg.KakaoAPIURL == "" || cfg.KakaoAPIKey == "" {
 		logf("[kakao] API not configured, skipping KakaoTalk for %s (%s)", contact.Name, maskPhone(contact.Phone))
-		return fmt.Errorf("KakaoTalk API not configured")
+		return false, fmt.Errorf("KakaoTalk API not configured") // permanent → no retry
 	}
 
 	description := alert.Description
@@ -372,12 +522,12 @@ func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink str
 
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
-		return fmt.Errorf("marshal kakao request: %w", err)
+		return false, fmt.Errorf("marshal kakao request: %w", err)
 	}
 
 	req, err := http.NewRequest("POST", cfg.KakaoAPIURL+"/v1/alimtalk/send", bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("create kakao request: %w", err)
+		return false, fmt.Errorf("create kakao request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Api-Key", cfg.KakaoAPIKey)
@@ -385,25 +535,30 @@ func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink str
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("kakao API call: %s", scrub(err.Error()))
+		// Transport error: retry only fast failures (connection-refused etc.),
+		// never timeouts (§출력 13 — timeout already spent the budget).
+		return !isTimeoutErr(err), fmt.Errorf("kakao API call: %s", scrub(err.Error()))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("kakao API error: status %d, body: %s", resp.StatusCode, string(body))
+		// 5xx is a fast transient server error → retryable; 4xx is permanent.
+		return resp.StatusCode >= 500, fmt.Errorf("kakao API error: status %d, body: %s", resp.StatusCode, string(body))
 	}
 
 	logf("[kakao] Successfully sent to %s (%s)", contact.Name, maskPhone(contact.Phone))
-	return nil
+	return false, nil
 }
 
 // --- NHN Cloud SMS Sending ---
 
-func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
+// sendSMSOnce performs a single SMS send attempt and classifies the failure for
+// the retry driver exactly like sendKakaoTalkOnce (§출력 13).
+func sendSMSOnce(cfg Config, contact Contact, alert AlertPayload, cctvLink string) (bool, error) {
 	if cfg.NHNAppKey == "" || cfg.NHNSecretKey == "" {
 		logf("[sms] NHN Cloud SMS not configured, skipping SMS for %s (%s)", contact.Name, maskPhone(contact.Phone))
-		return fmt.Errorf("NHN Cloud SMS not configured")
+		return false, fmt.Errorf("NHN Cloud SMS not configured") // permanent → no retry
 	}
 
 	prefix := "[위기알림]"
@@ -426,13 +581,13 @@ func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) e
 
 	payload, err := json.Marshal(smsReq)
 	if err != nil {
-		return fmt.Errorf("marshal SMS request: %w", err)
+		return false, fmt.Errorf("marshal SMS request: %w", err)
 	}
 
 	url := fmt.Sprintf("https://api-sms.cloud.toast.com/sms/v3.0/appKeys/%s/sender/sms", cfg.NHNAppKey)
 	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("create SMS request: %w", err)
+		return false, fmt.Errorf("create SMS request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	req.Header.Set("X-Secret-Key", cfg.NHNSecretKey)
@@ -442,18 +597,18 @@ func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) e
 		// The request URL embeds NHN_SMS_APP_KEY; a transport error (*url.Error)
 		// carries the full URL, so scrub it here so the credential cannot leak
 		// through any downstream consumer of this error (logs, system-alarm
-		// payload, dispatch result).
-		return fmt.Errorf("SMS API call: %s", scrub(err.Error()))
+		// payload, dispatch result). Retry fast failures, not timeouts (§출력 13).
+		return !isTimeoutErr(err), fmt.Errorf("SMS API call: %s", scrub(err.Error()))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("SMS API error: status %d, body: %s", resp.StatusCode, string(respBody))
+		return resp.StatusCode >= 500, fmt.Errorf("SMS API error: status %d, body: %s", resp.StatusCode, string(respBody))
 	}
 
 	logf("[sms] Successfully sent to %s (%s)", contact.Name, maskPhone(contact.Phone))
-	return nil
+	return false, nil
 }
 
 // --- Crisis Email ---
@@ -548,7 +703,99 @@ func sendSystemAlarm(cfg Config, contact Contact, alert AlertPayload, kakaoErr, 
 	logf("[alarm] System alarm sent for contact %s (%s) — both KakaoTalk and SMS failed", contact.Name, maskPhone(contact.Phone))
 }
 
+// sendTargetUnavailableAlarm emits a `target_unavailable` system alarm when a valid
+// crisis event was accepted but no delivery target could be established — i.e. the
+// contact list is empty or the contact fetch failed (§출력 11 / assertions M, J).
+// This promotes the "nobody knows about this crisis" state into an observable alarm
+// instead of letting the event vanish in a single log line. The attempt result
+// (2xx / non-2xx / call failure) is always logged; at least one attempt is made.
+func sendTargetUnavailableAlarm(cfg Config, alert AlertPayload, reason string) {
+	alarm := AlarmPayload{
+		Type:    "target_unavailable",
+		Message: fmt.Sprintf("No delivery target for crisis alert (site=%s device=%s): %s", alert.SiteID, alert.DeviceID, reason),
+		Details: map[string]interface{}{
+			"siteId":    alert.SiteID,
+			"deviceId":  alert.DeviceID,
+			"type":      alert.Type,
+			"reason":    scrub(reason),
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+
+	payload, err := json.Marshal(alarm)
+	if err != nil {
+		logf("[alarm] target_unavailable: failed to marshal payload: %v", err)
+		return
+	}
+
+	resp, err := httpClient.Post(cfg.WebBackendURL+"/internal/alarms", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		logf("[alarm] target_unavailable system alarm failed (site=%s device=%s): %v", alert.SiteID, alert.DeviceID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		logf("[alarm] target_unavailable system alarm failed: status %d, body: %s", resp.StatusCode, string(respBody))
+		return
+	}
+
+	logf("[alarm] target_unavailable system alarm sent (site=%s device=%s): %s", alert.SiteID, alert.DeviceID, reason)
+}
+
 // --- Recording Archive (Two-Phase) ---
+
+// cameraInfo is the notifier's view of a web-backend camera record. Beyond
+// {streamKey,enabled} it decodes the per-camera `siteId` so protection can be
+// scoped to the event's site (§출력 6 / assertion I). The siteId field contract is
+// owned by interface-web-api; absent/empty siteId simply never matches a real event
+// site and is left unprotected (safe default — no cross-site over-protection).
+type cameraInfo struct {
+	StreamKey string `json:"streamKey"`
+	Enabled   bool   `json:"enabled"`
+	SiteID    string `json:"siteId"`
+}
+
+// filterProtectedStreamKeys returns the streamKeys eligible for protection for a
+// given event site (§출력 6 / assertion I). It is site-aware ONLY when the camera
+// list actually carries site information:
+//
+//   - If at least one returned camera exposes a non-empty siteId, the list is
+//     treated as site-tagged and protection is scoped to the event's site: enabled,
+//     non-empty key, and siteId == event site. Other sites' cameras are excluded so
+//     a site-A incident never protects site-B segments (multi-site contamination
+//     guard). This is the target behavior once the camera contract exposes siteId.
+//
+//   - If NO camera exposes a siteId (the current single-deployment camera contract —
+//     interface-web-api §계약13 returns no per-camera siteId, and web-backend has no
+//     camera↔site association), site-scoping is undecidable, so we FALL BACK to
+//     protecting all enabled cameras (a safe superset = the prior behavior). This
+//     prevents silently protecting ZERO cameras and losing archive protection
+//     entirely — a non-regression guarantee for the safety feature.
+func filterProtectedStreamKeys(cameras []cameraInfo, siteID string) []string {
+	siteTagged := false
+	for _, c := range cameras {
+		if c.SiteID != "" {
+			siteTagged = true
+			break
+		}
+	}
+
+	var streamKeys []string
+	for _, c := range cameras {
+		if !c.Enabled || c.StreamKey == "" {
+			continue
+		}
+		// Site-scope only when the list is site-tagged; otherwise fall back to all
+		// enabled cameras so protection is never silently lost.
+		if siteTagged && c.SiteID != siteID {
+			continue
+		}
+		streamKeys = append(streamKeys, c.StreamKey)
+	}
+	return streamKeys
+}
 
 // requestArchiveProtect sends a protect request to the recording service (Phase 1).
 // Protects segments from (incident_time - 1h) for all cameras. Finalization happens on incident resolution.
@@ -576,24 +823,18 @@ func requestArchiveProtect(cfg Config, alert AlertPayload) {
 	}
 	defer resp.Body.Close()
 
-	var cameras []struct {
-		StreamKey string `json:"streamKey"`
-		Enabled   bool   `json:"enabled"`
-	}
+	var cameras []cameraInfo
 	if err := json.NewDecoder(resp.Body).Decode(&cameras); err != nil {
 		logf("[archive] Failed to decode cameras: %v", err)
 		return
 	}
 
-	var streamKeys []string
-	for _, c := range cameras {
-		if c.Enabled && c.StreamKey != "" {
-			streamKeys = append(streamKeys, c.StreamKey)
-		}
-	}
+	// Scope protection to the event's site only (§출력 6 / assertion I): other
+	// sites' segments must never be dragged into this incident's protection.
+	streamKeys := filterProtectedStreamKeys(cameras, alert.SiteID)
 
 	if len(streamKeys) == 0 {
-		logf("[archive] No enabled cameras, skipping protect")
+		logf("[archive] No enabled cameras for site %s, skipping protect", alert.SiteID)
 		return
 	}
 
@@ -612,19 +853,51 @@ func requestArchiveProtect(cfg Config, alert AlertPayload) {
 		return
 	}
 
-	protectResp, err := httpClient.Post(cfg.RecordingURL+"/api/archives/protect", "application/json", bytes.NewReader(payload))
-	if err != nil {
-		logf("[archive] Failed to send protect request: %v", err)
-		return
-	}
-	defer protectResp.Body.Close()
+	// Emit the protect-request record SYNCHRONOUSLY here — the caller invokes
+	// requestArchiveProtect before it launches channel dispatch, so this log's
+	// timestamp deterministically precedes the first channel-attempt completion AND
+	// the dispatch-complete summary (§출력 6 / assertion P). Ordering is guaranteed by
+	// structure, not by a goroutine scheduling race, so it holds even when channels
+	// are unconfigured and dispatch finishes almost instantly.
+	logf("[archive] Protect request accepted for incident %s (%d cameras)", incidentID, len(streamKeys))
 
-	if protectResp.StatusCode >= 200 && protectResp.StatusCode < 300 {
-		logf("[archive] Protect request accepted for incident %s (%d cameras)", incidentID, len(streamKeys))
-	} else {
-		body, _ := io.ReadAll(protectResp.Body)
-		logf("[archive] Protect request failed: status %d, body: %s", protectResp.StatusCode, string(body))
+	// Deliver the actual protect request to recording CONCURRENTLY (best-effort):
+	// this is fire-and-forget and is never joined by the caller, so it cannot gate or
+	// delay dispatch, and recording being down only produces a log line — the alert
+	// outcome is unaffected. The request carries a BOUNDED timeout (context) so a
+	// hung/blackholed recording endpoint always returns and cannot accumulate
+	// goroutines; either the delivered happy-path OR the FAILED sad-path is logged so
+	// the two-phase log is never left silent after the synchronous "accepted".
+	timeout := cfg.ArchiveProtectTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
 	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, "POST", cfg.RecordingURL+"/api/archives/protect", bytes.NewReader(payload))
+		if err != nil {
+			logf("[archive] Protect request FAILED (incident %s): %v", incidentID, err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		protectResp, err := httpClient.Do(req)
+		if err != nil {
+			// Transport error OR context timeout (bounded above) — always logged.
+			logf("[archive] Protect request FAILED (incident %s): %v", incidentID, err)
+			return
+		}
+		defer protectResp.Body.Close()
+
+		if protectResp.StatusCode >= 200 && protectResp.StatusCode < 300 {
+			logf("[archive] Protect request delivered for incident %s (%d cameras)", incidentID, len(streamKeys))
+		} else {
+			body, _ := io.ReadAll(protectResp.Body)
+			logf("[archive] Protect request FAILED (incident %s): status %d, body: %s", incidentID, protectResp.StatusCode, string(body))
+		}
+	}()
 }
 
 // --- Notification Dispatch ---
@@ -673,12 +946,19 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 	// 1. Fetch contacts from web-backend
 	contacts, err := fetchContacts(cfg)
 	if err != nil {
-		logf("[notify] Failed to fetch contacts: %v", err)
+		// §출력 11 / M: a fetch failure must not vanish in one log line — promote it
+		// to a target_unavailable system alarm (≥1 attempt, result logged). No
+		// external channel send happens on this path.
+		logf("[notify] Failed to fetch contacts: %v — emitting target_unavailable system alarm", err)
+		sendTargetUnavailableAlarm(cfg, alert, "contact fetch failed: "+scrub(err.Error()))
 		return 0, nil
 	}
 
 	if len(contacts) == 0 {
-		logf("[notify] No contacts configured, skipping notification")
+		// §출력 11 / J,M: zero contacts → 200 accepted, ZERO external-channel sends,
+		// but at least one target_unavailable system-alarm attempt is logged.
+		logf("[notify] No contacts configured — emitting target_unavailable system alarm (no external channel send)")
+		sendTargetUnavailableAlarm(cfg, alert, "no emergency contacts configured")
 		return 0, nil
 	}
 
@@ -747,7 +1027,8 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 				kakaoErr = fmt.Errorf("KakaoTalk disabled (KAKAO_ENABLED=false)")
 				logf("[notify] KakaoTalk skipped for %s (%s) — channel disabled, proceeding to SMS/fallback", c.Name, maskPhone(c.Phone))
 			} else {
-				kakaoErr = sendKakaoTalk(cfg, c, alert, cctvLink)
+				kakaoErr = sendChannelWithRetry("kakao", c.Name, c.Phone, cfg.ChannelRetryMax, cfg.ChannelRetryBackoff,
+					func() (bool, error) { return sendKakaoTalkOnce(cfg, c, alert, cctvLink) })
 				if kakaoErr == nil {
 					result.Channel = "kakaotalk"
 					result.Success = true
@@ -766,7 +1047,8 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 				smsErr = fmt.Errorf("SMS disabled (SMS_ENABLED=false)")
 				logf("[notify] SMS skipped for %s (%s) — channel disabled, proceeding to system alarm", c.Name, maskPhone(c.Phone))
 			} else {
-				smsErr = sendSMS(cfg, c, alert, cctvLink)
+				smsErr = sendChannelWithRetry("sms", c.Name, c.Phone, cfg.ChannelRetryMax, cfg.ChannelRetryBackoff,
+					func() (bool, error) { return sendSMSOnce(cfg, c, alert, cctvLink) })
 				if smsErr == nil {
 					result.Channel = "sms"
 					result.Success = true
@@ -804,7 +1086,7 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 
 // --- HTTP Handlers ---
 
-func handleNotify(cfg Config) http.HandlerFunc {
+func handleNotify(cfg Config, dedup *dedupCache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var alert AlertPayload
 		if err := json.NewDecoder(r.Body).Decode(&alert); err != nil {
@@ -844,6 +1126,23 @@ func handleNotify(cfg Config) http.HandlerFunc {
 		logf("[notify] Received alert: site=%s device=%s type=%s severity=%s",
 			alert.SiteID, alert.DeviceID, alert.Type, alert.Severity)
 
+		// §출력 12 / assertion N: dedup. test:true events are excluded entirely (never
+		// judged, never recorded), so a test injection cannot poison the cache and
+		// swallow the real crisis that follows. A duplicate inside the window is still
+		// accepted (200) but its whole dispatch — contact sends, system alarm AND the
+		// §출력 6 archive-protect — is suppressed; only the first event proceeds.
+		if !alert.Test && dedup.checkAndRecord(dedupKey(alert), cfg.DedupWindow, time.Now()) {
+			logf("[dedup] Suppressed duplicate crisis event (site=%s device=%s type=%s) within %s window — no dispatch, no protect",
+				alert.SiteID, alert.DeviceID, alert.Type, cfg.DedupWindow)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":     "accepted",
+				"suppressed": true,
+			})
+			return
+		}
+
 		// Dispatch notifications asynchronously. Track the goroutine in
 		// inflightDispatch so graceful shutdown (#40) can drain crisis-alert
 		// dispatches already in progress instead of losing them on SIGTERM.
@@ -851,6 +1150,15 @@ func handleNotify(cfg Config) http.HandlerFunc {
 		go func() {
 			defer inflightDispatch.Done()
 			defer recoverGoroutine("notify handler dispatch")
+
+			// §출력 6 / assertion P: trigger archive protection FIRST. requestArchiveProtect
+			// prepares the request and emits the protect-request log SYNCHRONOUSLY here,
+			// then delivers the actual HTTP to recording concurrently in the background.
+			// Because the protect log is emitted before channel dispatch even begins, its
+			// timestamp deterministically precedes the first channel-attempt completion and
+			// the dispatch-complete summary — ordering by structure, not by a goroutine race.
+			requestArchiveProtect(cfg, alert)
+
 			contactCount, results := dispatchNotifications(cfg, alert)
 			successCount := 0
 			channels := map[string]int{}
@@ -862,17 +1170,15 @@ func handleNotify(cfg Config) http.HandlerFunc {
 			}
 			logf("[notify] Dispatch complete: %d/%d contacts notified (kakao:%d sms:%d failed:%d)",
 				successCount, contactCount, channels["kakaotalk"], channels["sms"], contactCount-successCount)
-
-			// Request segment protection for this incident (Phase 1 of two-phase archiving)
-			requestArchiveProtect(cfg, alert)
 		}()
 
-		// Return immediately (accepted, processing async)
+		// Return immediately (accepted, processing async). No contactCount here: the
+		// response is sent before contacts are fetched, so any value would be
+		// structurally 0 and misleading — the field is dropped rather than lie.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":       "accepted",
-			"contactCount": 0, // async, count not yet known
+			"status": "accepted",
 		})
 	}
 }
@@ -1137,6 +1443,7 @@ func handleSendEmail(cfg Config) http.HandlerFunc {
 func main() {
 	cfg := loadConfig()
 	initSecretScrubber(cfg)
+	dedup := newDedupCache()
 
 	mux := http.NewServeMux()
 
@@ -1146,7 +1453,7 @@ func main() {
 		w.Write([]byte(`{"status":"ok","service":"notifier"}`))
 	})
 
-	mux.HandleFunc("POST /api/notify", handleNotify(cfg))
+	mux.HandleFunc("POST /api/notify", handleNotify(cfg, dedup))
 	mux.HandleFunc("POST /api/send-email", handleSendEmail(cfg))
 
 	srv := newHTTPServer(maxBytesMiddleware(mux))
@@ -1170,8 +1477,8 @@ func main() {
 		}
 	}()
 
-	logf("notifier listening on :8080 (kakao configured: %v, sms configured: %v, smtp configured: %v, frontend: %s)",
-		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "", cfg.SMTPHost != "", cfg.FrontendURL)
+	logf("notifier listening on :8080 (kakao configured: %v, sms configured: %v, smtp configured: %v, frontend: %s, dedup: %s, retryMax: %d)",
+		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "", cfg.SMTPHost != "", cfg.FrontendURL, cfg.DedupWindow, cfg.ChannelRetryMax)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}

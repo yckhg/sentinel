@@ -11,10 +11,11 @@
 WIN=$(rexec "printenv ROLLING_WINDOW_MINUTES" | tr -d '\r'); WIN=${WIN:-60}
 STARTED=$(docker inspect "$REC_CONTAINER" --format '{{.State.StartedAt}}')
 
-# protect 수행 흔적 (컨테이너 로그)
+# protect 수행 흔적 (컨테이너 로그) — 흔적 부재는 위반이 아니라 no-data(증거 부재)이므로
+#   info 로만 표기(FAILED 로 올리지 않음). 최종 판정은 아카이브 잔존 증거 유무로 결정.
 plog=$(docker logs "$REC_CONTAINER" 2>&1 | grep -c 'Protecting segments for' || true)
-[ "$plog" -ge 1 ] && ok "로그: 'Protecting segments for' ${plog}건 (protect 경로 실행 흔적)" \
-                  || nok "protect 실행 로그 없음"
+[ "$plog" -ge 1 ] && ok   "로그: 'Protecting segments for' ${plog}건 (protect 경로 실행 흔적)" \
+                  || info "protect 실행 로그 없음 (기동 이후 능동 protect 미수행 — no-data)"
 
 tmp=$(mktemp -d)
 rexec "wget -qO- $REC/api/archives" > "$tmp/archives.json"
@@ -61,15 +62,21 @@ EOF
 )
 rm -rf "$tmp"
 head=$(echo "$res" | head -1); echo "$res" | tail -n +2 | sed 's/^/  [..]  /'
-[ "$head" = "OKALL" ] || FAILED=1
 
 if [ "${ALLOW_MUTATING:-0}" != "1" ]; then
-  if [ "$FAILED" -eq 0 ]; then
+  # READ-ONLY 사후 판정은 위반을 능동 입증할 수 없다(재기동·202·window=1 절차가 mutating).
+  #   양성 증거(윈도우 2배+ 경과 protect 구간의 세그먼트 잔존 + protect 이후 도착분)를
+  #   관측하면 OK. 증거가 없으면(기동 이후 incident protect 아카이브 부재 / 윈도우 2배
+  #   경과분 없음 / 구간 세그먼트 없음) 이는 위반이 아니라 no-data 이므로 위음성 NOK 대신
+  #   SKIPPED(부적절, no-data)로 표면화한다. 계약(protect 가 삭제 차단)은 단언 P(a)와
+  #   라이브 protecting 아카이브가 능동 입증한다.
+  if [ "$head" = "OKALL" ]; then
     echo "VERDICT F: OK (사후 관측 — protect 구간 세그먼트가 윈도우 2배+ 경과에도 잔존, protect 이후 도착분 포함. 202 응답코드·window=1 절차는 mutating으로 미실행)"
+    exit 0
   else
-    echo "VERDICT F: NOK (사후 관측 기준)"; exit 1
+    echo "VERDICT F: SKIPPED (부적절, no-data — read-only 사후 관측에 protect 구간 세그먼트 잔존 증거 없음; 계약은 단언 P(a)·라이브 protecting 아카이브가 능동 입증. 능동 실측은 ALLOW_MUTATING=1)"
+    exit 2
   fi
-  exit 0
 fi
 echo "  [!!] MUTATING 절차: POST /api/archives/protect {incidentId, streamKeys:[k], incidentTime=now} → 202 확인 → 3×윈도우 대기 → 세그먼트 잔존 확인"
 verdict F

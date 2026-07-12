@@ -15,9 +15,13 @@ info "container StartedAt=$STARTED"
 tmp=$(mktemp -d)
 rexec "wget -qO- $REC/api/archives" > "$tmp/api.json"
 rexec "cat $ARCHIVES_DIR/metadata.json" > "$tmp/meta.json"
+# (c) 실검증용 세그먼트 목록: /recordings/{key}/*.ts 를 수집(F 게이트와 동형).
+for d in $(rexec "ls $RECORDINGS_DIR"); do
+  rexec "ls $RECORDINGS_DIR/$d 2>/dev/null" | sed "s|^|$d/|" >> "$tmp/segs.txt" || true
+done
 
 res=$(python3 - "$tmp" "$STARTED" <<'EOF'
-import json, sys, datetime as dt
+import json, sys, datetime as dt, os
 tmp, started = sys.argv[1], sys.argv[2]
 start = dt.datetime.fromisoformat(started.split(".")[0])
 iso = lambda s: dt.datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
@@ -38,18 +42,59 @@ if pre:
 else:
     okall = False
     lines.append("NOK (b) 기동 이전 생성 아카이브 없음 — 로드 입증 불가")
+
+# (c) protecting 복원: 현존 protecting 항목이 있으면 그 병합구간 [from,to] 세그먼트가
+#   디스크에 실제로 잔존하는지 실측(단언 O — protecting 이면 롤링 삭제에서 제외). 재시작
+#   유발은 mutating 이라 이 read-only 게이트는 "현재 protecting 아카이브의 구간 세그먼트가
+#   보호되어 남아 있는지"를 관측한다. protecting 부재이거나 구간 세그먼트를 디스크에서
+#   관측 불가하면(실검증 불가) 위반이 아니라 부적절이므로 (c)를 SKIPPED 로 명시.
+segs = {}
+segf = f"{tmp}/segs.txt"
+if os.path.exists(segf):
+    for line in open(segf):
+        line = line.strip()
+        if not line.endswith(".ts") or "/" not in line: continue
+        key, name = line.split("/", 1)
+        try: segs.setdefault(key, []).append(dt.datetime.strptime(name[:-3], "%Y%m%d_%H%M%S"))
+        except ValueError: pass
+
 prot = [x for x in api if x["status"] == "protecting"]
-lines.append(f".. (c) 현존 protecting {len(prot)}개 — " + ("보호 복원 검증 가능" if prot else "부재로 보호 복원 서브단언은 미검증"))
-print("OKALL" if okall else "NOKALL"); print("\n".join(lines))
+cverdict = "SKIP"
+if not prot:
+    lines.append(".. (c) SKIPPED(부적절, no-data): 현존 protecting 아카이브 없음 — 보호 복원 서브단언 판정 부적절")
+else:
+    verified, notobs = [], []
+    for a in prot:
+        try: f, t = iso(a["from"]), iso(a["to"])
+        except Exception: notobs.append(a["id"]); continue
+        k = a.get("streamKey", "")
+        inrange = [s for s in segs.get(k, []) if f <= s <= t]
+        (verified if inrange else notobs).append(f"{a['id']}({len(inrange)})" if inrange else a["id"])
+    if verified:
+        cverdict = "OK"
+        lines.append(f"ok (c) protecting {len(prot)}개 중 구간 세그먼트 실측 잔존 확인: {', '.join(verified)} "
+                     f"— 보호 유지(롤링 삭제 제외) 실측" + (f"; 구간 세그먼트 디스크 미관측(판정 불가): {', '.join(notobs)}" if notobs else ""))
+    else:
+        lines.append(f".. (c) SKIPPED(부적절): 현존 protecting {len(prot)}개의 구간 세그먼트를 디스크에서 관측 불가 "
+                     f"({', '.join(notobs)}) — read-only 실검증 불가")
+print("OKALL" if okall else "NOKALL"); print(f"CVERDICT:{cverdict}"); print("\n".join(lines))
 EOF
 )
 rm -rf "$tmp"
-head=$(echo "$res" | head -1); echo "$res" | tail -n +2 | sed 's/^/  [..]  /'
+head=$(echo "$res" | head -1)
+cvw=$(echo "$res" | sed -n '2p' | sed 's/^CVERDICT://')
+echo "$res" | tail -n +3 | sed 's/^/  [..]  /'
 [ "$head" = "OKALL" ] || FAILED=1
 
 if [ "${ALLOW_MUTATING:-0}" != "1" ]; then
+  # (a)/(b)가 OK/NOK 를 결정(SSOT 일치 + 로드 입증). (c) protecting 복원은 실측 OK 이거나,
+  #   실검증 불가 시 SKIPPED(부적절)로 최종 메시지에 정직하게 반영(모순 메시지 제거).
   if [ "$FAILED" -eq 0 ]; then
-    echo "VERDICT O: OK (사후 관측 — 직전 재시작에서 metadata 로드 입증. protecting 보호 복원 서브단언은 protecting 부재로 미검증, 재시작 유발은 mutating으로 미실행)"
+    if [ "$cvw" = "OK" ]; then
+      echo "VERDICT O: OK (사후 관측 — 직전 재시작에서 metadata 로드 입증 + protecting 구간 세그먼트 잔존 실측. 재시작 유발은 mutating으로 미실행)"
+    else
+      echo "VERDICT O: OK (사후 관측 — 직전 재시작에서 metadata 로드 입증. (c) protecting 보호 복원 서브단언은 SKIPPED(부적절): 실검증 불가. 재시작 유발은 mutating으로 미실행)"
+    fi
   else
     echo "VERDICT O: NOK (사후 관측 기준)"; exit 1
   fi

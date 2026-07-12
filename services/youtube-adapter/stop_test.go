@@ -21,7 +21,7 @@ func TestStreamStateStopIdempotent(t *testing.T) {
 // same stream would close it again. Must not panic.
 func TestStopAllThenReloadNoPanic(t *testing.T) {
 	src := YouTubeSource{ID: "s1", YouTubeURL: "https://youtu.be/abc123", StreamKey: "k1"}
-	m := NewStreamManager([]YouTubeSource{src}, "rtmp://x/live")
+	m := NewStreamManager([]YouTubeSource{src}, "rtmp://x/live", defaultEncodeParams())
 	// Insert a stream state directly (no manageStream goroutine / ffmpeg needed).
 	m.streams[src.ID] = &streamState{status: "running", stopCh: make(chan struct{})}
 

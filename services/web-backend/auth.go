@@ -308,9 +308,66 @@ func parseJWT(tokenString string) (*Claims, error) {
 	return claims, nil
 }
 
+// --- Credential-change boundary (issue #83, assertion Q2) ---
+
+// dbTimeLayouts are the formats a persisted timestamp may arrive in. SQLite's
+// strftime('%Y-%m-%d %H:%M:%f','now') yields "YYYY-MM-DD HH:MM:SS.sss"; datetime()
+// yields second precision; and the modernc.org/sqlite driver auto-parses DATETIME
+// columns and hands them back in RFC3339 ("...T...Z"). All are UTC. We try each so
+// the credential boundary compares correctly regardless of read path.
+var dbTimeLayouts = []string{
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05",
+}
+
+// parseDBTime parses a SQLite UTC datetime string into a time.Time (UTC).
+func parseDBTime(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range dbTimeLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// iatBeforeBoundary reports whether a token issued at iat predates the credential
+// boundary. iat has second granularity (JWT numeric date), so it is the floor of
+// the real login instant; the boundary is stored with sub-second precision and is
+// strictly after any earlier login, making float comparison robust even when a
+// login and a subsequent password change fall inside the same wall-clock second.
+func iatBeforeBoundary(iat, boundary time.Time) bool {
+	if boundary.IsZero() {
+		return false
+	}
+	return float64(iat.Unix()) < float64(boundary.UnixNano())/1e9
+}
+
+// tokenInvalidatedByPasswordChange reports whether the token (identified by its
+// owning userID and iat) was issued before that user's password_changed_at
+// boundary. A NULL/absent boundary (user never changed password) never rejects,
+// so unchanged-password tokens survive to expiry (assertion Q).
+func tokenInvalidatedByPasswordChange(ctx context.Context, db *sql.DB, userID int64, iat time.Time) bool {
+	var boundaryStr sql.NullString
+	err := db.QueryRowContext(ctx, "SELECT password_changed_at FROM users WHERE id = ?", userID).Scan(&boundaryStr)
+	if err != nil || !boundaryStr.Valid {
+		return false
+	}
+	boundary, ok := parseDBTime(boundaryStr.String)
+	if !ok {
+		return false
+	}
+	return iatBeforeBoundary(iat, boundary)
+}
+
 // --- Auth middleware ---
 
-func authMiddleware(next http.Handler) http.Handler {
+func authMiddleware(db *sql.DB, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
@@ -363,6 +420,16 @@ func authMiddleware(next http.Handler) http.Handler {
 		// cannot ride through user-level routes with role="".
 		if claims.UserID == 0 || (claims.Role != "admin" && claims.Role != "user") {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired token"})
+			return
+		}
+
+		// Credential-change boundary: reject any token issued before the owner's
+		// password_changed_at (assertion Q2, issue #83).
+		bctx, bcancel := dbCtx(r.Context())
+		invalidated := tokenInvalidatedByPasswordChange(bctx, db, claims.UserID, claims.IssuedAt.Time)
+		bcancel()
+		if invalidated {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "token invalidated by password change"})
 			return
 		}
 
@@ -462,7 +529,7 @@ type approvalResponse struct {
 
 // requireAdmin extracts JWT from Authorization header and verifies admin role.
 // Returns the AuthUser if valid admin, or writes error response and returns nil.
-func requireAdmin(w http.ResponseWriter, r *http.Request) *AuthUser {
+func requireAdmin(db *sql.DB, w http.ResponseWriter, r *http.Request) *AuthUser {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authorization header required"})
@@ -481,6 +548,16 @@ func requireAdmin(w http.ResponseWriter, r *http.Request) *AuthUser {
 		return nil
 	}
 
+	// Credential-change boundary also applies to the direct-verification paths
+	// (/auth/pending|approve|reject|users) — a pre-change admin token is 401.
+	bctx, bcancel := dbCtx(r.Context())
+	invalidated := tokenInvalidatedByPasswordChange(bctx, db, claims.UserID, claims.IssuedAt.Time)
+	bcancel()
+	if invalidated {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "token invalidated by password change"})
+		return nil
+	}
+
 	if claims.Role != "admin" {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
 		return nil
@@ -491,7 +568,7 @@ func requireAdmin(w http.ResponseWriter, r *http.Request) *AuthUser {
 
 func handlePendingUsers(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAdmin(w, r) == nil {
+		if requireAdmin(db, w, r) == nil {
 			return
 		}
 
@@ -524,7 +601,7 @@ func handlePendingUsers(db *sql.DB) http.HandlerFunc {
 
 func handleApproveUser(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		admin := requireAdmin(w, r)
+		admin := requireAdmin(db, w, r)
 		if admin == nil {
 			return
 		}
@@ -567,7 +644,7 @@ func handleApproveUser(db *sql.DB) http.HandlerFunc {
 
 func handleRejectUser(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		admin := requireAdmin(w, r)
+		admin := requireAdmin(db, w, r)
 		if admin == nil {
 			return
 		}
@@ -610,7 +687,7 @@ func handleRejectUser(db *sql.DB) http.HandlerFunc {
 
 func handleActiveUsers(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAdmin(w, r) == nil {
+		if requireAdmin(db, w, r) == nil {
 			return
 		}
 
@@ -706,8 +783,11 @@ func handleChangePassword(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// Advance the credential-change boundary to now (millisecond precision) so
+		// every token issued before this instant — including the one used for this
+		// request — is rejected on its next authenticated call (assertion Q2, #83).
 		_, err = db.ExecContext(ctx,
-			"UPDATE users SET password_hash = ? WHERE id = ?",
+			"UPDATE users SET password_hash = ?, password_changed_at = strftime('%Y-%m-%d %H:%M:%f','now') WHERE id = ?",
 			string(newHash), user.UserID,
 		)
 		if err != nil {

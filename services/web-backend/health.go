@@ -197,6 +197,7 @@ func (m *HealthMonitor) pollServices() {
 				e.Since = now
 				e.Detail = ""
 				m.recordEvent(KindService, t.Name, StatusHealthy, "recovered")
+				broadcastHealthTransition(KindService, t.Name, StatusHealthy)
 			} else {
 				e.Detail = ""
 			}
@@ -211,6 +212,7 @@ func (m *HealthMonitor) pollServices() {
 				e.Since = now
 				e.Detail = detail
 				m.recordEvent(KindService, t.Name, StatusUnhealthy, detail)
+				broadcastHealthTransition(KindService, t.Name, StatusUnhealthy)
 			} else if e.Status == StatusUnhealthy {
 				e.Detail = detail
 			}
@@ -315,6 +317,7 @@ func (m *HealthMonitor) evaluateSensors() {
 			// only log unhealthy as an event so timelines stay meaningful.
 			if newStatus == StatusUnhealthy {
 				m.recordEvent(KindSensor, entityID, StatusUnhealthy, detail)
+				broadcastHealthTransition(KindSensor, entityID, StatusUnhealthy)
 			}
 		} else {
 			e.Name = displayName
@@ -324,6 +327,7 @@ func (m *HealthMonitor) evaluateSensors() {
 				e.Status = newStatus
 				e.Since = now
 				m.recordEvent(KindSensor, entityID, newStatus, detail)
+				broadcastHealthTransition(KindSensor, entityID, newStatus)
 			}
 		}
 		m.mu.Unlock()
@@ -340,6 +344,14 @@ func (m *HealthMonitor) evaluateSensors() {
 		}
 	}
 	m.mu.Unlock()
+}
+
+// broadcastHealthTransition surfaces a healthy↔unhealthy transition to connected
+// admin WS clients as a health-sourced system_alarm (assertions O2/O3, contract
+// 12/14). Best-effort and non-blocking: BroadcastSystemAlarm filters to admins
+// and drops for slow clients, so it never stalls the monitor loop.
+func broadcastHealthTransition(entityKind, entityID, status string) {
+	BroadcastSystemAlarm(healthAlarmPayload(entityKind, entityID, status))
 }
 
 // recordEvent inserts a transition row into health_events.
@@ -373,6 +385,44 @@ func (m *HealthMonitor) snapshot() []HealthEntry {
 		}
 		return out[i].Since.Before(out[j].Since)
 	})
+	return out
+}
+
+// maxReplaySnapshotFrames bounds the admin-reconnect unhealthy replay (O4). It is
+// kept well under the WS send buffer (64) so, together with the `connected` frame,
+// the whole burst fits without any non-blocking drop — even when the live
+// unhealthy set is huge/polluted. Combined with newest-transition-first ordering,
+// a just-made-unhealthy target is always inside the bound.
+const maxReplaySnapshotFrames = 50
+
+// unhealthySnapshotForReplay returns currently-unhealthy entities for the admin
+// reconnect replay (assertion O4), ordered by most-recent transition first and
+// capped at max. The entries map is keyed by "kind|id" so the result is inherently
+// deduped (one frame per entity). Newest-first ordering guarantees a target that
+// just went unhealthy is included even when the unhealthy set far exceeds the cap,
+// which also bounds the connect-time burst (fixes the admin-connect flood).
+func (m *HealthMonitor) unhealthySnapshotForReplay(max int) []HealthEntry {
+	m.mu.RLock()
+	out := make([]HealthEntry, 0, len(m.entries))
+	for _, e := range m.entries {
+		if e.Status != StatusUnhealthy {
+			continue
+		}
+		out = append(out, *e)
+	}
+	m.mu.RUnlock()
+
+	// Most-recent transition first (largest Since first). Tie-break on ID for a
+	// stable, deterministic order.
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Since.Equal(out[j].Since) {
+			return out[i].Since.After(out[j].Since)
+		}
+		return out[i].ID < out[j].ID
+	})
+	if max > 0 && len(out) > max {
+		out = out[:max]
+	}
 	return out
 }
 

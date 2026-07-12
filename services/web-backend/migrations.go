@@ -220,6 +220,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_alert_id ON incidents(alert_id) 
 		name:    "add_devices_alert_state",
 		sql:     `ALTER TABLE devices ADD COLUMN alert_state TEXT NOT NULL DEFAULT 'none';`,
 	},
+	{
+		version: 19,
+		name:    "add_users_password_changed_at",
+		// Credential-change boundary (issue #83 / assertion Q2). NULL means "no
+		// boundary" so pre-existing tokens stay valid (assertion Q). It is set to
+		// the change instant on POST /api/auth/change-password; auth then rejects
+		// any token whose iat precedes this value. DB-persisted so a stolen
+		// pre-change token does not resurrect after a container restart.
+		sql: `ALTER TABLE users ADD COLUMN password_changed_at DATETIME;`,
+	},
 }
 
 // migrationTimeout bounds each individual migration (and the bookkeeping steps)
