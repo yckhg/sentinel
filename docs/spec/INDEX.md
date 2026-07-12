@@ -24,7 +24,11 @@
 | [youtube-adapter.md](youtube-adapter.md) | `tests/spec/youtube-adapter/` | **OK J·J-2·C·B·F부분 · NOK 0 · SKIP G(reload mock 부재)·F완전** (2026-07-11 재검증, #72 인코딩 env, encode_test.go PASS) |
 | [recording.md](recording.md) | `tests/spec/recording/` | **OK P·P-2·O·F·G·M 외 · NOK 0 · SKIP D(⚠#1 삭제시 보호미해제=pre-existing 설계판단)** (2026-07-11 재검증, #75 기동복구, recovery_test.go 4/4 PASS) |
 | [web-backend.md](web-backend.md) | `tests/spec/web-backend/` | OK 3 · NOK 0 · SKIP 16 (admin fixture 부재; 보안 CRITICAL 2) |
+| [alarm-history-lifecycle.md](alarm-history-lifecycle.md) — 경보 이력 + 처리 상태머신(`{open,resolved}`·해제노트 선택·"경보" 표기; interface-web-api 계약 2 델타) | `tests/spec/alarm-history-lifecycle/` | (신규 — 미검증) |
+| [archive-download-ux.md](archive-download-ux.md) — 아카이브 보관→다운로드 UX(상태 수명주기·`completedAt`·다운로드 게이트=completed·진행 "준비됨" 표면화·`failed` 노출; interface-web-api 계약 8 + `completedAt` 델타) | `tests/spec/archive-download-ux/` | (신규 — 미검증) |
 | [web-frontend.md](web-frontend.md) | `tests/spec/web-frontend/` | **OK O/P/Q/R + 실로그인 회귀 = Playwright 19 pass · NOK 0 · SKIP ⚠#2 세션중401·⚠#3 라이브 incident_resolved(설계자)** (2026-07-11 #92/#104/R 재검증; 로그인 되튕김 CRITICAL 회귀 발견·flushSync fix) |
+| [notification-test-send.md](notification-test-send.md) — 채널별(이메일/SMS) 테스트 발송: admin 전용·채널 독립·요청시점 런타임 설정 판정·미설정=not_configured(무크래시)·설정=실제 발송경로 성패보고·KakaoTalk 범위 밖(interface-web-api 테스트발송 엔드포인트 + 채널 usability status 델타) | `tests/spec/notification-test-send/` | (신규 — 미검증) |
+| [system-status-aggregate.md](system-status-aggregate.md) — 시스템 상태 현재-상태 요약 창(집계: 정상=카운트/예외만 개별·장비 수 무관 경계 불변식·서비스 고정목록·장비 검색·이력 드릴다운·카메라 연결상태; interface-web-api 헬스 접면 델타) | `tests/spec/system-status-aggregate/` | (신규 — 미검증) |
 
 ## 공용 헬퍼
 
