@@ -164,7 +164,7 @@ describe("시스템 상태 패널 — /api/health/summary 집계 소비 (spec sy
     const user = userEvent.setup();
     const boxes = screen.getAllByRole("textbox");
     expect(boxes.length).toBeGreaterThan(0); // a search input exists (J)
-    await user.type(boxes[0], "s:OK-9{Enter}");
+    await user.type(boxes[0]!, "s:OK-9{Enter}");
 
     // A search button may also drive it — click one if present.
     const searchBtn = screen.queryByRole("button", { name: /검색|search|조회/i });
