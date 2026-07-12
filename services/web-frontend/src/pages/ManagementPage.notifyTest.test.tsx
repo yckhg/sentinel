@@ -113,9 +113,12 @@ describe("ManagementPage — 채널별 테스트 발송 UI (spec notification-te
     expect(emailBtn).not.toBeNull(); // RED: 이메일 테스트 발송 컨트롤 부재
     expect(smsBtn).not.toBeNull(); // RED: SMS 테스트 발송 컨트롤 부재
 
-    // KakaoTalk은 테스트 채널로 노출되지 않는다.
-    expect(screen.queryByRole("button", { name: /카카오|kakao/i })).toBeNull();
-    expect(screen.queryByText(/카카오톡|kakaotalk/i)).toBeNull();
+    // KakaoTalk은 테스트 채널로 노출되지 않는다 — 검사 범위는 테스트발송 섹션으로
+    // 한정한다(단언 G의 UI 의도는 "테스트 채널 집합 = {email, sms}"이지, 무관한
+    // 기능의 설명 텍스트에서 KakaoTalk 언급 자체를 금지하는 것이 아니다).
+    const section = within(screen.getByTestId("notify-test"));
+    expect(section.queryByRole("button", { name: /카카오|kakao/i })).toBeNull();
+    expect(section.queryByText(/카카오톡|kakaotalk/i)).toBeNull();
   });
 
   it("not_configured 채널은 '미설정' 안내와 함께 컨트롤을 비활성/주석한다 (§출력 13·단언 K)", async () => {
