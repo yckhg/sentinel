@@ -42,8 +42,8 @@ import (
 // -----------------------------------------------------------------------------
 
 var (
-	notifChannelsHandlerFn = redNotifStub
-	notifTestSendHandlerFn = redNotifStub
+	notifChannelsHandlerFn = handleNotificationChannels
+	notifTestSendHandlerFn = handleNotificationTest
 )
 
 func redNotifStub(_ *sql.DB) http.HandlerFunc {

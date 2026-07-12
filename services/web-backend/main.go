@@ -191,6 +191,10 @@ func main() {
 	apiMux.HandleFunc("GET /api/links", handleListTempLinks())
 	apiMux.HandleFunc("DELETE /api/links/{id}", handleRevokeTempLink())
 
+	// Notification channel test-send (admin only) — status read + single test send.
+	apiMux.HandleFunc("GET /api/notifications/channels", handleNotificationChannels(db))
+	apiMux.HandleFunc("POST /api/notifications/test", handleNotificationTest(db))
+
 	// Mount protected routes behind auth middleware
 	mux.Handle("/api/", authMiddleware(db, apiMux))
 
