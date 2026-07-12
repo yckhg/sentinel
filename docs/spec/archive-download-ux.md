@@ -65,14 +65,14 @@
 > **판정 전제(vacuity 가드)**: 아래 `all(.[]; …)` 류 단언(A1·A3·A4·A7)은 아카이브 목록이 0개이면 공허하게(vacuously) 통과한다. 따라서 각 단언은 **최소 1개의 해당 대상 상태 아카이브가 존재하는 fixture**를 전제하며(A1은 임의 1개, A3은 `completed` 1개, A4는 `failed` 1개), 판정 스크립트는 `length > 0` 또는 대상 상태 항목 존재를 먼저 가드한 뒤 평가한다. 대상 항목이 하나도 없으면 OK가 아니라 **판정 불가(전제 미충족)**로 처리한다.
 
 - **A1 (핵심)** — `GET /api/archives` 각 항목의 `status`는 6종 enum 중 하나다. enum 밖 값은 나타나지 않는다. (목록 non-empty 전제 — 위 vacuity 가드.)
-- **A2 (핵심)** — 방금 생성 요청한 아카이브는 응답 목록에서 미완료 상태(`completed`가 아님)로 관측된다.
+- **A2 (핵심)** — 방금 생성 요청한 아카이브는 응답 목록에서 **not completed**(정확히 `completed`가 아닌 상태) 상태로 관측된다. 판정 기준은 "`status != "completed"`"로 못박으며(line 48의 미완료 4종 정의와 달리 `failed`도 이 기준에 포함) — 이는 다운로드 게이트가 `failed`까지 409로 거절하는 것(A8/출력계약)과 일관된다. · **전제(mutating 게이트)**: 이 단언은 방금 생성을 위한 **mutating 게이트(아카이브 생성 POST 필수, `ALLOW_MUTATING`/`SPEC_TDD_ALLOW_MUTATING`)** 에 의존한다 — vacuity 가드도 SKIP 선언도 없으므로, 게이트가 없어 갓 생성한 대상 항목을 확보할 수 없으면 OK가 아니라 **판정 불가/SKIP**로 처리한다.
 - **A3 (핵심)** — `status == "completed"`인 항목은 non-null `completedAt`(RFC3339 파싱 가능, UTC)을 가진다. 미완료 항목은 `completedAt`이 null 또는 부재다. 값은 UTC 정본만 요구하며, 로컬 표시 변환은 소비자(단위 B) 책임이다.
   - **전제**: 이 단언은 `completedAt` 델타가 **recording SSOT+코드에 착지한 이후**에만 판정 가능하다(생산자=recording, 아래 "API 계약 델타" 참조). 델타 미착지 시 A3은 **SKIP**한다.
   - **레거시 처리**: A3은 델타 착지 **이후에 생성된 아카이브에 한정**한다(필드 도입 전 이미 `completed`가 된 레거시 아카이브는 판정 대상에서 제외 — mtime 백필하지 않는다).
-- **A4 (핵심)** — `status == "failed"`인 항목은 비어있지 않은 실패 사유 필드 `lastError`를 가진다(recording.md의 `lastError`, P-2에서 non-empty 보장). (`failed` 항목 존재 전제 — 위 vacuity 가드.)
+- **A4 (핵심)** — `status == "failed"`인 항목은 비어있지 않은 실패 사유 필드 `lastError`를 가진다. 이 단언은 **모든 `failed` 아카이브**(finalize-직접실패 경로 포함)를 순회하므로 근거 범위도 순회 범위와 일치해야 한다: **recording §핵심 로직 4(finalize 실패 시 `failed`+사유 기록) + P-2(재시작·세그먼트 소실 복구실패 경로에서 `lastError` non-empty) + 아래 델타의 "모든 `failed` 종단 전이 → non-empty `lastError`" 확장 단언**. (P-2만으로는 finalize-직접실패 경로가 근거에서 빠지므로 세 근거를 함께 인용한다.) (`failed` 항목 존재 전제 — 위 vacuity 가드.)
 - **A5 (핵심)** — 미완료 아카이브(`protecting`/`pending`/`finalizing`/`processing`)에 대한 `GET /api/archives/{id}/download`는 **2xx + 미디어 본문을 반환하지 않는다**(비-2xx, 예: 409로 거절). 즉 200 상태로 부분·손상 파일이 내려오지 않는다.
 - **A6 (핵심)** — `status == "completed"`인 아카이브에 대한 다운로드는 2xx, `Content-Type: video/mp4`, 비어있지 않은 본문을 반환한다.
-- **A7** — 동일 아카이브를 반복 조회할 때 한 번 `completed`가 된 항목은 이후 조회에서 미완료로 되돌아가지 않는다(종단 단조성).
+- **A7** — 동일 아카이브를 반복 조회할 때 한 번 `completed`가 된 항목은 이후 조회에서 미완료로 되돌아가지 않는다(종단 단조성). 단조성 판정은 상태 값의 불변만 관측하므로 **`completedAt` 델타를 요구하지 않는다** — 따라서 델타 착지 이전에 생성된 **레거시 `completed` 아카이브로도 판정 가능**하다(A3과 달리 SKIP 불요). 다만 `completed` 대상 항목을 확보하려면 아카이브를 실제 `completed`까지 구동한 **mutating fixture**(±스테이징 recorder)가 있어야 하며, 그런 항목이 하나도 없으면 판정 불가로 처리한다.
 - **A8** — `failed` 아카이브의 다운로드는 미디어를 반환하지 않는다(비-2xx, 409). 판정 근거는 recording.md 다운로드 계약(아래 델타로 `completed`만 서빙·그 외 비-completed 409·부재 404로 확장)이다.
 
 ---
@@ -129,11 +129,12 @@
 > **델타 라우팅 원칙**: `docs/spec/interface-web-api.md` §계약 8은 **인증 게이트 + 투명 프록시**(바디 변형·필터링 없음, §계약 8 핵심 로직 참조)라서 **새 응답 필드를 생산하지 못한다**. 따라서 아카이브 항목의 신규 필드(`completedAt` 등)는 **생산자인 recording 서비스(`docs/spec/recording.md`)의 델타**로 라우팅되며, §계약 8은 그 필드를 그대로 통과시킬 뿐이다.
 
 - **[recording.md로 라우팅] `completedAt` 필드**: 아카이브 항목 표현에 **`completedAt`**(RFC3339, UTC; `status == "completed"`일 때 non-null; 그 외 null/부재) 필드가 존재한다. 이 델타는 **`recording.md` §출력(아카이브 메타데이터 항목)·§핵심 로직(finalize/복구의 `completed` 전이)에 반영**되어야 한다 — 즉 아카이브가 `completed`로 전이할 때 `status`·`sizeBytes`와 **원자적으로 `completedAt`을 기록**(셋 중 하나만 참인 중간 상태가 소비자에게 관측되지 않음, 단위 A 핵심 로직과 정합)한다. 오케스트레이터는 이 델타를 **recording SSOT(recording.md) + recording 코드**에 착지시킨다. (A3은 이 델타 착지 이후에만 판정 가능 — 미착지 시 SKIP, 착지 이후 생성 아카이브에 한정.)
-- **[recording.md의 기존 필드로 통일] 실패 사유 필드**: 실패 사유 필드명은 recording의 실제 필드 **`lastError`**로 통일한다(신규 필드가 아니라 recording.md에 이미 존재, P-2에서 `status == "failed"`일 때 non-empty 보장). 본 스펙·§계약 8의 "error/reason" 등 잠정 명칭은 모두 `lastError`를 가리킨다.
+- **[recording.md의 기존 필드로 통일] 실패 사유 필드**: 실패 사유 필드명은 recording의 실제 필드 **`lastError`**로 통일한다(신규 필드가 아니라 recording.md에 이미 존재, P-2에서 `status == "failed"`일 때 non-empty 보장). 본 스펙·§계약 8의 "error/reason" 등 잠정 명칭은 모두 `lastError`를 가리킨다. **[오케스트레이터 머지몫] 근거범위 확장**: 현재 recording.md는 `lastError` non-empty를 **P-2(재시작+세그먼트 소실 복구실패 경로)** 에서만 단언하나, A4는 finalize-직접실패 경로를 포함한 **모든 `failed` 종단 전이**를 순회한다. 따라서 오케스트레이터는 recording.md에 **"모든 `failed` 종단 전이 → non-empty `lastError`" 단언을 추가**(P-2를 finalize-실패 경로까지 확장)하여 A4의 순회 범위와 근거 범위를 일치시킨다.
 - **[recording.md §HTTP API `GET /api/archives/{id}/download`로 라우팅] 다운로드 게이트 확장**: recording.md의 다운로드 계약을 **"`completed`만 `video/mp4`로 서빙 · 그 외 모든 비-`completed`(미완료 4종 **및** `failed`)는 비-2xx(**409**) · 아카이브 부재는 404"**로 확장·명시한다(현재 recording.md는 "미완료면 409, 없으면 404"로 `failed` 처리가 명시되지 않음 → `failed`도 409로 명문화). 이 확장이 단위 A의 A8이 참조하는 SSOT 근거다. §계약 8은 이 응답을 투명 프록시하며 통신 실패 시에만 502를 낸다.
 
 ## 검증 스킵 선언 (선택)
 
+- **A2·A7 (mutating fixture 의존 명시)** — A2(갓 생성 항목이 not-completed로 관측)·A7(종단 단조성)도 A3/A5/A6/A8과 동일하게 **mutating fixture**(A2=아카이브 생성 POST 구동, A7=아카이브를 `completed`까지 구동; ±스테이징 recorder)에 의존한다. · **A2**: vacuity 가드도 SKIP 선언도 없으므로 명기 — 생성 POST(mutating 게이트, `ALLOW_MUTATING`/`SPEC_TDD_ALLOW_MUTATING`) 없이는 갓 생성한 대상 항목을 확보할 수 없어 **판정 불가/SKIP**. · **A7**: 단조성은 `completedAt` 델타 불요라 **레거시 `completed` 아카이브로 판정 가능**(SKIP 불요)하나, `completed` 대상 항목 자체는 mutating fixture로 확보해야 하며 그런 항목이 없으면 판정 불가. · 중요도: **핵심**(A2·A7). · 해소 조건: mutating 게이트 승인(INDEX §mutating 승인 1) + (A7 대상 확보 시) 스테이징 recorder.
 - **A3·A5·A6·A8** — 사유: 이 단언들은 아카이브를 실제로 `completed`/`failed`까지 구동해야(A3=`completed`행 + 델타 착지, A5=미완료행 다운로드, A6=`completed` 다운로드, A8=`failed` 다운로드) 판정 가능한데, 이는 **스테이징 recorder(더미 RTMP + 격리 아카이브 볼륨) + mutating 게이트**(`ALLOW_MUTATING`/`SPEC_TDD_ALLOW_MUTATING`, INDEX §mutating 승인 1)에 의존한다 — B7과 동일한 인프라 의존. · 중요도: **핵심(load-bearing)**(A3·A5·A6), **부수**(A8). · 해소 조건: **INDEX §SKIP조건 5**(recording 스테이징 recorder = 더미 RTMP + 격리 볼륨) 확보 시 즉시 판정. (A3은 추가로 `completedAt` 델타의 recording 착지가 선행 조건.)
 - **B7** — 사유: 실시간 폴링 윈도우 내 종단 상태 반영은 브라우저 세션(Playwright) + 라이브 스택(아카이브를 실제로 `completed`/`failed`까지 진행시키는 스테이징 recorder)이 함께 있어야 관측 가능. · 중요도: **핵심(load-bearing)** · 해소 조건: Playwright 세션 + 스테이징 recorder(더미 RTMP + 격리 아카이브 볼륨, INDEX §SKIP조건 5)로 아카이브를 종단까지 구동할 수 있을 때 즉시 판정.
 - **B8** — 사유: 완료 행의 준비 시각(`completedAt`) 표시는 needs-browser(Playwright)로 DOM 텍스트를 관측해야 판정 가능하고, `completedAt` 델타의 recording 착지에도 의존. · 중요도: **핵심(소비 단언)** · 해소 조건: Playwright 세션 + `completedAt` 델타 착지 시 판정.
