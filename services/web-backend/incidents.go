@@ -457,7 +457,7 @@ func handleResolveIncident(db *sql.DB) http.HandlerFunc {
 		}
 
 		result, err := db.ExecContext(ctx,
-			"UPDATE incidents SET status = 'resolved', resolved_at = datetime('now'), resolved_by = ?, resolution_notes = ?, resolved_by_kind = 'web', resolved_by_id = ?, resolved_by_label = ? WHERE id = ? AND status != 'resolved'",
+			"UPDATE incidents SET status = 'resolved', resolved_at = datetime('now'), resolved_by = ?, resolution_notes = ?, resolved_by_kind = 'web', resolved_by_id = ?, resolved_by_label = ? WHERE id = ? AND status = 'open'",
 			username, strings.TrimSpace(req.ResolutionNotes), username, label, id,
 		)
 		if err != nil {
