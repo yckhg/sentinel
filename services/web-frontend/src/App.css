@@ -1185,11 +1185,6 @@ body {
   color: #c62828;
 }
 
-.incidents-card-badge.status-acknowledged {
-  background: #fff3e0;
-  color: #e65100;
-}
-
 .incidents-card-badge.status-resolved {
   background: #e8f5e9;
   color: #2e7d32;
@@ -1225,14 +1220,6 @@ body {
   font-size: 0.9rem;
   font-weight: 500;
   line-height: 1.4;
-}
-
-.incidents-card-confirm {
-  display: flex;
-  gap: 8px;
-  margin-top: 6px;
-  font-size: 0.75rem;
-  color: #999;
 }
 
 .incidents-status-filter {

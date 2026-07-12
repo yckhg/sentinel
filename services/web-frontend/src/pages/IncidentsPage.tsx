@@ -279,12 +279,6 @@ export default function IncidentsPage() {
                 </div>
               </div>
               <div className="incidents-card-desc">{inc.description || "(설명 없음)"}</div>
-              {inc.confirmedAt && (
-                <div className="incidents-card-confirm">
-                  {inc.confirmedBy && <span>{inc.confirmedBy}</span>}
-                  <span>{formatDateTime(inc.confirmedAt)}</span>
-                </div>
-              )}
               {inc.status === "resolved" && inc.resolvedAt && (() => {
                 const resolver = resolverDisplay(inc);
                 return (
