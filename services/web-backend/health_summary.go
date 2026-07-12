@@ -131,9 +131,11 @@ func handleGetHealthSummary(mon *HealthMonitor) http.HandlerFunc {
 		}
 
 		// Exceptions: abnormal or offline only, capped, keyed off the SAME bound
-		// `now`. Most-stale first so the cap keeps the worst offenders. exception
+		// `now`. Category-aware ordering so the cap never hides the higher-urgency
+		// category: abnormal (alive + active alarm, small age) sorts BEFORE stale
+		// offline devices. Within each category, most-stale first. exception
 		// condition = age>threshold (offline) OR alert_state active (abnormal-while-
-		// alive).
+		// alive). rank: offline → 1, abnormal → 0.
 		exceptions := []healthSummaryException{}
 		rows, err := tx.QueryContext(ctx, `
 			SELECT site_id, device_id, alias, alert_state, age FROM (
@@ -142,9 +144,9 @@ func handleGetHealthSummary(mon *HealthMonitor) http.HandlerFunc {
 			  FROM devices WHERE deleted_at IS NULL
 			)
 			WHERE age > ? OR alert_state = 'active'
-			ORDER BY age DESC, site_id ASC, device_id ASC
+			ORDER BY (CASE WHEN age > ? THEN 1 ELSE 0 END) ASC, age DESC, site_id ASC, device_id ASC
 			LIMIT ?
-		`, now, threshold, summaryExceptionsCap)
+		`, now, threshold, threshold, summaryExceptionsCap)
 		if err != nil {
 			log.Printf("health summary exceptions error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
