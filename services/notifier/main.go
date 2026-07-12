@@ -1408,11 +1408,16 @@ func sendEmail(cfg Config, to, subject, body string) error {
 		}
 	}
 	if cfg.SMTPUser != "" {
-		if ok, _ := client.Extension("AUTH"); ok {
-			auth := smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPHost)
-			if err := client.Auth(auth); err != nil {
-				return fmt.Errorf("smtp auth: %s", scrub(err.Error()))
-			}
+		// Auth was intended (SMTP_USER set). Match stdlib smtp.SendMail fail-loud
+		// semantics: if the server does not advertise AUTH, do NOT silently send
+		// unauthenticated — return an error so a misconfiguration surfaces as
+		// outcome=failed rather than a surprising `sent` (§출력 4 정직성).
+		if ok, _ := client.Extension("AUTH"); !ok {
+			return fmt.Errorf("smtp auth: server does not advertise AUTH but SMTP_USER is set")
+		}
+		auth := smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPHost)
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth: %s", scrub(err.Error()))
 		}
 	}
 	if err := client.Mail(cfg.SMTPFrom); err != nil {
