@@ -242,6 +242,12 @@ func handleListIncidents(db *sql.DB) http.HandlerFunc {
 			args = append(args, to)
 		}
 		if statusFilter != "" {
+			// Status filter whitelist: only {open, resolved} are valid (case-sensitive).
+			// Any other value (incl. the removed 'acknowledged') → 400.
+			if statusFilter != "open" && statusFilter != "resolved" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid status filter"})
+				return
+			}
 			conditions = append(conditions, "status = ?")
 			args = append(args, statusFilter)
 		}
@@ -351,8 +357,9 @@ func crisisAlertPayload(incidentID int64, siteID, description, occurredAt string
 const activeIncidentsLimit = 200
 
 // handleActiveIncidents handles GET /api/incidents/active — the unresolved-banner
-// backfill (contract 2). Returns the most-recent open+acknowledged incidents
-// (resolved excluded), occurred_at DESC, capped at activeIncidentsLimit. Each
+// backfill (contract 2). Unresolved == status 'open' only (the intermediate
+// 'acknowledged' state no longer exists; resolved excluded), occurred_at DESC,
+// capped at activeIncidentsLimit. Each
 // element is isomorphic to the crisis_alert payload plus a status field. The
 // identifier is incidentId (not the list `id`).
 func handleActiveIncidents(db *sql.DB) http.HandlerFunc {
@@ -363,7 +370,7 @@ func handleActiveIncidents(db *sql.DB) http.HandlerFunc {
 		rows, err := db.QueryContext(ctx,
 			`SELECT id, site_id, description, datetime(occurred_at), is_test, status
 			 FROM incidents
-			 WHERE status IN ('open', 'acknowledged')
+			 WHERE status = 'open'
 			 ORDER BY datetime(occurred_at) DESC
 			 LIMIT ?`, activeIncidentsLimit)
 		if err != nil {
@@ -392,67 +399,6 @@ func handleActiveIncidents(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// handleAcknowledgeIncident handles PATCH /api/incidents/{id}/acknowledge
-func handleAcknowledgeIncident(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		user := getAuthUser(r)
-		if user.Role != "admin" {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role required"})
-			return
-		}
-
-		idStr := r.PathValue("id")
-		id, err := strconv.ParseInt(idStr, 10, 64)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid incident id"})
-			return
-		}
-
-		ctx, cancel := dbCtx(r.Context())
-		defer cancel()
-
-		// Check current status
-		var status string
-		err = db.QueryRowContext(ctx, "SELECT status FROM incidents WHERE id = ?", id).Scan(&status)
-		if err == sql.ErrNoRows {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "incident not found"})
-			return
-		}
-		if err != nil {
-			log.Printf("query incident error: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
-			return
-		}
-		if status == "resolved" {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "cannot acknowledge a resolved incident"})
-			return
-		}
-
-		// Get username
-		var username string
-		err = db.QueryRowContext(ctx, "SELECT username FROM users WHERE id = ?", user.UserID).Scan(&username)
-		if err != nil {
-			log.Printf("query username error: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
-			return
-		}
-
-		_, err = db.ExecContext(ctx,
-			"UPDATE incidents SET status = 'acknowledged', confirmed_at = datetime('now'), confirmed_by = ? WHERE id = ?",
-			username, id,
-		)
-		if err != nil {
-			log.Printf("acknowledge incident error: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
-			return
-		}
-
-		markWALDirty()
-		log.Printf("incident %d acknowledged by %s", id, username)
-		writeJSON(w, http.StatusOK, map[string]string{"status": "acknowledged"})
-	}
-}
-
 // handleResolveIncident handles PATCH /api/incidents/{id}/resolve
 func handleResolveIncident(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -472,12 +418,11 @@ func handleResolveIncident(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			ResolutionNotes string `json:"resolutionNotes"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// Resolution notes are optional: an absent/empty body (io.EOF) is allowed,
+		// as are empty/whitespace notes → stored empty (never a 400). Only a
+		// malformed (non-empty, invalid) JSON body is rejected.
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
-			return
-		}
-		if strings.TrimSpace(req.ResolutionNotes) == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "resolution notes are required"})
 			return
 		}
 
@@ -650,7 +595,7 @@ func handleResolveIncidentFromSensor(db *sql.DB) http.HandlerFunc {
 		// If incidentID == 0: find most recent unresolved incident for siteId
 		if incidentID == 0 {
 			err := db.QueryRowContext(ctx,
-				"SELECT id FROM incidents WHERE site_id = ? AND status != 'resolved' ORDER BY datetime(occurred_at) DESC LIMIT 1",
+				"SELECT id FROM incidents WHERE site_id = ? AND status = 'open' ORDER BY datetime(occurred_at) DESC LIMIT 1",
 				req.SiteID,
 			).Scan(&incidentID)
 			if err == sql.ErrNoRows {
@@ -686,7 +631,7 @@ func handleResolveIncidentFromSensor(db *sql.DB) http.HandlerFunc {
 
 		notes := fmt.Sprintf("[센서 해제] %s", req.ResolvedBy.Label)
 		result, err := db.ExecContext(ctx,
-			"UPDATE incidents SET status = 'resolved', resolved_at = datetime('now'), resolved_by = ?, resolution_notes = ?, resolved_by_kind = ?, resolved_by_id = ?, resolved_by_label = ? WHERE id = ? AND status != 'resolved'",
+			"UPDATE incidents SET status = 'resolved', resolved_at = datetime('now'), resolved_by = ?, resolution_notes = ?, resolved_by_kind = ?, resolved_by_id = ?, resolved_by_label = ? WHERE id = ? AND status = 'open'",
 			req.ResolvedBy.ID, notes, req.ResolvedBy.Kind, req.ResolvedBy.ID, req.ResolvedBy.Label, incidentID,
 		)
 		if err != nil {
