@@ -378,9 +378,9 @@ Body 불필요. hw-gateway `/api/test-alert`에 `{siteId:"test", deviceId:"TEST-
 | GET | `/api/archives/{id}/download` | 아카이브 다운로드 (바이너리 스트림) |
 | GET | `/api/storage` | 스토리지 사용량 통계 |
 
-요청/응답 body는 recording 서비스 통과 원본. HLS(`application/vnd.apple.mpegurl`) 컨텐츠는 그대로 forward.
+요청/응답 body는 recording 서비스 통과 원본(투명 프록시 — 새 응답 필드를 만들지 않음, 생산자=recording). HLS(`application/vnd.apple.mpegurl`) 컨텐츠와 다운로드 바이너리 스트림은 그대로 forward. **다운로드 게이트**: `GET /api/archives/{id}/download`는 `completed`만 `video/mp4`로 서빙하고, 그 외 모든 비-`completed`(미완료 4종 **및** `failed`)는 **409**, 부재는 **404**를 그대로 통과시킨다(recording 통신 실패 시에만 `502`).
 
-**소비자 계약 — 아카이브 status enum**: `GET /api/archives` 각 항목의 `status`는 정확히 6종 `{protecting, pending, finalizing, processing, completed, failed}` 중 하나다. **enum 값 정의의 정본(SSOT)은 recording 스펙**([`docs/spec/recording.md`](../spec/recording.md) §출력·§HTTP API)이 단독 소유하고, **이를 소비하는 프론트의 의무는 계약으로 [`docs/spec/interface-web-api.md`](../spec/interface-web-api.md) §계약 8이 규정**한다(정의=recording, 소비자 의무=§계약 8 — 두 소유가 분리됨). 프론트/소비자 의무: 6종 **전부**를 처리하고, 미지 상태가 오면 **안전 fallback**(미완료로 취급, 임의 완료 표시 금지)하며, `failed`(+사유)는 미완료 아카이브 기동 복구 실패 시 종단 상태이므로 UI에 실패로 명시 노출한다. 기동 복구(recording 스펙 단언 P/P-2) 도입으로 재시작 직후 `finalizing`·`processing`·`failed` 상태가 소비자에게 노출될 확률이 증가했다.
+**소비자 계약 — 아카이브 status enum**: `GET /api/archives` 각 항목의 `status`는 정확히 6종 `{protecting, pending, finalizing, processing, completed, failed}` 중 하나다. **enum 값 정의의 정본(SSOT)은 recording 스펙**([`docs/spec/recording.md`](../spec/recording.md) §출력·§HTTP API)이 단독 소유하고, **이를 소비하는 프론트의 의무는 계약으로 [`docs/spec/interface-web-api.md`](../spec/interface-web-api.md) §계약 8이 규정**한다(정의=recording, 소비자 의무=§계약 8 — 두 소유가 분리됨). 프론트/소비자 의무: 6종 **전부**를 처리하고, 미지 상태가 오면 **안전 fallback**(미완료로 취급, 임의 완료 표시 금지)하며, `failed`(+사유 `lastError`)는 미완료 아카이브 기동 복구 실패 시 종단 상태이므로 UI에 실패로 명시 노출하고, `completed` 항목은 `completedAt`(RFC3339 **UTC**)을 로컬 시각으로 변환해 표시한다(값 정본=UTC). 기동 복구(recording 스펙 단언 P/P-2) 도입으로 재시작 직후 `finalizing`·`processing`·`failed` 상태가 소비자에게 노출될 확률이 증가했다.
 
 ---
 
