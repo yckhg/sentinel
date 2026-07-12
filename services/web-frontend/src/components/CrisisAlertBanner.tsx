@@ -1,30 +1,27 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import useWebSocket from "../hooks/useWebSocket";
 import { formatKstTime } from "../utils/datetime";
 import EmergencyCallButton from "./EmergencyCallButton";
-
-interface CrisisAlert {
-  id: string;
-  description: string;
-  occurredAt: string;
-  siteId: string;
-}
+import { crisisAlertId, reduceCrisisAlerts, type CrisisAlert } from "./crisisAlerts";
 
 export default function CrisisAlertBanner() {
   const [alerts, setAlerts] = useState<CrisisAlert[]>([]);
+  // Monotonic sequence for alerts without an incidentId, and the set of ids the
+  // user has dismissed so a re-send over WS reconnect doesn't pop them back.
+  const seqRef = useRef(0);
+  const dismissedRef = useRef<Set<string>>(new Set());
 
   const handleMessage = useCallback(
     (msg: { type: string; payload: Record<string, unknown>; timestamp: string }) => {
-      if (msg.type === "crisis_alert") {
-        const p = msg.payload;
-        const alert: CrisisAlert = {
-          id: `${p.incidentId ?? Date.now()}`,
-          description: (p.description as string) || "위기 상황 발생",
-          occurredAt: (p.occurredAt as string) || msg.timestamp,
-          siteId: (p.siteId as string) || "",
-        };
-        setAlerts((prev) => [alert, ...prev]);
-      }
+      if (msg.type !== "crisis_alert") return;
+      const p = msg.payload;
+      const alert: CrisisAlert = {
+        id: crisisAlertId(p, ++seqRef.current),
+        description: (p.description as string) || "위기 상황 발생",
+        occurredAt: (p.occurredAt as string) || msg.timestamp,
+        siteId: (p.siteId as string) || "",
+      };
+      setAlerts((prev) => reduceCrisisAlerts(prev, alert, dismissedRef.current));
     },
     []
   );
@@ -32,6 +29,7 @@ export default function CrisisAlertBanner() {
   useWebSocket(handleMessage);
 
   const dismiss = (id: string) => {
+    dismissedRef.current.add(id);
     setAlerts((prev) => prev.filter((a) => a.id !== id));
   };
 

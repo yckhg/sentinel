@@ -3,9 +3,9 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -64,8 +64,8 @@ func handleUpdateSite(db *sql.DB) http.HandlerFunc {
 		}
 
 		idStr := r.PathValue("id")
-		var id int64
-		if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
 			return
 		}
@@ -85,7 +85,7 @@ func handleUpdateSite(db *sql.DB) http.HandlerFunc {
 
 		// Load existing site
 		var existing siteResponse
-		err := db.QueryRowContext(ctx, "SELECT id, address, manager_name, manager_phone FROM sites WHERE id = ?", id).Scan(
+		err = db.QueryRowContext(ctx, "SELECT id, address, manager_name, manager_phone FROM sites WHERE id = ?", id).Scan(
 			&existing.ID, &existing.Address, &existing.ManagerName, &existing.ManagerPhone,
 		)
 		if err == sql.ErrNoRows {

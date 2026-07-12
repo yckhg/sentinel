@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 import { parseServerTimeMs, formatKstDateTimeSec } from "../utils/datetime";
+import Modal from "./Modal";
 
 interface Device {
   id: number;
@@ -283,31 +284,19 @@ export default function DevicesSection() {
                         {d.alias || d.deviceId}
                         {" "}
                         {deleted ? (
-                          <span
-                            className="mgmt-card-badge"
-                            style={{ background: "#888", color: "#fff" }}
-                          >
+                          <span className="mgmt-card-badge status-badge--muted">
                             삭제됨
                           </span>
                         ) : d.alertState === "active" ? (
-                          <span
-                            className="mgmt-card-badge"
-                            style={{ background: "#e65100", color: "#fff" }}
-                          >
+                          <span className="mgmt-card-badge status-badge--warn">
                             경보 중
                           </span>
                         ) : alive ? (
-                          <span
-                            className="mgmt-card-badge"
-                            style={{ background: "#2e7d32", color: "#fff" }}
-                          >
+                          <span className="mgmt-card-badge status-badge--ok">
                             온라인
                           </span>
                         ) : (
-                          <span
-                            className="mgmt-card-badge"
-                            style={{ background: "#c62828", color: "#fff" }}
-                          >
+                          <span className="mgmt-card-badge status-badge--danger">
                             오프라인
                           </span>
                         )}
@@ -354,8 +343,7 @@ export default function DevicesSection() {
       )}
 
       {deleteTarget && (
-        <div className="mgmt-modal-overlay" onClick={() => setDeleteTarget(null)}>
-          <div className="mgmt-modal" onClick={(e) => e.stopPropagation()}>
+        <Modal onClose={() => setDeleteTarget(null)} ariaLabel="장비 삭제 확인">
             <p className="mgmt-modal-text">
               <strong>{deleteTarget.alias || deleteTarget.deviceId}</strong> 장비를 삭제하시겠습니까?
               <br />
@@ -378,8 +366,7 @@ export default function DevicesSection() {
                 취소
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </>
   );

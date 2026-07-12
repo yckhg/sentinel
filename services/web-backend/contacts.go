@@ -3,10 +3,10 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -113,7 +113,7 @@ func handleCreateContact(db *sql.DB) http.HandlerFunc {
 		}
 
 		id, _ := result.LastInsertId()
-		log.Printf("contact created: id=%d name=%s phone=%s email=%v by user=%d", id, req.Name, req.Phone, emailVal, user.UserID)
+		log.Printf("contact created: id=%d name=%s phone=%s email=%s by user=%d", id, req.Name, maskPhone(req.Phone), maskEmail(req.Email), user.UserID)
 
 		writeJSON(w, http.StatusCreated, contactResponse{
 			ID:          id,
@@ -134,8 +134,8 @@ func handleUpdateContact(db *sql.DB) http.HandlerFunc {
 		}
 
 		idStr := r.PathValue("id")
-		var id int64
-		if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
 			return
 		}
@@ -154,7 +154,7 @@ func handleUpdateContact(db *sql.DB) http.HandlerFunc {
 
 		// Load existing contact
 		var existing contactResponse
-		err := db.QueryRowContext(ctx, "SELECT id, name, phone, COALESCE(email, ''), notify_email FROM contacts WHERE id = ?", id).Scan(
+		err = db.QueryRowContext(ctx, "SELECT id, name, phone, COALESCE(email, ''), notify_email FROM contacts WHERE id = ?", id).Scan(
 			&existing.ID, &existing.Name, &existing.Phone, &existing.Email, &existing.NotifyEmail,
 		)
 		if err == sql.ErrNoRows {
@@ -213,8 +213,8 @@ func handleDeleteContact(db *sql.DB) http.HandlerFunc {
 		}
 
 		idStr := r.PathValue("id")
-		var id int64
-		if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
 			return
 		}

@@ -139,13 +139,19 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
 
         <div className="login-tabs">
           <button
+            type="button"
             className={`login-tab${mode === "login" ? " active" : ""}`}
+            aria-pressed={mode === "login"}
+            aria-label="로그인 화면으로 전환"
             onClick={() => switchMode("login")}
           >
             로그인
           </button>
           <button
+            type="button"
             className={`login-tab${mode === "register" ? " active" : ""}`}
+            aria-pressed={mode === "register"}
+            aria-label="회원가입 화면으로 전환"
             onClick={() => switchMode("register")}
           >
             회원가입
@@ -157,8 +163,9 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
 
         <form onSubmit={mode === "login" ? handleLogin : handleRegister}>
           <div className="mgmt-form-field">
-            <label>아이디</label>
+            <label htmlFor="login-username">아이디</label>
             <input
+              id="login-username"
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
@@ -168,8 +175,9 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
             />
           </div>
           <div className="mgmt-form-field">
-            <label>비밀번호</label>
+            <label htmlFor="login-password">비밀번호</label>
             <input
+              id="login-password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -180,8 +188,9 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           </div>
           {mode === "register" && (
             <div className="mgmt-form-field">
-              <label>비밀번호 확인</label>
+              <label htmlFor="login-confirm-password">비밀번호 확인</label>
               <input
+                id="login-confirm-password"
                 type="password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
@@ -196,8 +205,9 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           )}
           {mode === "register" && (
             <div className="mgmt-form-field">
-              <label>이름</label>
+              <label htmlFor="login-name">이름</label>
               <input
+                id="login-name"
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}

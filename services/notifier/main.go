@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -11,9 +12,12 @@ import (
 	"net/http"
 	"net/smtp"
 	"os"
+	"os/signal"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -188,6 +192,44 @@ func maskSecret(s string) string {
 	return s[:n] + "***"
 }
 
+// maskPhone redacts the middle of a phone number for logs, keeping the leading
+// 3 and trailing 4 digits (e.g. "010-****-5678"). Numbers with fewer than 7
+// digits are fully masked. Empty input stays empty. PII (phone/email) must not
+// be logged in plaintext (#43).
+func maskPhone(p string) string {
+	if p == "" {
+		return ""
+	}
+	digits := make([]byte, 0, len(p))
+	for i := 0; i < len(p); i++ {
+		if p[i] >= '0' && p[i] <= '9' {
+			digits = append(digits, p[i])
+		}
+	}
+	if len(digits) < 7 {
+		return "****"
+	}
+	d := string(digits)
+	return d[:3] + "-****-" + d[len(d)-4:]
+}
+
+// maskEmail redacts the local part of an email for logs, keeping only its first
+// character (e.g. "j***@example.com"). Empty input stays empty (#43).
+func maskEmail(e string) string {
+	if e == "" {
+		return ""
+	}
+	at := strings.LastIndex(e, "@")
+	if at <= 0 {
+		return "***"
+	}
+	local, domain := e[:at], e[at:]
+	if len(local) == 1 {
+		return "*" + domain
+	}
+	return local[:1] + strings.Repeat("*", len(local)-1) + domain
+}
+
 // scrub redacts any occurrence of a configured secret plaintext from s.
 func scrub(s string) string {
 	for _, sec := range secretValues {
@@ -203,6 +245,17 @@ func scrub(s string) string {
 // before it is written, so no credential can leak into the notifier logs.
 func logf(format string, args ...interface{}) {
 	log.Print(scrub(fmt.Sprintf(format, args...)))
+}
+
+// recoverGoroutine is a deferred guard for background goroutines (#58). An
+// unrecovered panic in any goroutine (e.g. a nil map/pointer in the dispatch,
+// per-contact, or email paths) crashes the entire notifier process, after which
+// every subsequent crisis alert is lost. Recovering keeps this safety-critical
+// daemon alive; the panic value and stack are logged (scrubbed) for diagnosis.
+func recoverGoroutine(label string) {
+	if r := recover(); r != nil {
+		logf("[panic] recovered in %s: %v\n%s", label, r, debug.Stack())
+	}
 }
 
 // --- HTTP Client ---
@@ -293,7 +346,7 @@ func requestTempLink(cfg Config, label string) (*TempLinkResponse, error) {
 
 func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
 	if cfg.KakaoAPIURL == "" || cfg.KakaoAPIKey == "" {
-		logf("[kakao] API not configured, skipping KakaoTalk for %s (%s)", contact.Name, contact.Phone)
+		logf("[kakao] API not configured, skipping KakaoTalk for %s (%s)", contact.Name, maskPhone(contact.Phone))
 		return fmt.Errorf("KakaoTalk API not configured")
 	}
 
@@ -341,7 +394,7 @@ func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink str
 		return fmt.Errorf("kakao API error: status %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	logf("[kakao] Successfully sent to %s (%s)", contact.Name, contact.Phone)
+	logf("[kakao] Successfully sent to %s (%s)", contact.Name, maskPhone(contact.Phone))
 	return nil
 }
 
@@ -349,7 +402,7 @@ func sendKakaoTalk(cfg Config, contact Contact, alert AlertPayload, cctvLink str
 
 func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
 	if cfg.NHNAppKey == "" || cfg.NHNSecretKey == "" {
-		logf("[sms] NHN Cloud SMS not configured, skipping SMS for %s (%s)", contact.Name, contact.Phone)
+		logf("[sms] NHN Cloud SMS not configured, skipping SMS for %s (%s)", contact.Name, maskPhone(contact.Phone))
 		return fmt.Errorf("NHN Cloud SMS not configured")
 	}
 
@@ -399,7 +452,7 @@ func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) e
 		return fmt.Errorf("SMS API error: status %d, body: %s", resp.StatusCode, string(respBody))
 	}
 
-	logf("[sms] Successfully sent to %s (%s)", contact.Name, contact.Phone)
+	logf("[sms] Successfully sent to %s (%s)", contact.Name, maskPhone(contact.Phone))
 	return nil
 }
 
@@ -407,7 +460,7 @@ func sendSMS(cfg Config, contact Contact, alert AlertPayload, cctvLink string) e
 
 func sendCrisisEmail(cfg Config, contact Contact, alert AlertPayload, cctvLink string) error {
 	if cfg.SMTPHost == "" || cfg.SMTPFrom == "" {
-		logf("[email] SMTP not configured, skipping email for %s (%s)", contact.Name, contact.Email)
+		logf("[email] SMTP not configured, skipping email for %s (%s)", contact.Name, maskEmail(contact.Email))
 		return fmt.Errorf("SMTP not configured")
 	}
 
@@ -446,10 +499,10 @@ func sendCrisisEmail(cfg Config, contact Contact, alert AlertPayload, cctvLink s
 	body += `</body></html>`
 
 	if err := sendEmail(cfg, contact.Email, subject, body); err != nil {
-		return fmt.Errorf("crisis email to %s: %w", contact.Email, err)
+		return fmt.Errorf("crisis email to %s: %w", maskEmail(contact.Email), err)
 	}
 
-	logf("[email] Crisis alert sent to %s (%s)", contact.Name, contact.Email)
+	logf("[email] Crisis alert sent to %s (%s)", contact.Name, maskEmail(contact.Email))
 	return nil
 }
 
@@ -492,7 +545,7 @@ func sendSystemAlarm(cfg Config, contact Contact, alert AlertPayload, kakaoErr, 
 		return
 	}
 
-	logf("[alarm] System alarm sent for contact %s (%s) — both KakaoTalk and SMS failed", contact.Name, contact.Phone)
+	logf("[alarm] System alarm sent for contact %s (%s) — both KakaoTalk and SMS failed", contact.Name, maskPhone(contact.Phone))
 }
 
 // --- Recording Archive (Two-Phase) ---
@@ -576,6 +629,46 @@ func requestArchiveProtect(cfg Config, alert AlertPayload) {
 
 // --- Notification Dispatch ---
 
+// maxConcurrentSends caps how many notification sends run at once (#62),
+// bounding both goroutine count and concurrent outbound API connections.
+const maxConcurrentSends = 16
+
+// runBounded executes jobs through a fixed worker pool of at most `limit`
+// goroutines and blocks until every job has finished. This bounds concurrency
+// so a large contact list cannot explode goroutines/outbound connections. Each
+// job runs under recoverGoroutine (#58) so one panicking send neither crashes
+// the process nor kills its pool worker (which would starve the remaining jobs).
+func runBounded(jobs []func(), limit int) {
+	if len(jobs) == 0 {
+		return
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > len(jobs) {
+		limit = len(jobs)
+	}
+	ch := make(chan func())
+	var wg sync.WaitGroup
+	wg.Add(limit)
+	for w := 0; w < limit; w++ {
+		go func() {
+			defer wg.Done()
+			for job := range ch {
+				func() {
+					defer recoverGoroutine("notification send")
+					job()
+				}()
+			}
+		}()
+	}
+	for _, job := range jobs {
+		ch <- job
+	}
+	close(ch)
+	wg.Wait()
+}
+
 func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult) {
 	// 1. Fetch contacts from web-backend
 	contacts, err := fetchContacts(cfg)
@@ -615,27 +708,32 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 		logf("[notify] SMS disabled (SMS_ENABLED=false), skipping SMS channel")
 	}
 
-	var wg sync.WaitGroup
 	results := make([]NotifyResult, len(contacts))
 
+	// Build the per-contact send jobs, then run them through a bounded worker
+	// pool (#62). fetchContacts is unbounded and each contact spawns up to two
+	// sends (email + KakaoTalk→SMS→alarm chain); a large contact list — or many
+	// concurrent /api/notify requests — would explode goroutines and outbound
+	// connections, exhausting resources and tripping external-API rate limits.
+	// The pool caps how many sends run at once while still driving every contact.
+	var jobs []func()
 	for i, contact := range contacts {
+		i, contact := i, contact
 		// Send email in parallel (independent channel, does not affect KakaoTalk/SMS)
 		if contact.NotifyEmail && contact.Email != "" {
-			wg.Add(1)
-			go func(c Contact) {
-				defer wg.Done()
+			jobs = append(jobs, func() {
+				c := contact
 				if err := sendCrisisEmail(cfg, c, alert, cctvLink); err != nil {
-					logf("[notify] Email FAILED for %s (%s): %v", c.Name, c.Email, err)
+					logf("[notify] Email FAILED for %s (%s): %v", c.Name, maskEmail(c.Email), err)
 				} else {
-					logf("[notify] Email SUCCESS for %s (%s)", c.Name, c.Email)
+					logf("[notify] Email SUCCESS for %s (%s)", c.Name, maskEmail(c.Email))
 				}
-			}(contact)
+			})
 		}
 
 		// KakaoTalk → SMS → System alarm fallback chain
-		wg.Add(1)
-		go func(idx int, c Contact) {
-			defer wg.Done()
+		jobs = append(jobs, func() {
+			idx, c := i, contact
 			result := NotifyResult{
 				ContactID:   c.ID,
 				ContactName: c.Name,
@@ -647,17 +745,17 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 				// Disabled channel: never call sendKakaoTalk (no external send
 				// attempt is logged); record the skip and proceed to the next step.
 				kakaoErr = fmt.Errorf("KakaoTalk disabled (KAKAO_ENABLED=false)")
-				logf("[notify] KakaoTalk skipped for %s (%s) — channel disabled, proceeding to SMS/fallback", c.Name, c.Phone)
+				logf("[notify] KakaoTalk skipped for %s (%s) — channel disabled, proceeding to SMS/fallback", c.Name, maskPhone(c.Phone))
 			} else {
 				kakaoErr = sendKakaoTalk(cfg, c, alert, cctvLink)
 				if kakaoErr == nil {
 					result.Channel = "kakaotalk"
 					result.Success = true
-					logf("[notify] KakaoTalk SUCCESS for %s (%s)", c.Name, c.Phone)
+					logf("[notify] KakaoTalk SUCCESS for %s (%s)", c.Name, maskPhone(c.Phone))
 					results[idx] = result
 					return
 				}
-				logf("[notify] KakaoTalk FAILED for %s (%s): %v — falling back to SMS", c.Name, c.Phone, kakaoErr)
+				logf("[notify] KakaoTalk FAILED for %s (%s): %v — falling back to SMS", c.Name, maskPhone(c.Phone), kakaoErr)
 			}
 
 			// Step 2: Fallback to SMS (if enabled)
@@ -666,17 +764,17 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 				// Disabled channel: never call sendSMS (no external send attempt is
 				// logged); record the skip and proceed to the system-alarm fallback.
 				smsErr = fmt.Errorf("SMS disabled (SMS_ENABLED=false)")
-				logf("[notify] SMS skipped for %s (%s) — channel disabled, proceeding to system alarm", c.Name, c.Phone)
+				logf("[notify] SMS skipped for %s (%s) — channel disabled, proceeding to system alarm", c.Name, maskPhone(c.Phone))
 			} else {
 				smsErr = sendSMS(cfg, c, alert, cctvLink)
 				if smsErr == nil {
 					result.Channel = "sms"
 					result.Success = true
-					logf("[notify] SMS SUCCESS for %s (%s)", c.Name, c.Phone)
+					logf("[notify] SMS SUCCESS for %s (%s)", c.Name, maskPhone(c.Phone))
 					results[idx] = result
 					return
 				}
-				logf("[notify] SMS FAILED for %s (%s): %v — sending system alarm", c.Name, c.Phone, smsErr)
+				logf("[notify] SMS FAILED for %s (%s): %v — sending system alarm", c.Name, maskPhone(c.Phone), smsErr)
 			}
 
 			// Step 3: Both channels unavailable or failed — send system alarm to web-backend
@@ -685,10 +783,10 @@ func dispatchNotifications(cfg Config, alert AlertPayload) (int, []NotifyResult)
 			result.Success = false
 			result.Error = scrub(fmt.Sprintf("kakao: %s; sms: %s", kakaoErr.Error(), smsErr.Error()))
 			results[idx] = result
-		}(i, contact)
+		})
 	}
 
-	wg.Wait()
+	runBounded(jobs, maxConcurrentSends)
 
 	// Log email dispatch summary
 	emailCount := 0
@@ -746,8 +844,13 @@ func handleNotify(cfg Config) http.HandlerFunc {
 		logf("[notify] Received alert: site=%s device=%s type=%s severity=%s",
 			alert.SiteID, alert.DeviceID, alert.Type, alert.Severity)
 
-		// Dispatch notifications asynchronously
+		// Dispatch notifications asynchronously. Track the goroutine in
+		// inflightDispatch so graceful shutdown (#40) can drain crisis-alert
+		// dispatches already in progress instead of losing them on SIGTERM.
+		inflightDispatch.Add(1)
 		go func() {
+			defer inflightDispatch.Done()
+			defer recoverGoroutine("notify handler dispatch")
 			contactCount, results := dispatchNotifications(cfg, alert)
 			successCount := 0
 			channels := map[string]int{}
@@ -1046,9 +1149,80 @@ func main() {
 	mux.HandleFunc("POST /api/notify", handleNotify(cfg))
 	mux.HandleFunc("POST /api/send-email", handleSendEmail(cfg))
 
+	srv := newHTTPServer(maxBytesMiddleware(mux))
+
+	// Graceful shutdown (#40): on SIGTERM/SIGINT stop accepting new requests
+	// (srv.Shutdown), then wait for crisis-alert dispatch goroutines already in
+	// flight so they are not truncated/lost. New /api/notify requests can no
+	// longer start a dispatch once Shutdown returns, so draining terminates.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		logf("shutting down: draining in-flight notifications...")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			logf("http shutdown: %v", err)
+		}
+		if !waitTimeout(&inflightDispatch, 15*time.Second) {
+			logf("shutdown: timed out waiting for in-flight notifications")
+		}
+	}()
+
 	logf("notifier listening on :8080 (kakao configured: %v, sms configured: %v, smtp configured: %v, frontend: %s)",
 		cfg.KakaoAPIURL != "", cfg.NHNAppKey != "", cfg.SMTPHost != "", cfg.FrontendURL)
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
+	}
+}
+
+// inflightDispatch tracks crisis-alert dispatch goroutines spawned by
+// /api/notify so graceful shutdown can wait for them to finish.
+var inflightDispatch sync.WaitGroup
+
+// waitTimeout waits for wg with an upper bound, returning true if it completed
+// and false if the deadline elapsed first.
+func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// maxRequestBodyBytes caps request bodies (#41). Previously only /api/send-email
+// bounded its body (1 MB) while its sibling /api/notify did not; this middleware
+// applies the same limit uniformly so an unbounded body cannot exhaust memory.
+const maxRequestBodyBytes = 1 << 20 // 1 MB
+
+// maxBytesMiddleware wraps every request body in an http.MaxBytesReader so a
+// handler that decodes an oversized body gets an error (→ 400) instead of
+// buffering unbounded data. GET/HEAD requests without a body are unaffected.
+func maxBytesMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// newHTTPServer builds the service HTTP server with hardened timeouts. Without
+// them ReadHeaderTimeout/ReadTimeout/IdleTimeout default to 0 (unlimited) and a
+// slow/malicious client can trickle headers or body to hold goroutines/sockets
+// open indefinitely (Slowloris).
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ":8080",
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }

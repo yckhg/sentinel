@@ -6,7 +6,8 @@ import SettingsPage from "./pages/SettingsPage";
 import ViewerPage from "./pages/ViewerPage";
 import LoginPage from "./pages/LoginPage";
 import CrisisAlertBanner from "./components/CrisisAlertBanner";
-import { isTokenExpired } from "./utils/isTokenExpired";
+import ErrorBoundary from "./components/ErrorBoundary";
+import { isTokenExpired } from "./utils/jwt";
 import "./App.css";
 
 type Tab = "cctv" | "incidents" | "management" | "settings";
@@ -83,16 +84,27 @@ function App() {
 
   return (
     <div className="app">
-      <CrisisAlertBanner />
-      <main className="content">{renderPage()}</main>
-      <nav className="tab-bar">
+      {/* The crisis banner is safety-critical — isolate it so a page render
+          error can't take it (or the nav) down with it (#99). */}
+      <ErrorBoundary label="banner">
+        <CrisisAlertBanner />
+      </ErrorBoundary>
+      <main className="content">
+        {/* key={activeTab} remounts the boundary on tab change, clearing a
+            previous page's error automatically. */}
+        <ErrorBoundary key={activeTab} label={`page:${activeTab}`}>
+          {renderPage()}
+        </ErrorBoundary>
+      </main>
+      <nav className="tab-bar" aria-label="주요 메뉴">
         {tabs.map((tab) => (
           <button
             key={tab.key}
             className={`tab-item${activeTab === tab.key ? " active" : ""}`}
+            aria-current={activeTab === tab.key ? "page" : undefined}
             onClick={() => setActiveTab(tab.key)}
           >
-            <span className="tab-icon">{tab.icon}</span>
+            <span className="tab-icon" aria-hidden="true">{tab.icon}</span>
             <span className="tab-label">{tab.label}</span>
           </button>
         ))}

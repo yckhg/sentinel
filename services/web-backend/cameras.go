@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -378,8 +379,8 @@ func handleUpdateCamera(db *sql.DB) http.HandlerFunc {
 		}
 
 		idStr := r.PathValue("id")
-		var id int64
-		if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
 			return
 		}
@@ -402,7 +403,7 @@ func handleUpdateCamera(db *sql.DB) http.HandlerFunc {
 		// Load existing camera
 		var existing cameraResponse
 		var enabledInt int
-		err := db.QueryRowContext(ctx,
+		err = db.QueryRowContext(ctx,
 			"SELECT id, name, location, zone, stream_key, source_type, source_url, enabled FROM cameras WHERE id = ?", id,
 		).Scan(&existing.ID, &existing.Name, &existing.Location, &existing.Zone,
 			&existing.StreamKey, &existing.SourceType, &existing.SourceURL, &enabledInt)
@@ -552,8 +553,8 @@ func handleDeleteCamera(db *sql.DB) http.HandlerFunc {
 		}
 
 		idStr := r.PathValue("id")
-		var id int64
-		if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
 			return
 		}

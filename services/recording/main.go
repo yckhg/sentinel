@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +21,16 @@ import (
 	"syscall"
 	"time"
 )
+
+// pathComponentRe matches a safe single path segment used to build filesystem
+// paths (stream keys, incident IDs). It permits only alphanumerics, '_' and '-',
+// which structurally excludes path separators and ".." traversal. (#73)
+var pathComponentRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// isValidPathComponent reports whether s is safe to use as a path segment.
+func isValidPathComponent(s string) bool {
+	return pathComponentRe.MatchString(s)
+}
 
 // CameraInfo represents a camera to record.
 type CameraInfo struct {
@@ -134,30 +148,7 @@ func (rm *RecordingManager) manageRecording(cam CameraInfo, state *recorderState
 
 		log.Printf("[%s] Connecting to RTMP stream: %s", cam.StreamKey, srcURL)
 
-		// Record RTMP stream as segmented .ts files
-		// -fflags +genpts+discardcorrupt: regenerate PTS and discard corrupt frames
-		// -avoid_negative_ts make_zero: shift timestamps to start from zero
-		// -c copy: no transcoding (H.264 passthrough)
-		// -f segment: output as individual segment files
-		// -segment_time 10: 10-second segments
-		// -strftime 1: use timestamp-based filenames
-		// -segment_atclocktime 1: align segments to clock time
-		// -reset_timestamps 1: reset timestamps per segment for clean playback
-		cmd := exec.Command("ffmpeg",
-			"-hide_banner",
-			"-loglevel", "warning",
-			"-fflags", "+genpts+discardcorrupt",
-			"-i", srcURL,
-			"-avoid_negative_ts", "make_zero",
-			"-c", "copy",
-			"-f", "segment",
-			"-segment_time", "10",
-			"-segment_format", "mpegts",
-			"-strftime", "1",
-			"-segment_atclocktime", "1",
-			"-reset_timestamps", "1",
-			segPattern,
-		)
+		cmd := buildRecordCmd(srcURL, segPattern)
 
 		stdoutWatcher := newWatchdogWriter(os.Stdout)
 		stderrWatcher := newWatchdogWriter(os.Stderr)
@@ -255,6 +246,41 @@ func (rm *RecordingManager) manageRecording(cam CameraInfo, state *recorderState
 	}
 }
 
+// buildRecordCmd builds the segmenting ffmpeg command for a recorder.
+//
+// ffmpeg -strftime uses the process's *local* time to name segment files, but
+// the whole service parses those names with time.Parse (which yields UTC) and
+// compares them against UTC query ranges / rolling cutoffs. If the container TZ
+// were not UTC, filenames and queries would drift by the offset and break
+// playback/archive/cleanup. Force TZ=UTC on the child so filenames are always
+// UTC wall-clock regardless of the host/container timezone. (#77)
+//
+//   - -fflags +genpts+discardcorrupt: regenerate PTS, discard corrupt frames
+//   - -avoid_negative_ts make_zero:   shift timestamps to start from zero
+//   - -c copy:                        no transcoding (H.264 passthrough)
+//   - -f segment / -segment_time 10:  10-second segment files
+//   - -strftime 1 / -segment_atclocktime 1: clock-aligned timestamp filenames
+//   - -reset_timestamps 1:            reset per segment for clean playback
+func buildRecordCmd(srcURL, segPattern string) *exec.Cmd {
+	cmd := exec.Command("ffmpeg",
+		"-hide_banner",
+		"-loglevel", "warning",
+		"-fflags", "+genpts+discardcorrupt",
+		"-i", srcURL,
+		"-avoid_negative_ts", "make_zero",
+		"-c", "copy",
+		"-f", "segment",
+		"-segment_time", "10",
+		"-segment_format", "mpegts",
+		"-strftime", "1",
+		"-segment_atclocktime", "1",
+		"-reset_timestamps", "1",
+		segPattern,
+	)
+	cmd.Env = append(os.Environ(), "TZ=UTC")
+	return cmd
+}
+
 // GetStatuses returns the current status of all recorders.
 func (rm *RecordingManager) GetStatuses() []RecorderStatus {
 	rm.mu.RLock()
@@ -337,14 +363,18 @@ func (rm *RecordingManager) Reload(newCameras []CameraInfo) {
 	rm.cameras = newCameras
 	rm.mu.Unlock()
 
-	// Kill stopped FFmpeg processes
+	// Terminate removed FFmpeg processes in parallel: SIGTERM every process,
+	// wait a single grace period, then SIGKILL any survivors. Previously this
+	// slept 3s per process serially, so removing N recorders blocked the reload
+	// handler for N×3s and could race reload retries into duplicate reloads.
+	// This mirrors Stop()'s one-shot grace. (#44)
+	var stopProcs []*os.Process
 	for _, s := range toStop {
 		if s.state.cmd != nil && s.state.cmd.Process != nil {
-			s.state.cmd.Process.Signal(syscall.SIGTERM)
-			time.Sleep(3 * time.Second)
-			s.state.cmd.Process.Kill()
+			stopProcs = append(stopProcs, s.state.cmd.Process)
 		}
 	}
+	terminateProcesses(stopProcs, 3*time.Second)
 
 	// Start new recorders
 	for _, cam := range toStart {
@@ -352,6 +382,23 @@ func (rm *RecordingManager) Reload(newCameras []CameraInfo) {
 	}
 
 	log.Printf("[reload] Reconciled: %d cameras recording", len(newMap))
+}
+
+// terminateProcesses sends SIGTERM to every process, waits a single grace
+// period, then SIGKILLs any that remain. The grace wait runs once for the whole
+// batch (not per process), so teardown time does not scale with the process
+// count. Kill on an already-exited process is harmless.
+func terminateProcesses(procs []*os.Process, grace time.Duration) {
+	if len(procs) == 0 {
+		return
+	}
+	for _, p := range procs {
+		p.Signal(syscall.SIGTERM)
+	}
+	time.Sleep(grace)
+	for _, p := range procs {
+		p.Kill()
+	}
 }
 
 // Stop terminates all recording processes.
@@ -404,6 +451,10 @@ func (rm *RecordingManager) IsProtected(path string) bool {
 	return rm.protected[path]
 }
 
+// zeroByteGrace is how long a 0-byte segment must be untouched before cleanup
+// will reap it, protecting freshly-created segments still being written. (#80)
+var zeroByteGrace = 60 * time.Second
+
 // CleanupOldSegments deletes .ts files older than the rolling window.
 func (rm *RecordingManager) CleanupOldSegments(rollingWindow time.Duration) {
 	entries, err := os.ReadDir(rm.recordingsDir)
@@ -430,12 +481,17 @@ func (rm *RecordingManager) CleanupOldSegments(rollingWindow time.Duration) {
 			}
 			fullPath := filepath.Join(streamDir, f.Name())
 
-			// Delete 0-byte segments unconditionally (even if protected)
+			// A segment ffmpeg just created can momentarily be 0 bytes before the
+			// first flush. Only reap 0-byte files once they have been stale for a
+			// grace period, so an actively-writing segment is never deleted out
+			// from under the recorder. (#80)
 			info, infoErr := f.Info()
 			if infoErr == nil && info.Size() == 0 {
-				if err := os.Remove(fullPath); err == nil {
-					log.Printf("[cleanup] Deleted empty segment: %s", f.Name())
-					deleted++
+				if time.Since(info.ModTime()) > zeroByteGrace {
+					if err := os.Remove(fullPath); err == nil {
+						log.Printf("[cleanup] Deleted stale empty segment: %s", f.Name())
+						deleted++
+					}
 				}
 				continue
 			}
@@ -546,14 +602,9 @@ func (rm *RecordingManager) GeneratePlaylist(streamKey string, from, to time.Tim
 		return "", err
 	}
 
-	const segDuration = 10 // seconds
+	const segDuration = 10 * time.Second
 
-	type segment struct {
-		t    time.Time
-		name string
-	}
-
-	var segments []segment
+	var segments []playlistSeg
 	for _, f := range files {
 		if f.IsDir() || !strings.HasSuffix(f.Name(), ".ts") {
 			continue
@@ -563,10 +614,10 @@ func (rm *RecordingManager) GeneratePlaylist(streamKey string, from, to time.Tim
 		if err != nil {
 			continue
 		}
-		segEnd := t.Add(segDuration * time.Second)
+		segEnd := t.Add(segDuration)
 		// Include segment if it overlaps with [from, to]
 		if segEnd.After(from) && t.Before(to) {
-			segments = append(segments, segment{t: t, name: f.Name()})
+			segments = append(segments, playlistSeg{t: t, name: f.Name()})
 		}
 	}
 
@@ -576,21 +627,60 @@ func (rm *RecordingManager) GeneratePlaylist(streamKey string, from, to time.Tim
 
 	sort.Slice(segments, func(i, j int) bool { return segments[i].t.Before(segments[j].t) })
 
-	// Build M3U8 playlist
+	return buildPlaylist(streamKey, segments), nil
+}
+
+type playlistSeg struct {
+	t    time.Time
+	name string
+}
+
+// buildPlaylist renders a VOD M3U8 from time-sorted segments. Instead of a flat
+// #EXTINF:10.0 for every entry, it derives each segment's real duration from the
+// gap to the next segment (segments are clock-aligned, so this equals the wall
+// time actually covered), and inserts #EXT-X-DISCONTINUITY where a gap exceeds
+// the tolerance. This avoids timeline drift over long ranges and decoder
+// artifacts at gap boundaries. (#78)
+func buildPlaylist(streamKey string, segs []playlistSeg) string {
+	const nominal = 10.0 // seconds; target/last-segment fallback length
+	const gapTolerance = 15 * time.Second
+
+	durs := make([]float64, len(segs))
+	maxDur := nominal
+	for i := range segs {
+		dur := nominal
+		if i < len(segs)-1 {
+			diff := segs[i+1].t.Sub(segs[i].t)
+			// A diff within tolerance is the segment's real covered duration
+			// (including minor drift). A larger diff is a gap: the true length is
+			// unknown, so fall back to nominal and emit a discontinuity below.
+			if diff > 0 && diff <= gapTolerance {
+				dur = diff.Seconds()
+			}
+		}
+		durs[i] = dur
+		if dur > maxDur {
+			maxDur = dur
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n")
 	b.WriteString("#EXT-X-VERSION:3\n")
-	b.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", segDuration))
+	b.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(math.Ceil(maxDur))))
 	b.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
 	b.WriteString("#EXT-X-PLAYLIST-TYPE:VOD\n")
 
-	for _, seg := range segments {
-		b.WriteString(fmt.Sprintf("#EXTINF:%d.0,\n", segDuration))
+	for i, seg := range segs {
+		if i > 0 && segs[i].t.Sub(segs[i-1].t) > gapTolerance {
+			b.WriteString("#EXT-X-DISCONTINUITY\n")
+		}
+		b.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", durs[i]))
 		b.WriteString(fmt.Sprintf("/api/recordings/%s/segments/%s\n", streamKey, seg.name))
 	}
 	b.WriteString("#EXT-X-ENDLIST\n")
 
-	return b.String(), nil
+	return b.String()
 }
 
 // --- Archive Management ---
@@ -618,6 +708,40 @@ type ArchiveManager struct {
 	recordingsDir string
 	recManager    *RecordingManager
 	metadataPath  string
+
+	// TTL caches for the expensive directory-size walks behind /api/storage. (#81)
+	recSizeCache *sizeCache
+	arcSizeCache *sizeCache
+}
+
+// storageCacheTTL bounds how stale /api/storage size figures may be.
+const storageCacheTTL = 15 * time.Second
+
+// sizeCache memoizes a directory-size computation for a TTL so a polling UI does
+// not trigger a full filepath.Walk on every /api/storage request. (#81)
+type sizeCache struct {
+	mu  sync.Mutex
+	ttl time.Duration
+	val int64
+	at  time.Time
+	now func() time.Time
+}
+
+func newSizeCache(ttl time.Duration) *sizeCache {
+	return &sizeCache{ttl: ttl, now: time.Now}
+}
+
+// get returns the cached value if it is younger than the TTL, otherwise it
+// recomputes via compute and refreshes the cache.
+func (c *sizeCache) get(compute func() int64) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.at.IsZero() && c.now().Sub(c.at) < c.ttl {
+		return c.val
+	}
+	c.val = compute()
+	c.at = c.now()
+	return c.val
 }
 
 func NewArchiveManager(archivesDir, recordingsDir string, recManager *RecordingManager) *ArchiveManager {
@@ -626,6 +750,8 @@ func NewArchiveManager(archivesDir, recordingsDir string, recManager *RecordingM
 		recordingsDir: recordingsDir,
 		recManager:    recManager,
 		metadataPath:  filepath.Join(archivesDir, "metadata.json"),
+		recSizeCache:  newSizeCache(storageCacheTTL),
+		arcSizeCache:  newSizeCache(storageCacheTTL),
 	}
 	am.loadMetadata()
 	return am
@@ -638,21 +764,39 @@ func (am *ArchiveManager) loadMetadata() {
 	}
 	var archives []ArchiveMetadata
 	if err := json.Unmarshal(data, &archives); err != nil {
-		log.Printf("[archive] Failed to load metadata: %v", err)
+		// Corrupt/truncated metadata (e.g. from a crash mid-write on the old
+		// non-atomic path). Preserve the bad file for forensics instead of
+		// silently overwriting it on the next save, and alert loudly. (#74)
+		backup := fmt.Sprintf("%s.corrupt.%d", am.metadataPath, time.Now().Unix())
+		if rerr := os.Rename(am.metadataPath, backup); rerr != nil {
+			log.Printf("[archive] ALERT: metadata unreadable (%v) and backup failed: %v", err, rerr)
+		} else {
+			log.Printf("[archive] ALERT: metadata unreadable (%v); moved corrupt file to %s", err, backup)
+		}
 		return
 	}
 	am.archives = archives
 	log.Printf("[archive] Loaded %d archive(s) from metadata", len(archives))
 }
 
+// saveMetadata writes metadata atomically: marshal to a temp file in the same
+// directory, then rename over the target. A crash mid-write can now only leave a
+// stale-but-valid metadata.json (or an orphan .tmp), never a truncated file that
+// fails to unmarshal and loses the entire archive list. (#74)
 func (am *ArchiveManager) saveMetadata() {
 	data, err := json.MarshalIndent(am.archives, "", "  ")
 	if err != nil {
 		log.Printf("[archive] Failed to marshal metadata: %v", err)
 		return
 	}
-	if err := os.WriteFile(am.metadataPath, data, 0644); err != nil {
-		log.Printf("[archive] Failed to save metadata: %v", err)
+	tmp := am.metadataPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		log.Printf("[archive] Failed to write metadata temp file: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, am.metadataPath); err != nil {
+		log.Printf("[archive] Failed to rename metadata into place: %v", err)
+		os.Remove(tmp)
 	}
 }
 
@@ -668,17 +812,12 @@ func (am *ArchiveManager) ListArchives() []ArchiveMetadata {
 // CreateArchive creates an archive for the given parameters.
 // It protects segments, merges them into MP4, and stores metadata.
 func (am *ArchiveManager) CreateArchive(incidentID, streamKey string, from, to time.Time) (*ArchiveMetadata, error) {
-	archiveID := fmt.Sprintf("%s_%s_%s", incidentID, streamKey, from.UTC().Format("20060102_150405"))
-
-	// Check for duplicate
-	am.mu.RLock()
-	for _, a := range am.archives {
-		if a.ID == archiveID {
-			am.mu.RUnlock()
-			return &a, nil // Already exists
-		}
+	// Reject traversal-bearing identifiers before they are joined into paths. (#73)
+	if !isValidPathComponent(incidentID) || !isValidPathComponent(streamKey) {
+		return nil, fmt.Errorf("invalid incidentId or streamKey")
 	}
-	am.mu.RUnlock()
+
+	archiveID := fmt.Sprintf("%s_%s_%s", incidentID, streamKey, from.UTC().Format("20060102_150405"))
 
 	meta := ArchiveMetadata{
 		ID:         archiveID,
@@ -690,7 +829,17 @@ func (am *ArchiveManager) CreateArchive(incidentID, streamKey string, from, to t
 		Status:     "pending",
 	}
 
+	// Duplicate check and append must happen under a single write lock: two
+	// concurrent requests for the same incident/stream/time both passing an
+	// RLock check and then appending would insert the same archiveID twice. (#79)
 	am.mu.Lock()
+	for _, a := range am.archives {
+		if a.ID == archiveID {
+			existing := a
+			am.mu.Unlock()
+			return &existing, nil // Already exists
+		}
+	}
 	am.archives = append(am.archives, meta)
 	am.saveMetadata()
 	am.mu.Unlock()
@@ -742,10 +891,17 @@ func (am *ArchiveManager) processArchive(archiveID, streamKey string, from, to t
 
 	sort.Slice(segments, func(i, j int) bool { return segments[i].t.Before(segments[j].t) })
 
-	// Protect all segments from cleanup
+	// Protect all segments from cleanup during the merge.
 	for _, seg := range segments {
 		am.recManager.ProtectSegment(seg.path)
 	}
+
+	// Release the originals once the merge attempt finishes: on success they are
+	// captured in the MP4; on failure keeping them pinned forever would defeat
+	// rolling cleanup, grow the recordings volume unbounded, and leak the
+	// protected map. Segments still referenced by another archive are retained
+	// (isSegmentInOtherArchive), and this archive excludes itself. (#76)
+	defer am.unprotectSegments(streamKey, from, to, archiveID)
 
 	// Create archive output directory
 	outDir := filepath.Join(am.archivesDir, archiveID)
@@ -846,12 +1002,13 @@ func (am *ArchiveManager) DeleteArchive(archiveID string) error {
 	archiveDir := filepath.Join(am.archivesDir, archiveID)
 	os.RemoveAll(archiveDir)
 
-	// Unprotect segments that were in this archive's range
+	// Unprotect segments that were in this archive's range (exclude this archive
+	// itself — it is still in the slice at this point). (#76)
 	if archive.StreamKey != "" {
 		fromTime, _ := time.Parse(time.RFC3339, archive.From)
 		toTime, _ := time.Parse(time.RFC3339, archive.To)
 		if !fromTime.IsZero() && !toTime.IsZero() {
-			am.unprotectSegments(archive.StreamKey, fromTime, toTime)
+			am.unprotectSegments(archive.StreamKey, fromTime, toTime, archive.ID)
 		}
 	}
 
@@ -888,12 +1045,12 @@ func (am *ArchiveManager) DeleteIncidentArchives(incidentID string) (int, error)
 		archiveDir := filepath.Join(am.archivesDir, archive.ID)
 		os.RemoveAll(archiveDir)
 
-		// Unprotect segments
+		// Unprotect segments (exclude this archive — still in the slice here). (#76)
 		if archive.StreamKey != "" {
 			fromTime, _ := time.Parse(time.RFC3339, archive.From)
 			toTime, _ := time.Parse(time.RFC3339, archive.To)
 			if !fromTime.IsZero() && !toTime.IsZero() {
-				am.unprotectSegments(archive.StreamKey, fromTime, toTime)
+				am.unprotectSegments(archive.StreamKey, fromTime, toTime, archive.ID)
 			}
 		}
 
@@ -913,23 +1070,17 @@ func (am *ArchiveManager) ProtectIncidentSegments(incidentID string, streamKeys 
 	now := time.Now().UTC()
 
 	var created []ArchiveMetadata
+	// Reject traversal-bearing identifiers before they are joined into paths. (#73)
+	if !isValidPathComponent(incidentID) {
+		log.Printf("[archive] Rejecting invalid incidentId %q", incidentID)
+		return created
+	}
 	for _, streamKey := range streamKeys {
-		archiveID := fmt.Sprintf("%s_%s_%s", incidentID, streamKey, protectFrom.UTC().Format("20060102_150405"))
-
-		// Check for duplicate
-		am.mu.RLock()
-		exists := false
-		for _, a := range am.archives {
-			if a.ID == archiveID {
-				exists = true
-				created = append(created, a)
-				break
-			}
-		}
-		am.mu.RUnlock()
-		if exists {
+		if !isValidPathComponent(streamKey) {
+			log.Printf("[archive] Skipping invalid streamKey %q", streamKey)
 			continue
 		}
+		archiveID := fmt.Sprintf("%s_%s_%s", incidentID, streamKey, protectFrom.UTC().Format("20060102_150405"))
 
 		meta := ArchiveMetadata{
 			ID:           archiveID,
@@ -942,7 +1093,23 @@ func (am *ArchiveManager) ProtectIncidentSegments(incidentID string, streamKeys 
 			IncidentTime: incidentTime.UTC().Format(time.RFC3339),
 		}
 
+		// Duplicate check + append under one write lock: concurrent protect
+		// requests for the same incident must not insert the same archiveID
+		// twice (which would corrupt later index-based status/delete logic). (#79)
 		am.mu.Lock()
+		var existing *ArchiveMetadata
+		for i := range am.archives {
+			if am.archives[i].ID == archiveID {
+				dup := am.archives[i]
+				existing = &dup
+				break
+			}
+		}
+		if existing != nil {
+			am.mu.Unlock()
+			created = append(created, *existing)
+			continue
+		}
 		am.archives = append(am.archives, meta)
 		am.saveMetadata()
 		am.mu.Unlock()
@@ -1079,7 +1246,12 @@ func (am *ArchiveManager) AutoFinalizeExpired(maxAge time.Duration) {
 	}
 }
 
-func (am *ArchiveManager) unprotectSegments(streamKey string, from, to time.Time) {
+// unprotectSegments releases protection on the .ts segments in [from,to] for a
+// stream, skipping any still referenced by another (non-excluded) archive. The
+// excludeArchiveID lets a caller ignore its own archive entry — otherwise the
+// archive being completed/deleted would still be found by isSegmentInOtherArchive
+// and its segments would stay protected forever. (#76)
+func (am *ArchiveManager) unprotectSegments(streamKey string, from, to time.Time, excludeArchiveID string) {
 	streamDir := filepath.Join(am.recordingsDir, streamKey)
 	files, _ := os.ReadDir(streamDir)
 	const segDuration = 10 * time.Second
@@ -1097,7 +1269,7 @@ func (am *ArchiveManager) unprotectSegments(streamKey string, from, to time.Time
 		if segEnd.After(from) && t.Before(to) {
 			fullPath := filepath.Join(streamDir, f.Name())
 			// Only unprotect if no other archive references this segment
-			if !am.isSegmentInOtherArchive(fullPath, "") {
+			if !am.isSegmentInOtherArchive(fullPath, excludeArchiveID) {
 				am.recManager.UnprotectSegment(fullPath)
 			}
 		}
@@ -1135,8 +1307,19 @@ func (am *ArchiveManager) isSegmentInOtherArchive(segPath, excludeArchiveID stri
 
 // GetStorageStats returns disk usage info for recordings and archives, plus filesystem stats.
 func (am *ArchiveManager) GetStorageStats() map[string]any {
-	recordingsSize := dirSize(am.recordingsDir)
-	archivesSize := dirSize(am.archivesDir)
+	// Serve directory sizes from a short-TTL cache so a polling UI does not walk
+	// the entire recordings/archives tree on every request. (#81)
+	var recordingsSize, archivesSize int64
+	if am.recSizeCache != nil {
+		recordingsSize = am.recSizeCache.get(func() int64 { return dirSize(am.recordingsDir) })
+	} else {
+		recordingsSize = dirSize(am.recordingsDir)
+	}
+	if am.arcSizeCache != nil {
+		archivesSize = am.arcSizeCache.get(func() int64 { return dirSize(am.archivesDir) })
+	} else {
+		archivesSize = dirSize(am.archivesDir)
+	}
 
 	stats := map[string]any{
 		"recordingsBytes": recordingsSize,
@@ -1161,13 +1344,21 @@ func (am *ArchiveManager) GetStorageStats() map[string]any {
 
 func dirSize(path string) int64 {
 	var size int64
-	filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+	err := filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			// Log rather than silently swallow per-entry walk errors (#81).
+			log.Printf("[storage] walk error at %s: %v", p, err)
+			return nil
+		}
+		if info.IsDir() {
 			return nil
 		}
 		size += info.Size()
 		return nil
 	})
+	if err != nil {
+		log.Printf("[storage] walk failed for %s: %v", path, err)
+	}
 	return size
 }
 
@@ -1380,6 +1571,12 @@ func main() {
 		streamKey := r.PathValue("stream_key")
 		filename := r.PathValue("filename")
 
+		// Validate streamKey (previously only filename was checked — asymmetric). (#73)
+		if !isValidPathComponent(streamKey) {
+			http.Error(w, "invalid stream key", http.StatusBadRequest)
+			return
+		}
+
 		// Validate filename to prevent path traversal
 		if strings.Contains(filename, "/") || strings.Contains(filename, "\\") || strings.Contains(filename, "..") {
 			http.Error(w, "invalid filename", http.StatusBadRequest)
@@ -1416,6 +1613,22 @@ func main() {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": "streamKeys is required"})
 			return
+		}
+
+		// Reject traversal-bearing identifiers up front. (#73)
+		if req.IncidentID != "" && !isValidPathComponent(req.IncidentID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid incidentId"})
+			return
+		}
+		for _, sk := range req.StreamKeys {
+			if !isValidPathComponent(sk) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid streamKey"})
+				return
+			}
 		}
 
 		from, err := time.Parse(time.RFC3339, req.From)
@@ -1474,6 +1687,22 @@ func main() {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": "incidentId, streamKeys, and incidentTime are required"})
 			return
+		}
+
+		// Reject traversal-bearing identifiers up front. (#73)
+		if !isValidPathComponent(req.IncidentID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid incidentId"})
+			return
+		}
+		for _, sk := range req.StreamKeys {
+			if !isValidPathComponent(sk) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid streamKey"})
+				return
+			}
 		}
 
 		incidentTime, err := time.Parse(time.RFC3339, req.IncidentTime)
@@ -1621,10 +1850,46 @@ func main() {
 		json.NewEncoder(w).Encode(stats)
 	})
 
+	srv := newHTTPServer(mux)
+
+	// Graceful shutdown (#40): on SIGTERM/SIGINT terminate the ffmpeg recorder
+	// children through manager.Stop() (SIGTERM → grace → SIGKILL) so in-progress
+	// segments are flushed rather than truncated/left 0-byte, then drain in-flight
+	// HTTP downloads via srv.Shutdown. Without this, docker stop kills the process
+	// immediately and orphans partial segments.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		log.Println("shutting down: stopping recorders and draining HTTP...")
+		manager.Stop()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("http shutdown: %v", err)
+		}
+	}()
+
 	log.Println("recording service listening on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		manager.Stop()
 		log.Fatal(err)
+	}
+}
+
+// newHTTPServer builds the service HTTP server with hardened timeouts. Without
+// them ReadHeaderTimeout/ReadTimeout/IdleTimeout default to 0 (unlimited) and a
+// slow/malicious client can trickle headers or body to hold goroutines/sockets
+// open indefinitely (Slowloris). WriteTimeout is deliberately left at 0
+// (unlimited): this service streams large archive/segment downloads via
+// http.ServeFile and a hard write deadline would truncate legitimate transfers.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ":8080",
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 

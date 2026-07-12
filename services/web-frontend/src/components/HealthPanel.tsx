@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchWithTimeout, isTimeoutError, timeoutMessage } from "../utils/fetchWithTimeout";
 import { parseServerTimeMs, formatKstDateTimeSec } from "../utils/datetime";
+import Modal from "./Modal";
 
 interface HealthEntry {
   kind: "service" | "sensor";
@@ -126,11 +127,7 @@ export default function HealthPanel() {
         <h2>시스템 상태</h2>
         <div style={{ marginLeft: "auto", display: "flex", gap: "0.5rem", alignItems: "center" }}>
           <span
-            className="mgmt-card-badge"
-            style={{
-              background: unhealthyCount > 0 ? "#c62828" : "#2e7d32",
-              color: "#fff",
-            }}
+            className={`mgmt-card-badge ${unhealthyCount > 0 ? "status-badge--danger" : "status-badge--ok"}`}
           >
             이상 {unhealthyCount} / 정상 {healthyCount}
           </span>
@@ -160,11 +157,7 @@ export default function HealthPanel() {
                     {e.name}
                     {"  "}
                     <span
-                      className="mgmt-card-badge"
-                      style={{
-                        background: healthy ? "#2e7d32" : "#c62828",
-                        color: "#fff",
-                      }}
+                      className={`mgmt-card-badge ${healthy ? "status-badge--ok" : "status-badge--danger"}`}
                     >
                       {healthy ? "정상" : "이상"}
                     </span>
@@ -184,12 +177,11 @@ export default function HealthPanel() {
       )}
 
       {historyOpen && (
-        <div className="mgmt-modal-overlay" onClick={() => setHistoryOpen(false)}>
-          <div
-            className="mgmt-modal"
-            onClick={(ev) => ev.stopPropagation()}
-            style={{ maxWidth: "560px", width: "92vw", maxHeight: "80vh", overflow: "auto" }}
-          >
+        <Modal
+          onClose={() => setHistoryOpen(false)}
+          ariaLabel="최근 Health 이력"
+          style={{ maxWidth: "560px", width: "92vw", maxHeight: "80vh", overflow: "auto" }}
+        >
             <h3 style={{ marginTop: 0 }}>최근 Health 이력 (20건)</h3>
             {historyLoading ? (
               <p className="mgmt-loading">로딩 중...</p>
@@ -208,11 +200,7 @@ export default function HealthPanel() {
                         </span>
                         {ev.entityId}{" "}
                         <span
-                          className="mgmt-card-badge"
-                          style={{
-                            background: ev.status === "healthy" ? "#2e7d32" : "#c62828",
-                            color: "#fff",
-                          }}
+                          className={`mgmt-card-badge ${ev.status === "healthy" ? "status-badge--ok" : "status-badge--danger"}`}
                         >
                           {ev.status === "healthy" ? "복구" : "이상"}
                         </span>
@@ -232,8 +220,7 @@ export default function HealthPanel() {
                 닫기
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </>
   );

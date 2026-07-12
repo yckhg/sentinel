@@ -7,7 +7,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -34,6 +37,7 @@ func main() {
 	initServiceURLs()
 	initNotifierURL()
 	initTrustedProxies()
+	initWSOrigins()
 
 	if err := seedAdminUser(db); err != nil {
 		log.Fatalf("failed to seed admin user: %v", err)
@@ -188,9 +192,97 @@ func main() {
 
 	startLinkCleanup()
 
+	srv := newHTTPServer(maxBytesMiddleware(mux))
+
+	// Graceful shutdown (#40): on SIGTERM/SIGINT stop the health monitor and
+	// drain in-flight HTTP requests via srv.Shutdown before exiting, instead of
+	// dying instantly on docker stop with the monitor goroutine and in-flight
+	// handlers cut off mid-work.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		log.Println("shutting down: stopping health monitor and draining HTTP...")
+		healthMonitor.Stop()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("http shutdown: %v", err)
+		}
+	}()
+
 	log.Println("web-backend listening on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
+	}
+}
+
+// maskPhone redacts the middle of a phone number for logs, keeping the leading
+// 3 and trailing 4 digits (e.g. "010-****-5678"). Numbers with fewer than 7
+// digits are fully masked. Empty input stays empty. PII (phone/email) must not
+// be logged in plaintext (#43).
+func maskPhone(p string) string {
+	if p == "" {
+		return ""
+	}
+	digits := make([]byte, 0, len(p))
+	for i := 0; i < len(p); i++ {
+		if p[i] >= '0' && p[i] <= '9' {
+			digits = append(digits, p[i])
+		}
+	}
+	if len(digits) < 7 {
+		return "****"
+	}
+	d := string(digits)
+	return d[:3] + "-****-" + d[len(d)-4:]
+}
+
+// maskEmail redacts the local part of an email for logs, keeping only its first
+// character (e.g. "j***@example.com"). Empty input stays empty (#43).
+func maskEmail(e string) string {
+	if e == "" {
+		return ""
+	}
+	at := strings.LastIndex(e, "@")
+	if at <= 0 {
+		return "***"
+	}
+	local, domain := e[:at], e[at:]
+	if len(local) == 1 {
+		return "*" + domain
+	}
+	return local[:1] + strings.Repeat("*", len(local)-1) + domain
+}
+
+// maxRequestBodyBytes caps request bodies (#41). JSON payloads here are tiny;
+// 1 MB is generous while preventing memory exhaustion from oversized bodies sent
+// to unauthenticated endpoints (/auth/register, /auth/login, /internal/*).
+const maxRequestBodyBytes = 1 << 20 // 1 MB
+
+// maxBytesMiddleware wraps every request body in an http.MaxBytesReader so a
+// handler that decodes an oversized body gets an error (→ 400) instead of
+// buffering unbounded data. GET/HEAD requests without a body are unaffected.
+func maxBytesMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// newHTTPServer builds the service HTTP server with hardened timeouts. Without
+// them ReadHeaderTimeout/ReadTimeout/IdleTimeout default to 0 (unlimited) and a
+// slow/malicious client can trickle headers or body to hold goroutines/sockets
+// open indefinitely (Slowloris). WriteTimeout is deliberately left at 0
+// (unlimited): this service proxies large archive/segment video downloads and a
+// hard write deadline would truncate legitimate long transfers.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ":8080",
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 

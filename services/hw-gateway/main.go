@@ -228,9 +228,40 @@ func main() {
 		handleAlertResolvedPublish(w, r, mqttClient)
 	})
 
+	srv := newHTTPServer(maxBytesMiddleware(mux))
+
 	log.Println("hw-gateway listening on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// maxRequestBodyBytes caps request bodies (#41): the control endpoints accept
+// only small JSON, so 1 MB prevents memory exhaustion from oversized bodies.
+const maxRequestBodyBytes = 1 << 20 // 1 MB
+
+// maxBytesMiddleware wraps every request body in an http.MaxBytesReader so a
+// handler that decodes an oversized body gets an error (→ 400) instead of
+// buffering unbounded data. GET/HEAD requests without a body are unaffected.
+func maxBytesMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// newHTTPServer builds the service HTTP server with hardened timeouts. Without
+// them ReadHeaderTimeout/ReadTimeout/IdleTimeout default to 0 (unlimited) and a
+// slow/malicious client can trickle headers or body to hold goroutines/sockets
+// open indefinitely (Slowloris) — critical for a safety control entrypoint.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ":8080",
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 
@@ -375,7 +406,7 @@ func handleAlert(msg mqtt.Message, notifierURL, webBackendURL string) {
 	}()
 
 	// Best-effort: register device in web-backend (fire-and-forget)
-	go postDeviceSeen(webBackendURL, alert.SiteID, alert.DeviceID, "none")
+	dispatchDeviceSeen(webBackendURL, alert.SiteID, alert.DeviceID, "none")
 
 	<-done
 	<-done
@@ -568,7 +599,7 @@ func handleHeartbeat(msg mqtt.Message, webBackendURL string) {
 	log.Printf("[HEARTBEAT] deviceId=%s siteId=%s status=%s alertState=%s", hb.DeviceID, hb.SiteID, hb.Status, hb.AlertState)
 
 	// Best-effort: notify web-backend for persistent device registration
-	go postDeviceSeen(webBackendURL, hb.SiteID, hb.DeviceID, hb.AlertState)
+	dispatchDeviceSeen(webBackendURL, hb.SiteID, hb.DeviceID, hb.AlertState)
 }
 
 // handleCandidate processes safety/+/event/candidate messages.
@@ -597,7 +628,42 @@ func handleCandidate(msg mqtt.Message, webBackendURL string) {
 	log.Printf("[CANDIDATE] deviceId=%s class=%s conf=%.3f threshold=%.2f", candidate.DeviceID, candidate.Class, candidate.Confidence, candidate.Threshold)
 
 	// Best-effort: register device in web-backend (fire-and-forget)
-	go postDeviceSeen(webBackendURL, candidate.SiteID, candidate.DeviceID, "none")
+	dispatchDeviceSeen(webBackendURL, candidate.SiteID, candidate.DeviceID, "none")
+}
+
+// deviceSeenMaxConcurrent caps the number of concurrent postDeviceSeen HTTP
+// calls in flight (#55). heartbeat/alert/candidate traffic each fires a
+// best-effort device-seen notification, and each call can live up to its 5s
+// timeout when web-backend is slow or down. Without a cap, high-frequency
+// candidate traffic across many devices spawns unbounded goroutines/sockets.
+const deviceSeenMaxConcurrent = 32
+
+// deviceSeenSem bounds concurrent device-seen dispatches to the cap above.
+var deviceSeenSem = make(chan struct{}, deviceSeenMaxConcurrent)
+
+// deviceSeenSender performs the actual send. It is a package var so tests can
+// substitute a deterministic (e.g. blocking) sender to exercise the cap.
+var deviceSeenSender = postDeviceSeen
+
+// dispatchDeviceSeen fires a bounded, best-effort device-seen notification.
+// When the outbound concurrency cap is reached the call is dropped (logged)
+// rather than blocking a hot MQTT/HTTP path or accumulating goroutines/sockets —
+// device-seen is fire-and-forget and is re-established by the next heartbeat.
+func dispatchDeviceSeen(webBackendURL, siteID, deviceID, alertState string) {
+	// Snapshot the semaphore and sender so a single dispatch uses a consistent
+	// pair even if the package vars are swapped (e.g. by tests).
+	sem := deviceSeenSem
+	send := deviceSeenSender
+	select {
+	case sem <- struct{}{}:
+		go func() {
+			defer func() { <-sem }()
+			send(webBackendURL, siteID, deviceID, alertState)
+		}()
+	default:
+		log.Printf("[DEVICE-SEEN] Dropped (outbound cap %d reached): site=%s device=%s",
+			deviceSeenMaxConcurrent, siteID, deviceID)
+	}
 }
 
 // postDeviceSeen notifies web-backend that a device was seen.
