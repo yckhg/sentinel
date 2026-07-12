@@ -696,7 +696,16 @@ type ArchiveMetadata struct {
 	SizeBytes    int64  `json:"sizeBytes"`
 	FilePath     string `json:"filePath"`
 	Status       string `json:"status"` // enum SSOT (spec): protecting, pending, finalizing, processing, completed, failed
-	Error        string `json:"error,omitempty"`
+	// CompletedAt is the RFC3339 (UTC) instant the archive reached `completed`.
+	// It is recorded ATOMICALLY with the completed transition (see markCompleted)
+	// and is non-null ONLY when Status == "completed"; null/absent otherwise, so a
+	// consumer never observes a completed archive without its ready timestamp
+	// (archive-download-ux 단위A 핵심로직 "동시적 불변식", 단언 A3). (#archive-download-ux)
+	CompletedAt  *string `json:"completedAt,omitempty"`
+	// Error carries the human-readable failure reason. Its wire/JSON key is
+	// `lastError` (spec unifies the prior "error"/"reason" naming to recording's
+	// lastError); non-empty for every `failed` archive (단언 A4). (#archive-download-ux)
+	Error        string `json:"lastError,omitempty"`
 	IncidentTime string `json:"incidentTime,omitempty"` // original incident timestamp for auto-finalize
 }
 
@@ -949,26 +958,56 @@ func (am *ArchiveManager) processArchive(archiveID, streamKey string, from, to t
 		return
 	}
 
-	am.mu.Lock()
-	for i, a := range am.archives {
-		if a.ID == archiveID {
-			am.archives[i].Status = "completed"
-			am.archives[i].SizeBytes = info.Size()
-			am.archives[i].FilePath = outFile
-			break
-		}
-	}
-	am.saveMetadata()
-	am.mu.Unlock()
+	am.markCompleted(archiveID, info.Size(), outFile)
 
 	log.Printf("[archive] Completed: %s (%d bytes, %d segments)", archiveID, info.Size(), len(segments))
 }
 
+// isTerminalStatus reports whether a status is a terminal (never-reverting)
+// archive state. The two terminal states are `completed` and `failed`; the other
+// four (protecting/pending/finalizing/processing) are in-progress
+// (archive-download-ux 단위A 출력계약·핵심로직 단조성).
+func isTerminalStatus(status string) bool {
+	return status == "completed" || status == "failed"
+}
+
+// markCompleted atomically moves an archive to `completed`, recording status,
+// sizeBytes, filePath AND completedAt (now, UTC RFC3339) under one write lock, so
+// a consumer never observes a completed archive missing any of those three
+// (단위A 핵심로직 "동시적 불변식", 단언 A3). It is a NO-OP when the archive is already
+// terminal (completed/failed), enforcing monotonicity — e.g. a `failed` archive
+// must never become `completed` (단언 A7). (#archive-download-ux)
+func (am *ArchiveManager) markCompleted(archiveID string, sizeBytes int64, filePath string) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	for i, a := range am.archives {
+		if a.ID == archiveID {
+			if isTerminalStatus(a.Status) {
+				return // terminal states are frozen (monotonicity, A7)
+			}
+			now := time.Now().UTC().Format(time.RFC3339)
+			am.archives[i].Status = "completed"
+			am.archives[i].SizeBytes = sizeBytes
+			am.archives[i].FilePath = filePath
+			am.archives[i].CompletedAt = &now
+			am.saveMetadata()
+			return
+		}
+	}
+}
+
+// updateStatus transitions an archive's status (and, for failures, its lastError
+// reason). Terminal archives are frozen: once `completed` or `failed`, an archive
+// never moves to a different status (단조성, 단언 A7) — a completed archive must not
+// fall back to an in-progress state, and a failed archive stays failed.
 func (am *ArchiveManager) updateStatus(archiveID, status, errMsg string) {
 	am.mu.Lock()
 	defer am.mu.Unlock()
 	for i, a := range am.archives {
 		if a.ID == archiveID {
+			if isTerminalStatus(a.Status) {
+				return // terminal states never revert (monotonicity, A7)
+			}
 			am.archives[i].Status = status
 			am.archives[i].Error = errMsg
 			break
@@ -978,6 +1017,23 @@ func (am *ArchiveManager) updateStatus(archiveID, status, errMsg string) {
 	if errMsg != "" {
 		log.Printf("[archive] %s: status=%s error=%s", archiveID, status, errMsg)
 	}
+}
+
+// downloadGateCode is the pure download-gate decision for
+// GET /api/archives/{id}/download: 200 when the archive exists and is `completed`
+// (safe to serve完결 media), 409 when it exists but is non-completed (미완료 4종 및
+// failed — no partial/0-byte media served), 404 when absent. The HTTP handler
+// delegates to this so the gate is unit-judgeable (단언 A5/A6/A8). (#archive-download-ux)
+func downloadGateCode(am *ArchiveManager, id string) int {
+	for _, a := range am.ListArchives() {
+		if a.ID == id {
+			if a.Status == "completed" {
+				return http.StatusOK
+			}
+			return http.StatusConflict
+		}
+	}
+	return http.StatusNotFound
 }
 
 // DeleteArchive removes an archive and unprotects its segments.
@@ -1909,27 +1965,43 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]any{"status": "deleted", "count": count})
 	})
 
-	// GET /api/archives/{id}/download — serve archive MP4 file
+	// GET /api/archives/{id}/download — serve archive MP4 file.
+	// Download gate (단위A 출력계약 + API 계약 델타): completed → 2xx video/mp4;
+	// any existing but non-completed archive (미완료 4종 및 failed) → 409; absent → 404.
+	// The decision is factored into downloadGateCode so it is unit-judgeable and no
+	// partial/0-byte media ever leaks for a non-completed archive (단언 A5/A6/A8).
 	mux.HandleFunc("GET /api/archives/{id}/download", func(w http.ResponseWriter, r *http.Request) {
 		archiveID := r.PathValue("id")
-		archives := archiveManager.ListArchives()
-		for _, a := range archives {
-			if a.ID == archiveID {
-				if a.Status != "completed" {
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusConflict)
-					json.NewEncoder(w).Encode(map[string]string{"error": "archive not ready", "status": a.Status})
+		switch downloadGateCode(archiveManager, archiveID) {
+		case http.StatusOK:
+			for _, a := range archiveManager.ListArchives() {
+				if a.ID == archiveID {
+					w.Header().Set("Content-Type", "video/mp4")
+					w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.mp4\"", archiveID))
+					http.ServeFile(w, r, a.FilePath)
 					return
 				}
-				w.Header().Set("Content-Type", "video/mp4")
-				w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.mp4\"", archiveID))
-				http.ServeFile(w, r, a.FilePath)
-				return
 			}
+			// Raced away between the gate decision and the serve: treat as absent.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "archive not found"})
+		case http.StatusConflict:
+			status := ""
+			for _, a := range archiveManager.ListArchives() {
+				if a.ID == archiveID {
+					status = a.Status
+					break
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"error": "archive not ready", "status": status})
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "archive not found"})
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": "archive not found"})
 	})
 
 	// GET /api/storage — disk usage stats
