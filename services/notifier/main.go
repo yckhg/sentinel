@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1359,6 +1360,15 @@ func sanitizeHeader(s string) string {
 	}, s)
 }
 
+// smtpSendBudget bounds the ENTIRE SMTP exchange (dial + every protocol step) for a
+// single email so a configured-but-unresponsive host (accepts TCP, never replies)
+// terminates as an error within the per-channel budget (≤12s, §출력 9) instead of
+// blocking past the web-backend proxy hop (15s) and being mis-reported as a false
+// `502 upstream_unavailable`. Kept comfortably under 12s. net/smtp.SendMail sets no
+// deadline at all, so a blackholed host would hang indefinitely — this replaces it
+// with an explicit-deadline exchange that never leaks a goroutine.
+const smtpSendBudget = 11 * time.Second
+
 func sendEmail(cfg Config, to, subject, body string) error {
 	addr := fmt.Sprintf("%s:%s", cfg.SMTPHost, cfg.SMTPPort)
 
@@ -1371,10 +1381,57 @@ func sendEmail(cfg Config, to, subject, body string) error {
 	msg := []byte(fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n%s\r\n%s",
 		cfg.SMTPFrom, to, subject, mime, body))
 
-	auth := smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPHost)
-	if err := smtp.SendMail(addr, auth, cfg.SMTPFrom, []string{to}, msg); err != nil {
-		return fmt.Errorf("smtp send: %s", scrub(err.Error()))
+	// Bound dial and the whole exchange under one wall-clock budget. Measuring from
+	// `start` before the dial and setting the same absolute deadline on the conn
+	// means dial + HELO + STARTTLS + AUTH + MAIL/RCPT/DATA together finish by
+	// start+budget — no step can hang past the per-channel budget.
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", addr, smtpSendBudget)
+	if err != nil {
+		return fmt.Errorf("smtp dial: %s", scrub(err.Error()))
 	}
+	_ = conn.SetDeadline(start.Add(smtpSendBudget))
+
+	client, err := smtp.NewClient(conn, cfg.SMTPHost)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("smtp connect: %s", scrub(err.Error()))
+	}
+	defer client.Close() // closes the underlying conn on every return path
+
+	if err := client.Hello("localhost"); err != nil {
+		return fmt.Errorf("smtp helo: %s", scrub(err.Error()))
+	}
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(&tls.Config{ServerName: cfg.SMTPHost}); err != nil {
+			return fmt.Errorf("smtp starttls: %s", scrub(err.Error()))
+		}
+	}
+	if cfg.SMTPUser != "" {
+		if ok, _ := client.Extension("AUTH"); ok {
+			auth := smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPHost)
+			if err := client.Auth(auth); err != nil {
+				return fmt.Errorf("smtp auth: %s", scrub(err.Error()))
+			}
+		}
+	}
+	if err := client.Mail(cfg.SMTPFrom); err != nil {
+		return fmt.Errorf("smtp mail: %s", scrub(err.Error()))
+	}
+	if err := client.Rcpt(to); err != nil {
+		return fmt.Errorf("smtp rcpt: %s", scrub(err.Error()))
+	}
+	wc, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("smtp data: %s", scrub(err.Error()))
+	}
+	if _, err := wc.Write(msg); err != nil {
+		return fmt.Errorf("smtp write: %s", scrub(err.Error()))
+	}
+	if err := wc.Close(); err != nil {
+		return fmt.Errorf("smtp write close: %s", scrub(err.Error()))
+	}
+	_ = client.Quit()
 	return nil
 }
 
