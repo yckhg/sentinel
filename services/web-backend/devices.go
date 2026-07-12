@@ -36,13 +36,31 @@ func handleListDevices(db *sql.DB) http.HandlerFunc {
 		ctx, cancel := dbCtx(r.Context())
 		defer cancel()
 
+		// Composite-key filter (spec 계약 6 델타): a device search maps the operator's
+		// synthetic siteId:deviceId to the numeric DB id via GET /api/devices?siteId=&deviceId=.
+		siteID := strings.TrimSpace(r.URL.Query().Get("siteId"))
+		deviceID := strings.TrimSpace(r.URL.Query().Get("deviceId"))
+
 		query := `SELECT id, site_id, device_id, alias, datetime(first_seen), datetime(last_seen), datetime(deleted_at), alert_state FROM devices`
+		args := []any{}
+		where := []string{}
 		if !includeDeleted {
-			query += ` WHERE deleted_at IS NULL`
+			where = append(where, `deleted_at IS NULL`)
+		}
+		if siteID != "" {
+			where = append(where, `site_id = ?`)
+			args = append(args, siteID)
+		}
+		if deviceID != "" {
+			where = append(where, `device_id = ?`)
+			args = append(args, deviceID)
+		}
+		if len(where) > 0 {
+			query += ` WHERE ` + strings.Join(where, ` AND `)
 		}
 		query += ` ORDER BY id ASC`
 
-		rows, err := db.QueryContext(ctx, query)
+		rows, err := db.QueryContext(ctx, query, args...)
 		if err != nil {
 			log.Printf("query devices error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
@@ -61,6 +79,41 @@ func handleListDevices(db *sql.DB) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, devices)
+	}
+}
+
+// handleGetDevice handles GET /api/devices/{id} — single non-deleted device by
+// numeric DB id (spec 계약 6 델타, assertion D). Returns the device object
+// (lastSeen/alertState included) so the panel can derive current state via the
+// shared category function. Unregistered/soft-deleted id → 404 (계약 6 규약).
+func handleGetDevice(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idStr := r.PathValue("id")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device id"})
+			return
+		}
+
+		ctx, cancel := dbCtx(r.Context())
+		defer cancel()
+
+		var d deviceResponse
+		err = db.QueryRowContext(ctx,
+			`SELECT id, site_id, device_id, alias, datetime(first_seen), datetime(last_seen), datetime(deleted_at), alert_state
+			 FROM devices WHERE id = ? AND deleted_at IS NULL`, id,
+		).Scan(&d.ID, &d.SiteID, &d.DeviceID, &d.Alias, &d.FirstSeen, &d.LastSeen, &d.DeletedAt, &d.AlertState)
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
+			return
+		}
+		if err != nil {
+			log.Printf("get device error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, d)
 	}
 }
 
