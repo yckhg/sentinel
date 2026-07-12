@@ -309,8 +309,9 @@ GET → `200` 배열 · POST → `201` · PUT → `200` · DELETE → `204`
 
 | Method | Path | Auth | 입력 |
 |--------|------|------|------|
-| GET | `/api/devices` | user | — (삭제 제외 목록) |
+| GET | `/api/devices` | user | — (삭제 제외 목록) · query: `siteId`+`deviceId`(합성키→수치 id 사상 필터) |
 | GET | `/api/devices/all` | admin | — (soft-deleted 포함) |
+| GET | `/api/devices/{id}` | user | — (수치 DB id 단건 조회, 장비 현재-상태 검색) |
 | PATCH | `/api/devices/{id}` | user | `{alias: string}` |
 | DELETE | `/api/devices/{id}` | user | — (soft delete) |
 | POST | `/api/devices/{id}/restore` | user | — |
@@ -328,6 +329,7 @@ Device object:
 }
 ```
 
+- `GET /api/devices/{id}` → `200` device object (미삭제) · 미등록/삭제(`deletedAt`) → `404` · 검색은 합성키 `siteId:deviceId`를 `?siteId=&deviceId=` 필터로 수치 id에 사상 후 단건 조회(spec system-status-aggregate 단언 D)
 - PATCH → `200` `{id, alias}` · 없으면 `404`
 - DELETE → `204` · 이미 삭제/없음 `404`
 - restore → `200` `{id, "status":"restored"}`
@@ -548,7 +550,8 @@ Device object:
 | Method | Path | Auth | 입력 |
 |--------|------|------|------|
 | GET | `/api/health` | user | — |
-| GET | `/api/health/events` | user | query: `limit`(def 50) `offset`(def 0) `entity_kind`(`service`\|`sensor`) |
+| GET | `/api/health/summary` | user | — (현재-상태 집계 요약 창, spec system-status-aggregate) |
+| GET | `/api/health/events` | user | query: `limit`(def 50) `offset`(def 0) `entity_kind`(`service`\|`sensor`) `entity_id`(`siteId:deviceId`, 장비 드릴다운) |
 
 ### 출력 (계약)
 
@@ -568,6 +571,20 @@ Device object:
 ```
 
 `GET /api/health/events` → `200` `[{id, entityKind, entityId, status, detectedAt, detail}]`
+
+`GET /api/health/summary` → `200` 집계 (spec system-status-aggregate — 크기가 예외 장비 수에만 비례):
+
+```json
+{
+  "summary":  {"healthy": 200, "abnormal": 1, "offline": 1},
+  "services": [{"id": "hw-gateway", "status": "healthy | unhealthy"}],
+  "exceptions": [{"id": "site1:VOICE-01", "displayName": "음성센서 1", "category": "abnormal | offline", "ageSec": 3600, "reason": "no heartbeat"}],
+  "exceptionsOverflow": 0
+}
+```
+
+- `summary` 세 카운트의 합 = 미삭제 장비 총수. `exceptions`는 abnormal/offline **만** 담고 상한 50건(초과분은 `exceptionsOverflow`가 대표). healthy 장비는 카운트로만 대표(개별 미나열). `services`는 계약 12 감시 집합 전체(항상 완전). 카운트/예외는 단일 읽기 트랜잭션(단일 일관 스냅샷)에서 산출.
+- **[델타] `entity_id` 필터**: `GET /api/health/events?entity_id=<siteId:deviceId>`는 그 장비의 sensor 전이(online/offline)만 반환한다(다른 장비 전이 0건 — 센서 `entityId`가 `siteId:deviceId`로 매칭). 장비 이력 드릴다운의 접면이며, 집계 응답에는 어떤 전이-로그도 실리지 않는다.
 
 ### 핵심 로직 (불변식)
 
