@@ -155,6 +155,7 @@ func main() {
 	// Devices management
 	apiMux.HandleFunc("GET /api/devices", handleListDevices(db))
 	apiMux.HandleFunc("GET /api/devices/all", handleListDevices(db))
+	apiMux.HandleFunc("GET /api/devices/{id}", handleGetDevice(db))
 	apiMux.HandleFunc("PATCH /api/devices/{id}", handleUpdateDeviceAlias(db))
 	apiMux.HandleFunc("DELETE /api/devices/{id}", handleDeleteDevice(db))
 	apiMux.HandleFunc("POST /api/devices/{id}/restore", handleRestoreDevice(db))
@@ -184,6 +185,7 @@ func main() {
 
 	// Unified health monitoring (any authenticated user)
 	apiMux.HandleFunc("GET /api/health", handleGetHealth(healthMonitor))
+	apiMux.HandleFunc("GET /api/health/summary", handleGetHealthSummary(healthMonitor))
 	apiMux.HandleFunc("GET /api/health/events", handleListHealthEvents(db))
 
 	// Temporary links management (admin only)
