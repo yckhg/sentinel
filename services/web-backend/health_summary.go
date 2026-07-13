@@ -112,14 +112,18 @@ func handleGetHealthSummary(mon *HealthMonitor) http.HandlerFunc {
 
 		// Counts via set aggregate (SQL SUM/CASE) — healthy devices are never
 		// individually materialized. age = (bound now) - last_seen, in whole seconds.
+		// A NULL last_seen (explicitly registered, never-seen device) maps to OFFLINE:
+		// it is neither healthy nor abnormal (both require last_seen IS NOT NULL). This
+		// keeps the sum invariant (healthy+abnormal+offline == 미삭제 총수) — a null
+		// last_seen must not fall through all three CASEs and be silently dropped (A2).
 		var counts healthSummaryCounts
 		err = tx.QueryRowContext(ctx, `
 			SELECT
-			  COALESCE(SUM(CASE WHEN age <= ? AND alert_state != 'active' THEN 1 ELSE 0 END), 0),
-			  COALESCE(SUM(CASE WHEN age <= ? AND alert_state =  'active' THEN 1 ELSE 0 END), 0),
-			  COALESCE(SUM(CASE WHEN age >  ? THEN 1 ELSE 0 END), 0)
+			  COALESCE(SUM(CASE WHEN last_seen IS NOT NULL AND age <= ? AND alert_state != 'active' THEN 1 ELSE 0 END), 0),
+			  COALESCE(SUM(CASE WHEN last_seen IS NOT NULL AND age <= ? AND alert_state =  'active' THEN 1 ELSE 0 END), 0),
+			  COALESCE(SUM(CASE WHEN last_seen IS NULL OR age > ? THEN 1 ELSE 0 END), 0)
 			FROM (
-			  SELECT alert_state,
+			  SELECT alert_state, last_seen,
 			         (? - strftime('%s', last_seen)) AS age
 			  FROM devices WHERE deleted_at IS NULL
 			)
@@ -136,15 +140,18 @@ func handleGetHealthSummary(mon *HealthMonitor) http.HandlerFunc {
 		// offline devices. Within each category, most-stale first. exception
 		// condition = age>threshold (offline) OR alert_state active (abnormal-while-
 		// alive). rank: offline → 1, abnormal → 0.
+		// A NULL last_seen device is an offline exception too (offline-rank, age
+		// unknown). It must appear so the exceptions list stays consistent with the
+		// offline count (A2).
 		exceptions := []healthSummaryException{}
 		rows, err := tx.QueryContext(ctx, `
-			SELECT site_id, device_id, alias, alert_state, age FROM (
-			  SELECT site_id, device_id, alias, alert_state,
+			SELECT site_id, device_id, alias, alert_state, age, last_seen FROM (
+			  SELECT site_id, device_id, alias, alert_state, last_seen,
 			         (? - strftime('%s', last_seen)) AS age
 			  FROM devices WHERE deleted_at IS NULL
 			)
-			WHERE age > ? OR alert_state = 'active'
-			ORDER BY (CASE WHEN age > ? THEN 1 ELSE 0 END) ASC, age DESC, site_id ASC, device_id ASC
+			WHERE last_seen IS NULL OR age > ? OR alert_state = 'active'
+			ORDER BY (CASE WHEN last_seen IS NULL OR age > ? THEN 1 ELSE 0 END) ASC, age DESC, site_id ASC, device_id ASC
 			LIMIT ?
 		`, now, threshold, threshold, summaryExceptionsCap)
 		if err != nil {
@@ -154,8 +161,9 @@ func handleGetHealthSummary(mon *HealthMonitor) http.HandlerFunc {
 		}
 		for rows.Next() {
 			var siteID, deviceID, alias, alertState string
-			var age int64
-			if err := rows.Scan(&siteID, &deviceID, &alias, &alertState, &age); err != nil {
+			var age sql.NullInt64
+			var lastSeen *string
+			if err := rows.Scan(&siteID, &deviceID, &alias, &alertState, &age, &lastSeen); err != nil {
 				log.Printf("health summary scan exception error: %v", err)
 				continue
 			}
@@ -163,9 +171,13 @@ func handleGetHealthSummary(mon *HealthMonitor) http.HandlerFunc {
 			if displayName == "" {
 				displayName = deviceID
 			}
+			ageSec := int64(0)
+			if age.Valid {
+				ageSec = age.Int64
+			}
 			category := "abnormal"
 			reason := "alert active"
-			if age > int64(threshold) {
+			if lastSeen == nil || (age.Valid && age.Int64 > int64(threshold)) {
 				category = "offline"
 				reason = "no heartbeat"
 			}
@@ -173,7 +185,7 @@ func handleGetHealthSummary(mon *HealthMonitor) http.HandlerFunc {
 				ID:          siteID + ":" + deviceID,
 				DisplayName: displayName,
 				Category:    category,
-				AgeSec:      age,
+				AgeSec:      ageSec,
 				Reason:      reason,
 			})
 		}

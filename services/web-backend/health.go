@@ -276,10 +276,18 @@ func (m *HealthMonitor) evaluateSensors() {
 	var devices []deviceRow
 	for rows.Next() {
 		var d deviceRow
-		if err := rows.Scan(&d.siteID, &d.deviceID, &d.alias, &d.lastSeenStr); err != nil {
+		var lastSeen sql.NullString
+		if err := rows.Scan(&d.siteID, &d.deviceID, &d.alias, &lastSeen); err != nil {
 			log.Printf("health: scan device error: %v", err)
 			continue
 		}
+		// NULL last_seen = 오프라인 대기 (explicitly registered, never-seen): it is NOT
+		// an unhealthy candidate (web-backend.md health 특례, cross-ref A2). Skip it so
+		// the monitor neither flags it unhealthy nor errors on the NULL scan.
+		if !lastSeen.Valid {
+			continue
+		}
+		d.lastSeenStr = lastSeen.String
 		devices = append(devices, d)
 	}
 	rows.Close()
