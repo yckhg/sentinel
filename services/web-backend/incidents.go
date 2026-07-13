@@ -81,6 +81,13 @@ type createIncidentRequest struct {
 // Creates an incident record and broadcasts crisis_alert to all WebSocket clients
 func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Internal-only, fail-closed (I2): the device auto-register side effect of
+		// incident creation must be gated exactly like /api/devices/seen. The sole
+		// runtime caller is hw-gateway (which sends X-Internal-Token); web-frontend
+		// only reads incidents.
+		if !checkInternalToken(w, r) {
+			return
+		}
 		var req createIncidentRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -164,17 +171,20 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 		incidentID, _ := result.LastInsertId()
 		markWALDirty()
 
-		// Ensure device is registered/restored if deviceId provided (best-effort)
+		// Device presence upsert (best-effort). Sticky-safe: last_seen only, NEVER
+		// deleted_at — a soft-deleted device stays deleted even when it emits a crisis
+		// (계약 3, assertion H2). The shared reappear helper then broadcasts
+		// device_reappeared once on the first crisis re-signal after deletion (E2).
 		if req.SiteID != "" && req.DeviceID != "" {
 			if _, upErr := db.ExecContext(ctx, `
 				INSERT INTO devices (site_id, device_id, last_seen)
 				VALUES (?, ?, datetime('now'))
 				ON CONFLICT(site_id, device_id) DO UPDATE SET
-					last_seen = datetime('now'),
-					deleted_at = NULL
+					last_seen = datetime('now')
 			`, req.SiteID, req.DeviceID); upErr != nil {
 				log.Printf("upsert device from incident error: %v", upErr)
 			}
+			maybeAlertReappear(ctx, db, req.SiteID, req.DeviceID)
 		}
 
 		// Fetch site info for the broadcast payload
