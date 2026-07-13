@@ -76,7 +76,7 @@
    - FFmpeg로 RTMP를 pull하여 무 트랜스코딩으로 10초 `.ts` 세그먼트를 쓴다.
    - 연결 실패/종료 시 exponential backoff **1초 → 최대 30초**로 무한 재시도한다. 성공적으로 시작되면 backoff는 1초로 리셋된다.
    - 상태 전이: 시작 시도 중 `reconnecting` → 프로세스 기동 성공 `recording` → 종료/실패 `disconnected`(+ `lastError` 기록).
-2. **Watchdog**: FFmpeg의 stdout/stderr 출력이 `FFMPEG_TIMEOUT`초 동안 없으면 stall로 간주, SIGTERM → 5초 후 SIGKILL로 종료시키고 재연결 루프에 맡긴다.
+2. **Watchdog**: liveness 신호는 상시 녹화 FFmpeg의 **진행(progress) 스트림**이다 — 상시 녹화기는 전용 fd(fd 3)로 구조화된 진행 정보(frame=/out_time=/progress=continue 등)를 약 0.5초 간격으로 내보내며(`-progress pipe:3`, Go 측 `cmd.ExtraFiles`로 파이프 배선), watchdog는 이 진행 업데이트의 **마지막 수신 시각**을 기준으로 한다. `FFMPEG_TIMEOUT`초 동안 진행 업데이트가 없으면 stall로 간주, SIGTERM → 5초 후 SIGKILL로 종료시키고 재연결 루프에 맡긴다. 로그(stdout/stderr)는 liveness 판정에 쓰지 않는다 — `-loglevel warning` + `-c copy` 정상 녹화는 로그가 거의 없어 무출력이 곧 hang이 아니기 때문이다(#68). 프로세스가 얼어붙으면(예: SIGSTOP) 진행 방출도 멈추므로 실제 hang은 여전히 감지된다. (주의: 이 watchdog는 **상시 녹화기에만** 적용된다. finalize/아카이브 병합용 일회성 FFmpeg에는 적용되지 않는다.)
 3. **롤링 정리 (30초 주기)**: 모든 스트림 디렉터리에서 (a) 0바이트 `.ts`는 무조건 삭제, (b) 미보호이면서 롤링 윈도우보다 오래된 `.ts`를 삭제한다. 보호 목록은 in-memory 파일 경로 집합이다.
 4. **incident 2단계 아카이브**
    - **protect**: `incidentTime − 1시간 ~ 현재`의 기존 세그먼트를 보호 집합에 넣고, streamKey별 `protecting` 메타를 만든다.
@@ -96,7 +96,7 @@
 
 - **A. 헬스**: `curl -fsS $REC/healthz` 가 200이고 body가 `{"status":"ok","service":"recording"}` 이다.
 - **B. 세그먼트 생성**: 활성 RTMP 스트림 `k`가 존재할 때, 30초 대기 후 `{RECORDINGS_DIR}/k/` 안에 정규식 `^\d{8}_\d{6}\.ts$` 파일이 2개 이상 새로 생기고, 최신 파일의 파일명 타임스탬프(UTC)와 현재 UTC의 차가 30초 이내다.
-- **C. 상태 보고**: 단언 B 상황에서 `GET /api/status` 응답 중 `k` 항목의 `status == "recording"` 이고 `startedAt`이 RFC3339다. 스트림 발행을 중단하면 `1.5 × FFMPEG_TIMEOUT + 15초` 이내에 `status`가 `reconnecting` 또는 `disconnected`로 바뀐다 (로그에 `FFmpeg output timeout` 또는 `FFmpeg exited` 존재). (시한 근거: FFmpeg가 unpublish에 즉시 종료하면 수 초 내 전이되지만, 즉시 종료하지 않는 hang 경로는 watchdog의 `FFMPEG_TIMEOUT/2` 주기 검사(감지 최대 1.5×timeout 지연) + SIGTERM 후 5초 유예를 거친다 — 기본 60초 설정에서 최악 약 95초)
+- **C. 상태 보고**: 단언 B 상황에서 `GET /api/status` 응답 중 `k` 항목의 `status == "recording"` 이고 `startedAt`이 RFC3339다. 스트림 발행을 중단하면 `1.5 × FFMPEG_TIMEOUT + 15초` 이내에 `status`가 `reconnecting` 또는 `disconnected`로 바뀐다 (로그에 `FFmpeg progress stalled` 또는 `FFmpeg exited` 존재). (시한 근거: FFmpeg가 unpublish에 즉시 종료하면 수 초 내 전이되지만, 즉시 종료하지 않는 hang 경로는 watchdog의 `FFMPEG_TIMEOUT/2` 주기 검사(감지 최대 1.5×timeout 지연) + SIGTERM 후 5초 유예를 거친다 — 기본 60초 설정에서 최악 약 95초)
 - **D. 롤링 삭제**: `ROLLING_WINDOW_MINUTES=1`로 기동한 뒤, 파일명이 5분 전인 미보호 더미 `.ts`(1바이트 이상)를 만들어 두면 90초 이내에 삭제된다. 반대로 롤링 윈도우 이내 파일명의 세그먼트는 남아 있다.
 - **E. 0바이트 정리**: 0바이트 `.ts`를 스트림 디렉터리에 만들어 두면 (보호 등록 여부와 무관하게) 60초 이내에 삭제된다.
 - **F. protect가 삭제를 막는다**: `ROLLING_WINDOW_MINUTES=1` 환경에서 `POST /api/archives/protect` (`incidentId`, `streamKeys:[k]`, `incidentTime=현재`)가 202를 반환하고, 그 시점에 존재하던 `k`의 세그먼트들이 3분(윈도우의 3배) 후에도 삭제되지 않고 남아 있다. 또한 protect **이후** 새로 생성된 세그먼트도 같은 기간 남아 있다.
@@ -119,6 +119,6 @@
 3. **0바이트 세그먼트를 보호 여부와 무관하게 삭제.** FFmpeg가 세그먼트를 막 연 직후(순간적으로 0바이트)인 현재 진행 중 파일이 cleanup 주기와 겹치면 기록 중 파일이 삭제될 수 있는 경쟁 창이 있다. "빈 파일은 증거 가치가 없다"는 의도로 보이나(US-003), 진행 중 파일 제외(예: mtime 최근 N초 제외) 없이 무조건 삭제하는 것이 의도인지 확인 필요.
 4. ~~재시작 시 진행 중(`pending`/`processing`/`finalizing`) 아카이브가 영구히 그 상태로 남음.~~ **[해소 — 계약화됨]** §핵심 로직 7 "미완료 아카이브 복구"로 승격. 기동 시 비종단·비-`protecting` 아카이브는 보호를 우선 재확립한 뒤 병합을 재개하고, 재개 불가 시 `failed`로 종단 전이한다(단언 P). 재시작을 넘겨 비종단 상태에 고착되는 아카이브는 없다.
 5. **타임존 없는 시간 형식(`"2006-01-02 15:04:05"`)을 UTC로 해석.** protect/finalize의 fallback 파싱이 UTC 가정이라, 호출자가 로컬(KST) 시각을 보내면 보호 구간이 9시간 어긋난다. 이 fallback을 쓰는 호출자가 UTC를 보내는 것이 계약인지 확인 필요.
-6. **watchdog이 "출력 없음 = 고장"을 전제.** FFmpeg를 `-loglevel warning`으로 실행하므로 완전히 정상인 프로세스가 `FFMPEG_TIMEOUT`(기본 60초) 동안 아무 출력도 내지 않으면 건강한 녹화가 주기적으로 강제 재시작될 수 있다(재시작 순간 수 초 유실). 실운영에서 FFmpeg의 주기적 stderr 출력(진행 stats 등)에 의존하는 구조가 의도인지 확인 필요.
+6. ~~**watchdog이 "출력 없음 = 고장"을 전제.**~~ **[해결됨 · #68, B안 확정]** liveness 신호를 로그 출력(stdout/stderr) 유무에서 상시 녹화기의 **진행(progress) 스트림(fd 3, `-progress pipe:3`)** 으로 전환하여 본문(핵심 로직 #2, 단언 C)에 승격했다. `-loglevel warning` + `-c copy` 정상 녹화는 로그가 침묵해도 진행 업데이트를 계속 방출하므로 더 이상 hang으로 오판해 재시작하지 않으며(상시 녹화 gap·증거영상 신뢰성 저하 제거), 실제 동결(SIGSTOP)은 진행도 멈추므로 여전히 감지된다. `FFMPEG_TIMEOUT` 임계값(기본 60초)은 진행 기준으로는 보수적 여유가 크지만 회귀 위험을 피해 값을 유지한다.
 7. **문서와 상태 enum 불일치 — P/P-2 도입으로 노출 증가.** 서비스 문서·메타 주석의 일부 상태 목록에는 `finalizing`이 없으나 실제로 이 상태가 존재한다. 본 스펙의 정본 enum은 §출력 `GET /api/archives`의 `status ∈ {protecting, pending, finalizing, processing, completed, failed}` 6종이다 — **enum 값 정의의 SSOT는 본 스펙이 단독 소유**한다. 이 enum을 소비하는 web-frontend의 의무(6종 전부 처리·미지 상태 안전 fallback·`failed` 노출)는 [docs/spec/interface-web-api.md](interface-web-api.md) §계약 8이 **판정 가능한 소비자 계약**으로 규정한다(값 나열은 본 스펙 참조, 소비자 의무 자체는 §계약 8 소유). **주의: 단언 P(재개→`completed`)·P-2(소실→`failed`) 계약화로 기동 복구 중 `finalizing`/`processing`/`failed` 상태가 소비자에게 노출될 확률이 증가**했으므로 §계약 8의 소비자 계약이 이를 강제한다.
 8. **reload가 web-backend 조회 실패를 "카메라 0대"와 구분하지 못함.** 카메라 목록 조회가 연결 오류·본문 디코드 실패로 실패해도(HTTP 상태코드는 검사하지 않음) 오류를 반환하지 않고 빈 목록으로 reconcile하여 **모든 recorder를 중지**시키고 200 `{"status":"reloaded","cameras":0}`을 반환한다. 같은 접면을 쓰는 cctv-adapter(조회 실패 시 502/500 + 기존 push 유지)·youtube-adapter(조회 실패 시 500 + 기존 스트림 유지)와 비대칭이며, web-backend 일시 장애 중 reload 한 번으로 전체 녹화가 끊길 수 있다. 실패 시 기존 recorder 유지 + 오류 응답이 의도인지 확인 필요.
