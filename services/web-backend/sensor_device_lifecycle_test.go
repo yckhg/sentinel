@@ -217,6 +217,84 @@ func TestSensorLifecycle_C_ReactivateSinglePath(t *testing.T) {
 	}
 }
 
+// --- MEDIUM-2 regression: RETURNING-gated reappear guard preserves once-only ------
+// Proves the perf optimization (gate the guard behind the presence upsert's
+// RETURNING deleted_at) preserves the dedup invariants without a WS observer:
+//   - live-device seen (hot path) never writes reappear_alerted_at,
+//   - first seen after delete flips reappear_alerted_at NULL→now exactly once,
+//   - a second (back-to-back) seen leaves it unchanged (once-only, seconds-agnostic),
+//   - reactivation resets it (re-arms the next cycle).
+
+func TestSensorLifecycle_ReappearGuardOnceOnly(t *testing.T) {
+	db := newTestDB(t)
+	internalToken = "sekret"
+	t.Cleanup(func() { internalToken = "" })
+
+	body := `{"siteId":"site-001","deviceId":"vs-guard"}`
+
+	// register + capture id
+	w := httptest.NewRecorder()
+	handleCreateDevice(db)(w, roleReq("admin", http.MethodPost, "/api/devices", "", body))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create expected 201, got %d", w.Code)
+	}
+	var created deviceResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &created)
+
+	// Hot path: seen on a LIVE device must not touch reappear_alerted_at.
+	if code := callSeen(db, "sekret", body); code != http.StatusOK {
+		t.Fatalf("seen(live) expected 200, got %d", code)
+	}
+	if ra := reappearAt(t, db, created.ID); ra != nil {
+		t.Errorf("hot path: reappear_alerted_at must stay NULL for a live device, got %v", *ra)
+	}
+
+	// Soft-delete, then first seen → reappear_alerted_at set once.
+	dw := httptest.NewRecorder()
+	handleDeleteDevice(db)(dw, roleReq("admin", http.MethodDelete, "/api/devices/"+idStr(created.ID), idStr(created.ID), ""))
+	if dw.Code != http.StatusNoContent {
+		t.Fatalf("delete expected 204, got %d", dw.Code)
+	}
+	callSeen(db, "sekret", body)
+	first := reappearAt(t, db, created.ID)
+	if first == nil {
+		t.Fatalf("first seen after delete must set reappear_alerted_at")
+	}
+	// Second (back-to-back) seen → unchanged (once-only, independent of clock secs).
+	callSeen(db, "sekret", body)
+	second := reappearAt(t, db, created.ID)
+	if second == nil || *second != *first {
+		t.Errorf("second seen must not re-alert: first=%v second=%v", first, second)
+	}
+	// Device still soft-deleted (sticky) after both re-signals.
+	var deletedAt *string
+	if err := db.QueryRow(`SELECT datetime(deleted_at) FROM devices WHERE id=?`, created.ID).Scan(&deletedAt); err != nil {
+		t.Fatalf("read deleted_at: %v", err)
+	}
+	if deletedAt == nil {
+		t.Errorf("device must remain soft-deleted after re-signals (sticky)")
+	}
+
+	// Reactivate → reappear_alerted_at reset (next cycle re-armed).
+	rw := httptest.NewRecorder()
+	handleCreateDevice(db)(rw, roleReq("admin", http.MethodPost, "/api/devices", "", body))
+	if rw.Code != http.StatusOK {
+		t.Fatalf("reactivate expected 200, got %d", rw.Code)
+	}
+	if ra := reappearAt(t, db, created.ID); ra != nil {
+		t.Errorf("reactivation must reset reappear_alerted_at, got %v", *ra)
+	}
+}
+
+func reappearAt(t *testing.T, db *sql.DB, id int64) *string {
+	t.Helper()
+	var ra *string
+	if err := db.QueryRow(`SELECT datetime(reappear_alerted_at) FROM devices WHERE id=?`, id).Scan(&ra); err != nil {
+		t.Fatalf("read reappear_alerted_at: %v", err)
+	}
+	return ra
+}
+
 // --- assertion C2 (static): no POST /api/devices/{id}/restore route/handler -------
 
 func TestSensorLifecycle_C2_NoRestoreRoute(t *testing.T) {
@@ -242,15 +320,24 @@ func TestSensorLifecycle_H2_IncidentPresenceSticky(t *testing.T) {
 	if err != nil {
 		t.Fatalf("H2: read incidents.go: %v", err)
 	}
-	body := funcBody(t, string(src), "func handleCreateIncident")
+	s := string(src)
+	// Scope = handleCreateIncident body AND the delegated presence-upsert helper
+	// (upsertIncidentPresence). The spec requires following the delegation so the
+	// gate never becomes vacuous when the upsert moves out of the handler body.
+	scope := funcBody(t, s, "func handleCreateIncident") + funcBody(t, s, "func upsertIncidentPresence")
 	// Normalize: strip all whitespace, lowercase. The forbidden form is the
 	// ASSIGNMENT `deleted_at = NULL` (a SET). A read like `deleted_at IS NOT NULL`
-	// is allowed. After stripping spaces the assignment collapses to
-	// "deleted_at=null"; the read collapses to "deleted_atisnotnull", which does not
-	// contain the assignment substring.
-	norm := strings.ToLower(strings.Join(strings.Fields(body), ""))
+	// or `RETURNING datetime(deleted_at)` is allowed. After stripping spaces the
+	// assignment collapses to "deleted_at=null"; the reads do not contain that
+	// substring.
+	norm := strings.ToLower(strings.Join(strings.Fields(scope), ""))
 	if strings.Contains(norm, "deleted_at=null") {
-		t.Errorf("H2: handleCreateIncident presence upsert must not assign deleted_at = NULL (silent revive)")
+		t.Errorf("H2: incident presence upsert must not assign deleted_at = NULL (silent revive)")
+	}
+	// Non-vacuity guard: the scope must actually contain the presence upsert, so a
+	// refactor that removes it cannot make this gate pass trivially.
+	if !strings.Contains(norm, "insertintodevices") {
+		t.Errorf("H2: scope no longer contains the device presence upsert — gate would be vacuous")
 	}
 }
 
