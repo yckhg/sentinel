@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 계약2-8. GET /api/incidents/active — 200 배열, 각 원소 status ∈ {open,acknowledged},
+# 계약2-8. GET /api/incidents/active — 200 배열, 각 원소 status == open (acknowledged 제거·resolved 미포함),
 #   incidentId + 중첩 site.{address,managerName,managerPhone} 존재, crisis_alert(계약 14) payload 와
 #   키 동형(incidentId,siteId,description,occurredAt,isTest,site.* — status 만 추가 허용), 발생시각 내림차순.
 # spec: docs/spec/interface-web-api.md 계약 2 (/api/incidents/active 배너 backfill)
@@ -15,7 +15,7 @@ n=$(echo "$body" | jq 'length')
 echo "INFO: /active 원소 수 n=$n (n==0 이면 내용 단언 vacuous — verifier SKIPPED 오버레이 대상)"
 
 # 상태집합 + 필수 키 + site 중첩
-echo "$body" | jq -e 'all(.[]; (.status=="open" or .status=="acknowledged")
+echo "$body" | jq -e 'all(.[]; (.status=="open")
   and has("incidentId") and has("siteId") and has("description") and has("occurredAt") and has("isTest")
   and (.site|has("address") and has("managerName") and has("managerPhone")))' >/dev/null \
   || nok "원소 스키마 위반 (status집합/incidentId/site.* 결손)"
