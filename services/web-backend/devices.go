@@ -184,6 +184,14 @@ func handleCreateDevice(db *sql.DB) http.HandlerFunc {
 				req.SiteID, req.DeviceID, alias,
 			)
 			if insErr != nil {
+				// Concurrency: two POSTs for the same (siteId,deviceId) can both pass the
+				// SELECT (no row yet) and race into INSERT. UNIQUE(site_id,device_id) lets
+				// one win; the loser's INSERT fails with SQLITE_CONSTRAINT_UNIQUE. Treat it
+				// as the duplicate case (409), closing the check-then-insert window.
+				if isUniqueViolation(insErr) {
+					writeJSON(w, http.StatusConflict, map[string]string{"error": "device already registered"})
+					return
+				}
 				log.Printf("create device insert error: %v", insErr)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 				return
@@ -274,57 +282,97 @@ func handleSeenDevice(db *sql.DB) http.HandlerFunc {
 		ctx, cancel := dbCtx(r.Context())
 		defer cancel()
 
-		// Presence upsert — last_seen only; deleted_at is DELIBERATELY absent so a
-		// re-signal cannot silently revive a soft-deleted device (sticky delete).
-		// alert_state is preserved when the notification omits it (COALESCE), and
-		// defaults to 'none' for a brand-new auto-discovered row.
-		_, err := db.ExecContext(ctx, `
+		// Presence upsert + reappearance dedup in ONE transaction (계약 2 "두 문장 같은
+		// 트랜잭션"). last_seen only; deleted_at is DELIBERATELY absent so a re-signal
+		// cannot silently revive a soft-deleted device (sticky delete). alert_state is
+		// preserved when the notification omits it (COALESCE), and defaults to 'none'
+		// for a brand-new auto-discovered row. RETURNING datetime(deleted_at) lets us
+		// gate the reappearance guard: the normal-heartbeat hot path (live device →
+		// NULL) does ZERO extra write; only a seen that landed on a soft-deleted row
+		// runs the rowcount-guarded dedup.
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			log.Printf("seen begin tx error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
+		defer tx.Rollback()
+
+		var deletedAt *string
+		err = tx.QueryRowContext(ctx, `
 			INSERT INTO devices (site_id, device_id, last_seen, alert_state)
 			VALUES (?, ?, datetime('now'), COALESCE(?, 'none'))
 			ON CONFLICT(site_id, device_id) DO UPDATE SET
 				last_seen = datetime('now'),
 				alert_state = COALESCE(?, alert_state)
-		`, req.SiteID, req.DeviceID, req.AlertState, req.AlertState)
+			RETURNING datetime(deleted_at)
+		`, req.SiteID, req.DeviceID, req.AlertState, req.AlertState).Scan(&deletedAt)
 		if err != nil {
 			log.Printf("upsert device error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 			return
 		}
-		// Sticky-safe reappearance alert (shared with the incident presence path).
-		maybeAlertReappear(ctx, db, req.SiteID, req.DeviceID)
+
+		var pending *reappearBroadcast
+		if deletedAt != nil {
+			pending, err = guardReappearTx(ctx, tx, req.SiteID, req.DeviceID)
+			if err != nil {
+				log.Printf("reappear guard error: %v", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+				return
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			log.Printf("seen commit error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+			return
+		}
 		markWALDirty()
+		if pending != nil {
+			BroadcastDeviceReappeared(pending.siteID, pending.deviceID, pending.lastSeen)
+		}
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }
 
-// maybeAlertReappear is the shared dedup+broadcast helper called by BOTH the seen
-// and incident presence paths (계약 2·3). It runs the rowcount-guarded UPDATE that
-// flips reappear_alerted_at from NULL for a soft-deleted device; a device_reappeared
-// broadcast is emitted only when exactly one row changed (changes()==1), so the
-// alert fires exactly once per delete→reappear cycle regardless of clock resolution
-// or which path (heartbeat or crisis) arrives first.
-func maybeAlertReappear(ctx context.Context, db *sql.DB, siteID, deviceID string) {
-	res, err := db.ExecContext(ctx, `
+// reappearBroadcast carries a pending device_reappeared broadcast so the caller can
+// emit it AFTER the transaction commits (never on a rolled-back guard).
+type reappearBroadcast struct {
+	siteID, deviceID string
+	lastSeen         *string
+}
+
+// guardReappearTx runs the shared rowcount-guarded reappearance dedup INSIDE tx. It
+// is the single dedup+broadcast decision shared by BOTH the seen and incident
+// presence paths (계약 2·3), and must be invoked ONLY when the presence upsert landed
+// on a soft-deleted row (RETURNING deleted_at non-NULL) — the live-device hot path
+// skips it entirely, so a normal heartbeat performs no extra write. The UPDATE flips
+// reappear_alerted_at from NULL→now; a broadcast is warranted only when exactly one
+// row changed (changes()==1), so the alert fires exactly once per delete→reappear
+// cycle regardless of clock resolution or which path (heartbeat or crisis) arrives
+// first (a shared guard means one path cannot silently consume the other's alert).
+// Reactivation resets reappear_alerted_at, re-arming the next cycle.
+func guardReappearTx(ctx context.Context, tx *sql.Tx, siteID, deviceID string) (*reappearBroadcast, error) {
+	res, err := tx.ExecContext(ctx, `
 		UPDATE devices SET reappear_alerted_at = datetime('now')
 		WHERE site_id = ? AND device_id = ? AND deleted_at IS NOT NULL AND reappear_alerted_at IS NULL
 	`, siteID, deviceID)
 	if err != nil {
-		log.Printf("reappear dedup update error: %v", err)
-		return
+		return nil, err
 	}
 	n, _ := res.RowsAffected()
 	if n != 1 {
-		return
+		return nil, nil
 	}
 	var lastSeen *string
-	if err := db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		`SELECT datetime(last_seen) FROM devices WHERE site_id = ? AND device_id = ?`,
 		siteID, deviceID,
 	).Scan(&lastSeen); err != nil {
-		log.Printf("reappear last_seen read error: %v", err)
+		return nil, err
 	}
-	BroadcastDeviceReappeared(siteID, deviceID, lastSeen)
+	return &reappearBroadcast{siteID: siteID, deviceID: deviceID, lastSeen: lastSeen}, nil
 }
 
 // handleUpdateDeviceAlias handles PATCH /api/devices/{id} — update alias (admin).
