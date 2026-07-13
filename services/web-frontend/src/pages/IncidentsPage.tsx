@@ -41,7 +41,7 @@ interface Pagination {
   total: number;
 }
 
-type StatusFilter = "" | "open" | "acknowledged" | "resolved";
+type StatusFilter = "" | "open" | "resolved";
 
 function getAuthHeaders(): Record<string, string> {
   const token = localStorage.getItem("token");
@@ -57,8 +57,7 @@ function formatDateTime(iso: string): string {
 
 function statusLabel(status: string): string {
   switch (status) {
-    case "open": return "미확인";
-    case "acknowledged": return "확인됨";
+    case "open": return "미해결";
     case "resolved": return "조치완료";
     default: return status;
   }
@@ -67,7 +66,6 @@ function statusLabel(status: string): string {
 function statusBadgeClass(status: string): string {
   switch (status) {
     case "open": return "status-open";
-    case "acknowledged": return "status-acknowledged";
     case "resolved": return "status-resolved";
     default: return "";
   }
@@ -85,10 +83,7 @@ function ResolveModal({ incident, onClose, onResolved }: ResolveModalProps) {
   const [error, setError] = useState("");
 
   const handleSubmit = async () => {
-    if (!notes.trim()) {
-      setError("조치 내용을 입력해주세요.");
-      return;
-    }
+    // Resolution note is optional (spec §해제 노트 선택): an empty note submits fine.
     setSending(true);
     setError("");
     try {
@@ -124,7 +119,7 @@ function ResolveModal({ incident, onClose, onResolved }: ResolveModalProps) {
           {formatDateTime(incident.occurredAt)} — {incident.description || "(설명 없음)"}
         </p>
         <div className="mgmt-form-field">
-          <label>조치 내용 (필수)</label>
+          <label>조치 내용</label>
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
@@ -158,8 +153,6 @@ export default function IncidentsPage() {
   const [filterApplied, setFilterApplied] = useState({ from: "", to: "" });
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("");
   const [resolveTarget, setResolveTarget] = useState<Incident | null>(null);
-  const [actionLoading, setActionLoading] = useState<number | null>(null);
-  const [actionError, setActionError] = useState("");
   const admin = useState(() => isAdmin(localStorage.getItem("token")))[0];
 
   const fetchIncidents = useCallback(async (page: number, from: string, to: string, status: StatusFilter, append: boolean) => {
@@ -189,7 +182,7 @@ export default function IncidentsPage() {
       }
       setPagination(json.pagination);
     } catch (err) {
-      setError(isTimeoutError(err) ? timeoutMessage() : "사고 이력을 불러오지 못했습니다.");
+      setError(isTimeoutError(err) ? timeoutMessage() : "경보 이력을 불러오지 못했습니다.");
       console.error("fetch incidents error:", err);
     } finally {
       setLoading(false);
@@ -222,34 +215,6 @@ export default function IncidentsPage() {
     fetchIncidents(1, filterApplied.from, filterApplied.to, statusFilter, false);
   };
 
-  const handleAcknowledge = async (inc: Incident) => {
-    setActionLoading(inc.id);
-    setActionError("");
-    try {
-      const res = await fetchWithTimeout(`/api/incidents/${inc.id}/acknowledge`, {
-        method: "PATCH",
-        headers: getAuthHeaders(),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-        throw new Error(body.error || `HTTP ${res.status}`);
-      }
-      refresh();
-    } catch (err) {
-      // Inline error (consistent with the resolve modal) instead of a jarring
-      // browser alert() (#103).
-      setActionError(
-        isTimeoutError(err)
-          ? timeoutMessage()
-          : err instanceof Error
-          ? err.message
-          : "확인 처리에 실패했습니다.",
-      );
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
   const totalPages = Math.ceil(pagination.total / pagination.limit);
   const hasMore = pagination.page < totalPages;
 
@@ -259,7 +224,7 @@ export default function IncidentsPage() {
 
   return (
     <div className="page">
-      <h2>사고 이력</h2>
+      <h2>경보 이력</h2>
 
       <div className="incidents-filter">
         <DualCalendar
@@ -276,8 +241,7 @@ export default function IncidentsPage() {
         <div className="incidents-status-filter">
           {([
             ["", "전체"],
-            ["open", "미확인"],
-            ["acknowledged", "확인됨"],
+            ["open", "미해결"],
             ["resolved", "조치완료"],
           ] as [StatusFilter, string][]).map(([value, label]) => (
             <button
@@ -292,14 +256,13 @@ export default function IncidentsPage() {
       </div>
 
       {error && <div className="incidents-error">{error}</div>}
-      {actionError && <div className="incidents-error">{actionError}</div>}
 
       <div className="incidents-count">
         총 {pagination.total}건
       </div>
 
       {incidents.length === 0 && !error ? (
-        <div className="incidents-empty">사고 이력이 없습니다.</div>
+        <div className="incidents-empty">경보 이력이 없습니다.</div>
       ) : (
         <div className="incidents-list">
           {incidents.map((inc) => (
@@ -316,12 +279,6 @@ export default function IncidentsPage() {
                 </div>
               </div>
               <div className="incidents-card-desc">{inc.description || "(설명 없음)"}</div>
-              {inc.confirmedAt && (
-                <div className="incidents-card-confirm">
-                  {inc.confirmedBy && <span>{inc.confirmedBy}</span>}
-                  <span>{formatDateTime(inc.confirmedAt)}</span>
-                </div>
-              )}
               {inc.status === "resolved" && inc.resolvedAt && (() => {
                 const resolver = resolverDisplay(inc);
                 return (
@@ -341,19 +298,9 @@ export default function IncidentsPage() {
               })()}
               {admin && inc.status !== "resolved" && (
                 <div className="incidents-card-actions">
-                  {inc.status === "open" && (
-                    <button
-                      className="mgmt-btn mgmt-btn-secondary incidents-action-btn"
-                      onClick={() => handleAcknowledge(inc)}
-                      disabled={actionLoading === inc.id}
-                    >
-                      {actionLoading === inc.id ? "처리 중..." : "확인"}
-                    </button>
-                  )}
                   <button
                     className="mgmt-btn mgmt-btn-primary incidents-action-btn"
                     onClick={() => setResolveTarget(inc)}
-                    disabled={actionLoading === inc.id}
                   >
                     조치 완료
                   </button>

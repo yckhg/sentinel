@@ -19,8 +19,18 @@ type ServiceTarget struct {
 	HealthzURL string
 }
 
-// serviceTargets — web-backend excludes itself (self-check is pointless).
-// mosquitto has no HTTP endpoint → deferred to C-2.
+// serviceTargets is the monitored service set — the SSOT for assertion F's
+// "expected service set" (spec system-status-aggregate: 기대 서비스 집합 = 계약 12의
+// 서비스 산출). Authoritative derivation: the docker-compose.yml services that expose
+// an HTTP /healthz healthcheck, MINUS the non-data-path peers:
+//   - web-backend  — self-check is pointless (this service).
+//   - mosquitto    — MQTT broker, no HTTP /healthz endpoint (deferred to C-2).
+//   - web-frontend — SPA static (nginx) server, not a backend data-path peer the
+//                    operator monitors on this panel.
+// GUARD: TestServiceTargets_ExpectedSet (service_targets_test.go) pins this list to
+// an explicit expected set so a service added to docker-compose.yml but forgotten
+// here (or a drift the other way) is caught, not silently omitted from services[].
+// Adding a monitored backend peer requires editing BOTH this list AND that test.
 var serviceTargets = []ServiceTarget{
 	{"hw-gateway", "http://hw-gateway:8080/healthz"},
 	{"cctv-adapter", "http://cctv-adapter:8080/healthz"},

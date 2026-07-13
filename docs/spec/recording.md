@@ -46,6 +46,8 @@
   - MP4는 다운로드 완료 전에도 재생을 시작할 수 있는 형태(메타데이터 선행 배치)로 생성되며, 세그먼트들의 무손실 병합본이다.
 - **아카이브 메타데이터**: `{ARCHIVES_DIR}/metadata.json` — 전체 아카이브 목록의 SSOT. 상태 변화마다 저장되고 재시작 시 로드된다.
   - 각 아카이브 항목은 병합 구간 경계 `from`/`to`(RFC3339, UTC)를 보유하며, 이 값은 **모든 비종단 상태(`protecting`·`pending`·`processing`·`finalizing`)에서 영속·보존된다** — 재시작 후 기동 복구가 원본 구간을 알 수 있는 근거다(§핵심 로직 7). 종단 전이(`completed`/`failed`) 시에도 유지된다.
+  - 각 아카이브 항목은 완료 타임스탬프 `completedAt`(RFC3339, **UTC 고정**)을 가진다: `status == "completed"`일 때 **non-null**, 그 외(미완료 4종·`failed`)에는 **null/부재**다. `completedAt`은 `completed` 전이 시 `status`·`sizeBytes`·`filePath`와 **원자적으로**(한 잠금 안에서) 기록되어, 소비자가 이 넷 중 하나만 참인 중간 상태를 관측하지 않는다. 값의 정본은 UTC이며 로컬 표시 변환은 소비자(web-frontend) 몫이다.
+  - 실패 사유 필드명은 `lastError`(사람이 읽을 수 있는 문자열)로 통일한다 — `status == "failed"`인 항목은 **비어있지 않은 `lastError`**를 가진다(아래 §핵심 로직 4·복구 실패 경로 + 단언 P-2 참조). 이 필드의 JSON 키는 `lastError`다.
 
 ### HTTP API (응답 계약 요지)
 
@@ -60,8 +62,8 @@
 | `POST /api/archives/protect` | (Phase 1) 202. incident별·streamKey별 상태 `protecting` 아카이브 항목 생성. `incidentTime − 1시간`부터의 세그먼트를 삭제 보호. 이후 도착하는 세그먼트도 주기적으로 계속 보호 |
 | `POST /api/archives/finalize` | (Phase 2) 해당 incident의 `protecting` 아카이브들을 `resolvedAt + 30분`을 종료 시각으로 백그라운드 병합 시작. `protecting`이 하나도 없으면 404. **종료 시각(`To`)은 메타 상한**이며 병합이 즉시 실행되므로 `resolvedAt`이 현재 시각에 가까우면 그 이후 post-roll 세그먼트는 디스크에 없어 MP4에 포함되지 않는다(과대표기 가능, ⚠️ 리뷰 필요 2) |
 | `POST /api/archives` | 임의 구간 즉시 아카이브(수동). 202 + 생성된 항목들. `incidentId` 생략 시 `manual_*` 자동 부여 |
-| `GET /api/archives` | 전체 아카이브 메타 배열. `status`는 **아카이브 status enum의 정본(정의 SSOT=본 스펙)**이며 정확히 6종 `{protecting, pending, finalizing, processing, completed, failed}` 중 하나다. 이 enum을 소비하는 web-frontend의 의무(6종 전부 처리·미지 상태 안전 fallback·`failed` 노출)는 [interface-web-api.md](interface-web-api.md) §계약 8이 판정 가능한 소비자 계약으로 규정한다 |
-| `GET /api/archives/{id}/download` | `completed`만 `video/mp4` + attachment로 서빙. 미완료면 409, 없으면 404 |
+| `GET /api/archives` | 전체 아카이브 메타 배열. `status`는 **아카이브 status enum의 정본(정의 SSOT=본 스펙)**이며 정확히 6종 `{protecting, pending, finalizing, processing, completed, failed}` 중 하나다. `completed` 항목은 non-null `completedAt`(RFC3339 UTC)을, `failed` 항목은 non-empty `lastError`를 함께 노출한다. 이 enum을 소비하는 web-frontend의 의무(6종 전부 처리·미지 상태 안전 fallback·`failed` 노출·`completedAt` 로컬 표시)는 [interface-web-api.md](interface-web-api.md) §계약 8이 판정 가능한 소비자 계약으로 규정한다 |
+| `GET /api/archives/{id}/download` | `completed`만 `video/mp4` + attachment로 서빙. 그 외 **모든 비-`completed`**(미완료 4종 `protecting`/`pending`/`finalizing`/`processing` **및 종단 `failed`**)는 비-2xx **409**(부분·0바이트 미디어를 2xx로 내려보내지 않음), 아카이브 부재는 **404** |
 | `DELETE /api/archives/{id}` | 아카이브 디렉터리·메타 삭제. 없으면 404 |
 | `DELETE /api/archives/incident/{incidentId}` | 해당 incident의 모든 아카이브 삭제 + 삭제 수 반환. 없으면 404 |
 | `GET /api/storage` | `{recordingsBytes, archivesBytes, totalUsedBytes, archiveCount, diskTotalBytes, diskUsedBytes, diskAvailableBytes}` |
@@ -79,7 +81,7 @@
 4. **incident 2단계 아카이브**
    - **protect**: `incidentTime − 1시간 ~ 현재`의 기존 세그먼트를 보호 집합에 넣고, streamKey별 `protecting` 메타를 만든다.
    - **보호 갱신 (30초 주기)**: `protecting` 상태인 동안 새로 생기는 세그먼트도 계속 보호 집합에 추가된다 — 즉 protect 이후 도착 영상도 삭제되지 않는다.
-   - **finalize**: 종료 시각을 `resolvedAt + 30분`으로 확정하고, 구간 내 세그먼트를 보호 처리 후 재인코딩 없이 단일 MP4로 백그라운드 병합한다. 성공 시 `completed`(+파일 크기), 실패 시 `failed`(+사유)로 기록된다. 단, 병합은 즉시 실행되므로 `resolvedAt`이 현재 시각에 가까우면 `To`(=resolvedAt+30분) 이후의 post-roll 세그먼트는 아직 디스크에 없어 MP4에 포함되지 않는다 — 메타의 `To`는 실제 병합 범위의 **상한(과대표기 가능)**이다(⚠️ 리뷰 필요 2).
+   - **finalize**: 종료 시각을 `resolvedAt + 30분`으로 확정하고, 구간 내 세그먼트를 보호 처리 후 재인코딩 없이 단일 MP4로 백그라운드 병합한다. 성공 시 `completed`(+파일 크기 `sizeBytes` + `filePath` + `completedAt` **원자적 기록**), 실패 시 `failed`(+ **non-empty `lastError` 사유**)로 기록된다. 종단 상태(`completed`/`failed`)는 이후 뒤집히지 않는다(단조성). **모든 `failed` 종단 전이**(이 finalize-직접실패 경로 포함, 아래 복구 실패 경로 및 단언 P-2와 동일)는 non-empty `lastError`를 남긴다. 단, 병합은 즉시 실행되므로 `resolvedAt`이 현재 시각에 가까우면 `To`(=resolvedAt+30분) 이후의 post-roll 세그먼트는 아직 디스크에 없어 MP4에 포함되지 않는다 — 메타의 `To`는 실제 병합 범위의 **상한(과대표기 가능)**이다(⚠️ 리뷰 필요 2).
    - **자동 finalize (30초 주기)**: `protecting` 상태가 incident 발생 후 **2시간**을 넘기면 finalize 누락으로 간주하고 현재 시각 기준으로 자동 finalize한다 — 보호가 무한히 지속되어 디스크가 차는 것을 막는 안전장치.
 5. **pseudo-playback**: 요청 구간 `[from, to)`와 **겹치는**(경계 포함 판정: 세그먼트 종료 > from AND 세그먼트 시작 < to) 세그먼트를 시간순으로 나열한 VOD playlist를 매 요청마다 동적 생성한다. 세그먼트 길이는 10초로 간주한다.
 6. **reconcile**: reload 시 streamKey 기준으로만 비교한다 — 새 key는 녹화 시작, 사라진 key는 SIGTERM(3초 후 SIGKILL)으로 중지. 동일 key의 다른 속성 변경은 녹화에 영향 없다. 카메라 목록 조회 실패는 "카메라 0대"와 동일하게 취급되어 실행 중인 모든 recorder가 중지된다 (⚠️ 8).

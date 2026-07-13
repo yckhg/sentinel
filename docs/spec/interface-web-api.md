@@ -29,7 +29,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 - 인증 스킴: `Authorization: Bearer <JWT>` · WS는 `?token=<jwt>` 쿼리 파라미터
 - role: `admin` · `user` · `temp`(임시 링크, read-only)
 - 성공: `200` / `201` / `204` · 에러 바디: `{"error": "<message>"}`
-- 에러 코드 매핑: `400` 잘못된 입력 · `401` 인증 실패/만료 · `403` 권한 부족 · `404` 없음 · `409` 상태 충돌 · `429` 레이트 리밋(login/register 한정) · `502` 하위 서비스 통신 실패
+- 에러 코드 매핑: `400` 잘못된 입력 · `401` 인증 실패/만료 · `403` 권한 부족 · `404` 없음 · `409` 상태 충돌 · `429` 레이트 리밋(login/register 및 테스트 발송 `(channel,target)` 분당 1건) · `502` 하위 서비스 통신 실패(recording · hw-gateway · notifier)
 - `/api/*` 경로는 인증 미들웨어 통과 필수(단, 무인증 internal 예외는 §계약 13에 명시). `/auth/pending|approve|reject|users`는 `/api/` 프리픽스가 아니며 핸들러가 직접 admin JWT를 검증
 
 **공통 검증 단언**
@@ -107,10 +107,9 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 
 | Method | Path | Auth | 입력 |
 |--------|------|------|------|
-| GET | `/api/incidents` | user | query: `page`(≥1, def 1) `limit`(def 20, max 100) `from` `to`(occurred_at, SQLite datetime) `status`(`open\|acknowledged\|resolved`) |
+| GET | `/api/incidents` | user | query: `page`(≥1, def 1) `limit`(def 20, max 100) `from` `to`(occurred_at, SQLite datetime) `status`(`open\|resolved`) |
 | GET | `/api/incidents/active` | user | — (미해결 사고 배너 backfill 전용) |
-| PATCH | `/api/incidents/{id}/acknowledge` | admin | 바디 없음 |
-| PATCH | `/api/incidents/{id}/resolve` | admin | `{resolutionNotes*: non-empty string}` |
+| PATCH | `/api/incidents/{id}/resolve` | admin | `{resolutionNotes?: string}` — **선택**(생략·빈 문자열·공백 허용) |
 | POST | `/api/incidents` | **none (internal)** | → 계약 13 |
 
 ### 출력 (계약)
@@ -123,7 +122,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
     "id": 12, "siteId": "site-001", "description": "gas leak",
     "occurredAt": "2026-04-13 10:20:30",
     "confirmedAt": null, "confirmedBy": null, "isTest": false,
-    "status": "open | acknowledged | resolved",
+    "status": "open | resolved",
     "resolvedAt": null, "resolvedBy": null, "resolutionNotes": null,
     "resolvedByKind": null, "resolvedById": null, "resolvedByLabel": null
   }],
@@ -131,7 +130,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 }
 ```
 
-`GET /api/incidents/active` → `200` — **미해결(open+acknowledged) 사고** 배열. 각 원소는 WS `crisis_alert` payload(계약 14)와 **동형**이다 — 배너 backfill이 실시간 push와 동일한 모양을 재구성하도록 계약된다(반쪽 배너 방지):
+`GET /api/incidents/active` → `200` — **미해결(open) 사고** 배열. 각 원소는 WS `crisis_alert` payload(계약 14)와 **동형**이다 — 배너 backfill이 실시간 push와 동일한 모양을 재구성하도록 계약된다(반쪽 배너 방지):
 
 ```json
 [{
@@ -140,21 +139,20 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
   "description": "gas leak",
   "occurredAt": "2026-04-13 10:20:30",
   "isTest": false,
-  "status": "open | acknowledged",
+  "status": "open",
   "site": { "address": "...", "managerName": "...", "managerPhone": "010-1234-5678" }
 }]
 ```
 
-- `PATCH .../acknowledge` → `200` `{"status":"acknowledged"}` · 이미 `resolved`면 `409`
-- `PATCH .../resolve` → `200` `{"status":"resolved", "resolvedByKind":"web", "resolvedById":"<username>", "resolvedByLabel":"..."}` · 이미 resolved면 `409` · notes 비어있으면 `400`
+- `PATCH .../resolve` → `200` `{"status":"resolved", "resolvedByKind":"web", "resolvedById":"<username>", "resolvedByLabel":"..."}` · 이미 resolved면 `409` · `resolutionNotes`는 **선택**(생략·빈 문자열·공백뿐이어도 `400`이 아니라 `200`으로 해소되며 빈 값/`null`로 저장)
 
 ### 핵심 로직 (불변식)
 
-- 상태 기계: `open → acknowledged → resolved` (resolved는 종단 — 재해결 `409`)
+- 상태 기계: `open → resolved` (중간 확인 상태 없음 — `acknowledged` 상태·확인 액션은 계약에서 제거됨; resolved는 종단 — 재해결 `409`)
 - **양방향 해소 attribution**: `resolvedByKind ∈ {"web", "sensor_button", null}` — 웹 해제는 본 계약, 센서 버튼 해제는 계약 13(`resolve-from-sensor`). 어느 경로든 동일 필드에 기록
 - resolve 성공 부작용 3종: (a) recording 아카이브 finalize 비동기 트리거 (b) hw-gateway `/api/alert/resolved`(계약 15) 경유 MQTT `safety/{siteId}/alert/resolved` 발행 (c) WS `incident_resolved` 브로드캐스트 (계약 14)
 - `limit > 100` 요청은 100으로 클램프 (에러 아님)
-- **`/api/incidents/active` (배너 backfill 계약)**: `status ∈ {open, acknowledged}`만 반환(resolved 제외), 발생시각 내림차순. 각 원소의 식별자는 계약 2 목록의 `id`가 아니라 `crisis_alert`와 동일하게 **`incidentId`**이며, 사고 site의 `{address, managerName, managerPhone}`를 **`site`로 중첩** 포함한다(sites 테이블(계약 4)에서 조인). 이 payload 동형성 보장으로 web-frontend가 접속/재접속 시 진행 중 위기 배너를 실시간 `crisis_alert`와 같은 모양으로 재구성하며, 현장 연락 정보가 결손된 반쪽 배너가 되지 않는다
+- **`/api/incidents/active` (배너 backfill 계약)**: `status ∈ {open}`만 반환(resolved 제외; `acknowledged`는 존재하지 않음), 발생시각 내림차순. 각 원소의 식별자는 계약 2 목록의 `id`가 아니라 `crisis_alert`와 동일하게 **`incidentId`**이며, 사고 site의 `{address, managerName, managerPhone}`를 **`site`로 중첩** 포함한다(sites 테이블(계약 4)에서 조인). 이 payload 동형성 보장으로 web-frontend가 접속/재접속 시 진행 중 위기 배너를 실시간 `crisis_alert`와 같은 모양으로 재구성하며, 현장 연락 정보가 결손된 반쪽 배너가 되지 않는다
 
 ### 검증 단언 (TDD)
 
@@ -166,14 +164,14 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
 - [ ] `status=resolved` 필터 → `data[]`의 모든 `status == "resolved"`
 - [ ] open incident에 resolve(notes 있음) → `200`, `resolvedByKind == "web"`
 - [ ] 같은 incident에 resolve 재호출 → `409`
-- [ ] `resolutionNotes: ""` 로 resolve → `400`
-- [ ] user 토큰으로 acknowledge → `403`
+- [ ] `resolutionNotes: ""`(또는 생략·공백) 로 resolve → `400`이 아니라 `200`(노트 선택 — 빈 값/`null`로 저장)
+- [ ] user 토큰으로 resolve → `403` (해소는 admin 전용; 조회 `GET /api/incidents`는 user `200`)
 - [ ] resolve 성공 직후 WS 클라이언트가 `incident_resolved` 메시지 수신 (계약 14 단언과 교차)
-- [ ] `GET /api/incidents/active` → `200`, 모든 원소 `status ∈ {open, acknowledged}`(resolved 미포함), 각 원소에 `incidentId`·`site.address`·`site.managerName`·`site.managerPhone` 존재
+- [ ] `GET /api/incidents/active` → `200`, 모든 원소 `status == "open"`(resolved·acknowledged 미포함), 각 원소에 `incidentId`·`site.address`·`site.managerName`·`site.managerPhone` 존재
 - [ ] `GET /api/incidents/active` 원소의 키 집합이 `crisis_alert`(계약 14) payload와 동형 — `incidentId, siteId, description, occurredAt, isTest, site.{address,managerName,managerPhone}`
   ```bash
   curl -s -H "Authorization: Bearer $T" http://localhost:8080/api/incidents/active \
-    | jq -e 'all(.[]; has("incidentId") and (.status=="open" or .status=="acknowledged") and (.site|has("address") and has("managerName") and has("managerPhone")))'
+    | jq -e 'all(.[]; has("incidentId") and .status=="open" and (.site|has("address") and has("managerName") and has("managerPhone")))'
   ```
 
 ---
@@ -309,8 +307,9 @@ GET → `200` 배열 · POST → `201` · PUT → `200` · DELETE → `204`
 
 | Method | Path | Auth | 입력 |
 |--------|------|------|------|
-| GET | `/api/devices` | user | — (삭제 제외 목록) |
+| GET | `/api/devices` | user | — (삭제 제외 목록) · query: `siteId`+`deviceId`(합성키→수치 id 사상 필터) |
 | GET | `/api/devices/all` | admin | — (soft-deleted 포함) |
+| GET | `/api/devices/{id}` | user | — (수치 DB id 단건 조회, 장비 현재-상태 검색) |
 | PATCH | `/api/devices/{id}` | user | `{alias: string}` |
 | DELETE | `/api/devices/{id}` | user | — (soft delete) |
 | POST | `/api/devices/{id}/restore` | user | — |
@@ -328,6 +327,7 @@ Device object:
 }
 ```
 
+- `GET /api/devices/{id}` → `200` device object (미삭제) · 미등록/삭제(`deletedAt`) → `404` · 검색은 합성키 `siteId:deviceId`를 `?siteId=&deviceId=` 필터로 수치 id에 사상 후 단건 조회(spec system-status-aggregate 단언 D)
 - PATCH → `200` `{id, alias}` · 없으면 `404`
 - DELETE → `204` · 이미 삭제/없음 `404`
 - restore → `200` `{id, "status":"restored"}`
@@ -406,7 +406,8 @@ Device object:
 
 - 이 그룹에서 web-backend가 보장하는 것은 **인증 게이트 + 투명 프록시** 두 가지뿐 — 바디 변형·필터링 없음
 - JWT 없이는 어떤 프록시 경로도 통과 불가
-- **아카이브 status 소비자 계약**: `GET /api/archives` 응답 각 항목의 `status`는 recording 스펙([`docs/spec/recording.md`](recording.md) §출력·§HTTP API)이 **정의를 소유**하는 enum 6종 `{protecting, pending, finalizing, processing, completed, failed}` 중 하나다(값 정의 SSOT=recording 스펙, 본 계약은 값을 재정의하지 않음). 이 enum을 소비하는 web-frontend는 다음을 **의무로** 지킨다 — (a) 6종 **전부**를 처리한다, (b) 이 6종에 없는 **미지 상태가 오면 안전 fallback**한다: 미완료(진행 중)로 취급하며 임의로 완료(`completed`)로 표시하지 않는다, (c) `failed`는 오류 종단으로 **사용자에게 노출**한다(실패 표기+사유). recording 기동 복구(recording 스펙 단언 P/P-2) 도입으로 재시작 직후 `finalizing`·`processing`·`failed`가 노출될 확률이 증가하므로 이 소비자 의무를 판정 가능한 계약으로 고정한다.
+- **아카이브 status 소비자 계약**: `GET /api/archives` 응답 각 항목의 `status`는 recording 스펙([`docs/spec/recording.md`](recording.md) §출력·§HTTP API)이 **정의를 소유**하는 enum 6종 `{protecting, pending, finalizing, processing, completed, failed}` 중 하나다(값 정의 SSOT=recording 스펙, 본 계약은 값을 재정의하지 않음). 이 enum을 소비하는 web-frontend는 다음을 **의무로** 지킨다 — (a) 6종 **전부**를 처리한다, (b) 이 6종에 없는 **미지 상태가 오면 안전 fallback**한다: 미완료(진행 중)로 취급하며 임의로 완료(`completed`)로 표시하지 않는다, (c) `failed`는 오류 종단으로 **사용자에게 노출**한다(실패 표기+사유 `lastError`), (d) `completed` 항목의 `completedAt`(RFC3339 **UTC**)을 **로컬 시각으로 변환해 표시**한다(값의 정본은 UTC, 고아 필드 방지). recording 기동 복구(recording 스펙 단언 P/P-2) 도입으로 재시작 직후 `finalizing`·`processing`·`failed`가 노출될 확률이 증가하므로 이 소비자 의무를 판정 가능한 계약으로 고정한다.
+- **아카이브 다운로드 게이트(투명 프록시)**: `GET /api/archives/{id}/download`는 recording의 다운로드 계약을 그대로 통과시킨다 — `completed`만 `video/mp4` 서빙, 그 외 모든 비-`completed`(미완료 4종 **및** `failed`)는 **409**, 아카이브 부재는 **404**. web-backend는 이 응답(상태 코드·헤더·바디)을 변형 없이 forward하며 recording 통신 실패 시에만 `502`를 낸다. `completedAt`/`lastError` 신규 필드도 생산자(recording)가 만들고 본 프록시는 그대로 통과시킨다(투명 프록시는 새 응답 필드를 만들지 않음).
 
 ### 검증 단언 (TDD)
 
@@ -548,7 +549,8 @@ Device object:
 | Method | Path | Auth | 입력 |
 |--------|------|------|------|
 | GET | `/api/health` | user | — |
-| GET | `/api/health/events` | user | query: `limit`(def 50) `offset`(def 0) `entity_kind`(`service`\|`sensor`) |
+| GET | `/api/health/summary` | user | — (현재-상태 집계 요약 창, spec system-status-aggregate) |
+| GET | `/api/health/events` | user | query: `limit`(def 50) `offset`(def 0) `entity_kind`(`service`\|`sensor`) `entity_id`(`siteId:deviceId`, 장비 드릴다운) |
 
 ### 출력 (계약)
 
@@ -568,6 +570,20 @@ Device object:
 ```
 
 `GET /api/health/events` → `200` `[{id, entityKind, entityId, status, detectedAt, detail}]`
+
+`GET /api/health/summary` → `200` 집계 (spec system-status-aggregate — 크기가 예외 장비 수에만 비례):
+
+```json
+{
+  "summary":  {"healthy": 200, "abnormal": 1, "offline": 1},
+  "services": [{"id": "hw-gateway", "status": "healthy | unhealthy"}],
+  "exceptions": [{"id": "site1:VOICE-01", "displayName": "음성센서 1", "category": "abnormal | offline", "ageSec": 3600, "reason": "no heartbeat"}],
+  "exceptionsOverflow": 0
+}
+```
+
+- `summary` 세 카운트의 합 = 미삭제 장비 총수. `exceptions`는 abnormal/offline **만** 담고 상한 50건(초과분은 `exceptionsOverflow`가 대표). healthy 장비는 카운트로만 대표(개별 미나열). `services`는 계약 12 감시 집합 전체(항상 완전). 카운트/예외는 단일 읽기 트랜잭션(단일 일관 스냅샷)에서 산출.
+- **[델타] `entity_id` 필터**: `GET /api/health/events?entity_id=<siteId:deviceId>`는 그 장비의 sensor 전이(online/offline)만 반환한다(다른 장비 전이 0건 — 센서 `entityId`가 `siteId:deviceId`로 매칭). 장비 이력 드릴다운의 접면이며, 집계 응답에는 어떤 전이-로그도 실리지 않는다.
 
 ### 핵심 로직 (불변식)
 
@@ -780,6 +796,72 @@ MQTT 발행 페이로드 스키마의 SSOT는 `docs/spec/interface-mqtt.md` — 
 - [ ] mosquitto 정지 상태에서 hw-gateway를 (재)기동한 직후 — 최초 브로커 연결 미성립 — `POST /api/restart`(유효 바디) → `503` `{"error":"MQTT broker not connected"}`
 - [ ] 브로커 연결이 한 번 성립한 뒤 mosquitto 중지 → `curl --max-time 5 -X POST http://hw-gateway:8080/api/restart`(유효 바디)가 5초 내 미응답 (curl exit 28 — `503` 아님, hw-gateway.md 단언 O2와 교차)
 - [ ] `GET /api/equipment/status` → `200` JSON 배열, 모든 항목 `alertState ∈ {none, active}`
+
+---
+
+## 계약 16: Notifications — 채널별 테스트 발송 (`/api/notifications/*`)
+
+관리자가 저장해 둔 알림 채널(이메일·SMS)이 실제로 동작하는지 **채널마다 한 번씩** 확인하는 접면. 단위 계약의 정본은 `docs/spec/notification-test-send.md`이며, 본 계약은 그 web-api 접면을 고정한다. 채널 사용가능 판정과 실제 발송은 **동일 소스(notifier 실행 config)** 를 참조한다 — web-backend는 notifier 조회 결과를 **그대로 투사**하고 자체 판정하지 않는다. notifier internal 접면(`/internal/channel-status`·`/internal/test-send`)은 `docs/spec/notifier.md`가 소유한다.
+
+### 입력
+
+| Method | Path | Auth | 입력 |
+|--------|------|------|------|
+| GET | `/api/notifications/channels` | admin | — (in-scope 채널별 사용가능 상태 조회) |
+| POST | `/api/notifications/test` | admin | `{channel, target}` — `channel ∈ {email, sms}`, `target`은 관리자가 입력한 명시 단일 값(이메일 주소/전화번호; contactId 아님) |
+
+- **지원 채널 집합은 정확히 `{email, sms}`**. `channel ∉ {email, sms}`(예: `kakaotalk`)은 `400`(발송 0건).
+- `target` 형식: email은 `local@domain.tld`, sms는 전화번호 `01[016789]-\d{3,4}-\d{4}`. 형식 위반·부재는 `400`(발송 0건).
+
+### 출력 (계약)
+
+`GET /api/notifications/channels` → `200`:
+
+```json
+{ "email": { "usable": true, "reason": "" }, "sms": { "usable": false, "reason": "not_configured" } }
+```
+
+- 채널 집합은 **정확히 `email`·`sms` 두 키뿐**이다 — `kakaotalk` 키는 존재하지 않는다.
+- `usable`은 web-backend의 자체 추측이 아니라 **notifier의 현재 실행 config 조회 결과를 그대로 투사**한 것이다(status 소스 = 발송 소스 = notifier 동일).
+- notifier 무응답/비-200(중단·재시작 창) → `502` `{"error": "...", "reason": "upstream_unavailable"}`. **거짓 `not_configured`(또는 이유 없는 `usable=false`)로 강등하지 않는다** — 미설정과 도달불가는 구분되는 사유다.
+
+`POST /api/notifications/test` → `200`:
+
+```json
+{ "outcome": "sent" }          // 또는 { "outcome": "failed", "reason": "..." } · { "outcome": "not_configured" }
+```
+
+- `outcome ∈ {sent, failed, not_configured}`(폐집합). `failed`는 `reason`을 동반한다.
+  - `sent` — 실제 발송 경로로 시도했고 채널/전송이 수락.
+  - `failed`(+`reason`) — 실제 발송 경로로 시도했으나 전송/공급자 오류.
+  - `not_configured` — 요청 시점 판정상 채널 미설정(필수 자격 값 부재) — **발송을 시도하지 않는다**. (이메일은 notifier `POST /api/send-email`의 `503`(SMTP 미설정)이 `not_configured`로 매핑된다.)
+- **처리 순서**: admin 관문 → 입력/채널 지원 검증(`400`, **레이트리밋보다 먼저**·`400`은 토큰 미소모) → `(channel, target)` 레이트리밋(`429`, 발송 0건) → notifier `/internal/test-send` 프록시.
+- `channel ∉ {email, sms}`(예: `kakaotalk`) → `400`(발송 0건). 입력 형식 위반 → `400`(발송 0건). 이 `400`들은 레이트리밋 토큰을 소모하지 않으므로 직후의 유효 요청은 `429`가 되지 않는다.
+- 같은 `(channel, target)`로 분당 1건 초과 → `429`(발송 0건). 스코프가 `(channel, target)`이므로 다른 `target` 요청은 이 리밋에 걸리지 않는다.
+- notifier 자체 미도달/5xx → `502` `{"reason": "upstream_unavailable"}`. **폐집합 `{sent, failed, not_configured}` 어디에도 맞지 않으므로 outcome을 만들지 않는다** — `not_configured`/`sent`로 강등하지 않는다.
+
+### 핵심 로직 (불변식)
+
+- **투사(projection)**: web-backend는 채널 usability를 자체 판정하지 않고 notifier의 `/internal/channel-status` 결과를 그대로 투사한다. 응답 구조체가 `email`·`sms`만 담아 notifier가 다른 채널 키를 실어도 표면화되지 않는다(KakaoTalk 부재).
+- **status 소스 = 발송 소스**: 사용가능 상태 조회와 실제 발송 분기(미설정/설정)는 notifier의 동일 config를 참조하므로 어긋날 수 없다. notifier config는 배포 시점 env이나, notifier 재시작 후에는 **web-backend 재시작 없이** 다음 요청부터 새 판정이 반영된다.
+- **발송 대상 격리(스팸 방지)**: 테스트는 관리자가 지정한 단일 대상 1건에게만 도달한다 — 등록 비상연락처(contactId)로의 팬아웃 0건. 위기 경로의 fallback 체인(KakaoTalk→SMS→시스템알람)과 연락처 팬아웃은 우회하되, 운영 발송기의 자격증명·전송 구현은 공유한다.
+- **채널 독립**: 이메일 테스트는 이메일만, SMS 테스트는 SMS만 시도한다(교차 발동 없음).
+- **프록시 홉 타임아웃 규율**: web-backend→notifier 프록시 홉(channels·test 모두)의 클라이언트 타임아웃은 채널 예산(≤12s, `notifier.md` §출력 7)보다 크게(≥15s) 둔다 — notifier의 정상 지연 응답을 조기 `502`로 오종결하지 않기 위함. 진짜 도달불가만 `502`로 종결.
+- **권한**: 두 표면 모두 **연락처 CUD(POST/PUT/DELETE `/api/contacts`)와 동일한 admin 권한**을 요구한다(`GET /api/contacts`의 user 권한과 구분). 비-admin `403`, 무인증 `401` — 어느 경우에도 발송 0건.
+
+### 검증 단언 (TDD)
+
+- [ ] `GET /api/notifications/channels`(admin) → `200`, 키 집합이 정확히 `{email, sms}`(kakaotalk 없음), 각 채널에 `usable`(boolean)·`reason` 존재
+  ```bash
+  curl -s -H "Authorization: Bearer $ADMIN" http://localhost:8080/api/notifications/channels \
+    | jq -e '(keys|sort)==["email","sms"] and (.email|has("usable")) and (.sms|has("usable"))'
+  ```
+- [ ] `POST /api/notifications/test` `{"channel":"kakaotalk","target":"..."}` → `400`(발송 0건)
+- [ ] 미설정 이메일 채널로 `POST /api/notifications/test` `{"channel":"email","target":"a@b.c"}` → `200` `{"outcome":"not_configured"}`(발송 0건)
+- [ ] user 토큰으로 `GET /api/notifications/channels`·`POST /api/notifications/test` → `403`; 무인증 → `401`(발송 0건)
+- [ ] 같은 `(channel, target)`로 분당 2번째 유효 요청 → `429`(발송 0건); 다른 `target`은 비-`429`
+- [ ] 입력 형식 위반(`400`) 직후 같은 `(channel, target)`의 유효 요청 → `429`가 아님(400은 토큰 미소모)
+- [ ] notifier 중단 상태에서 `GET /api/notifications/channels`·`POST /api/notifications/test` → `502` + `reason == "upstream_unavailable"`(거짓 `not_configured`/`sent` 강등 없음)
 
 ---
 

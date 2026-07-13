@@ -55,7 +55,7 @@ describe("App tab bar a11y (#100)", () => {
     const cctvTab = screen.getByRole("button", { name: /CCTV/ });
     expect(cctvTab).toHaveAttribute("aria-current", "page");
 
-    const incidentsTab = screen.getByRole("button", { name: /사고이력/ });
+    const incidentsTab = screen.getByRole("button", { name: /경보이력/ });
     expect(incidentsTab).not.toHaveAttribute("aria-current");
 
     await user.click(incidentsTab);

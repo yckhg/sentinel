@@ -61,7 +61,18 @@
 - SMTP 미설정 시 `503`.
 - `body`는 발송 전 HTML sanitize를 거친다: `<script>`/`<iframe>`은 내용째 제거, `on*` 이벤트 속성 제거, `javascript:` URI 제거, 허용 태그(p, a, br, strong, em, h1~h6, html, head, body) 외의 태그는 껍데기만 제거.
 
-### 3. `GET /healthz` — 헬스체크
+### 3. `GET /internal/channel-status` — 채널 사용가능 상태 (내부 전용)
+
+- 입력 없음. in-scope 채널(`email`, `sms`) 각각의 사용가능 여부를 자기 실행 env로 판정해 반환한다 (§출력 14). web-backend의 admin status 표면(`interface-web-api.md` 계약 16)이 이 결과를 그대로 투사한다.
+- 사설/루프백 IP 대역(Docker 내부망)에서 온 요청만 수용하며, 외부 IP는 `403`으로 거절한다(`isInternalIP`, `/api/send-email`과 동일 경계).
+
+### 4. `POST /internal/test-send` — 단건 동기 테스트 발송 (내부 전용)
+
+- Body: `{channel, target}` — `channel ∈ {email, sms}`, `target`은 명시 단일 대상(이메일 주소/전화번호). 지정한 **채널 하나만** 지정 대상 1건에게 시도한다.
+- 위기 경로의 fallback 체인(KakaoTalk→SMS→시스템알람)과 연락처 팬아웃은 **우회**하고, 동기적으로 outcome을 반환한다 (§출력 15).
+- 사설/루프백 IP 대역에서 온 요청만 수용하며, 외부 IP는 `403`으로 거절한다(`isInternalIP`).
+
+### 5. `GET /healthz` — 헬스체크
 
 - 항상 `200` + `{"status":"ok","service":"notifier"}`.
 
@@ -81,7 +92,7 @@
 7. **유한 지연 (채널당 소요 상한 고정)** — 모든 외부 HTTP 호출은 응답 헤더 5초 / 전체 10초 타임아웃을 가진다. 나아가 재시도(§출력 13)를 포함한 **채널당 총 소요 상한은 12초로 고정**한다(단일 시도 전체 타임아웃 10s + 짧은 재시도 여지). 따라서 한 연락처의 체인(알림톡 → SMS → 시스템 알람)은 이 채널당 상한들의 합으로 유계이며 유한 시간 내에 반드시 종결된다.
 8. **관측 가능성** — 접수, 채널별 성공/실패, degraded 진입, 시스템 알람 기록 시도의 결과, 보호 요청 결과, dispatch 요약(성공 수/채널별 집계)이 모두 로그로 남는다. 어떤 실패도 로그 없이 소멸하지 않는다. 단 자격증명은 §9에 따라 마스킹되어 기록되며 평문으로는 남지 않는다.
 9. **비밀정보 로그 미노출 (보안)** — 외부 채널·이메일 발송에 쓰이는 자격증명(알림톡/SMS의 API 키·시크릿 키·발신프로필 키, `SMTP_PASS`, 그리고 발송 요청에 실리는 `Authorization`/`Bearer` 토큰 등)은 로그·오류 메시지·dispatch 요약 어디에도 **평문으로 남지 않는다**. 진단 목적으로 자격증명 일부를 표기해야 할 때는 마스킹한다(예: 앞 일부만 남기고 나머지를 `***`). 이 보장은 자격증명이 유효하여 발송에 성공하든, 무효/오류로 실패 경로를 타든 **모든 경로에서** 성립한다. (근거: 이슈 #30)
-10. **신뢰 경계 — 내부망 격리 (보안)** — notifier의 모든 HTTP 엔드포인트(`/api/notify`, `/api/send-email`, `/healthz`)는 Docker 내부망(`yc-network`) 전용이다. 외부(인터넷)로부터의 차단은 네트워크 격리·게이트웨이의 책임이며, 그것이 대량 주입(위기알림 위조·유료 SMS 남용)에 대한 1차 방어다. 앱은 이 경계를 보완하되 대체하지 않는다:
+10. **신뢰 경계 — 내부망 격리 (보안)** — notifier의 모든 HTTP 엔드포인트(`/api/notify`, `/api/send-email`, `/internal/channel-status`, `/internal/test-send`, `/healthz`)는 Docker 내부망(`yc-network`) 전용이다. 이 중 `/internal/channel-status`·`/internal/test-send`는 `/api/send-email`과 동일하게 사설/루프백 IP 대역만 수용하고 외부 IP는 `403`으로 거절한다(`isInternalIP`). 외부(인터넷)로부터의 차단은 네트워크 격리·게이트웨이의 책임이며, 그것이 대량 주입(위기알림 위조·유료 SMS 남용)에 대한 1차 방어다. 앱은 이 경계를 보완하되 대체하지 않는다:
     - IP 판정은 **소켓 원격 주소(연결 상대)** 기준이며, `X-Forwarded-For` 등 클라이언트가 제어 가능한 헤더는 신뢰하지 않는다. 내부망에 신뢰할 수 있는 리버스 프록시가 없다는 전제이므로, 이런 헤더로 내부 IP 판정을 우회할 수 없다.
     - `/api/send-email`은 그 위에서 사설/루프백 IP 대역(내부망) 요청만 수용하고 외부 IP는 `403`으로 거절한다(입력 §2).
     - `/api/notify`는 별도 앱-레벨 인증(공유 토큰 등)을 요구하지 않는다. 이는 내부망 격리 전제 하의 의도된 계약이며, 통제의 비대칭이 아니라 보안 경계를 네트워크 층에 두기로 한 결정이다.
@@ -94,6 +105,9 @@
     - **타임아웃은 재시도 트리거가 아니다** — 응답 헤더/전체 타임아웃(§출력 7)으로 실패한 호출은 이미 시간 예산을 소진한 것이므로, 재시도하면 위기 지연만 가중된다. 따라서 타임아웃 시에는 재시도 없이 **즉시 폴백**한다. 재시도는 빠르게 판별되는 실패(연결 거부·5xx)에만 적용한다.
     - 위기 지연 최소화를 위해 재시도 상한과 대기는 작게 유지하며, 재시도를 포함한 채널 전체 소요는 §출력 7의 채널당 소요 상한(12s) 안에서 유한하게 종결된다. `CHANNEL_RETRY_MAX=0`이면 재시도 없이 곧바로 폴백한다. 재시도 발생 및 최종 성패는 로그로 남는다. (명백한 영구 실패 — 예: 채널 비활성·자격증명 미설정 — 는 재시도 대상이 아니며 즉시 폴백한다.)
     - **도입 근거** — 폴백은 채널 자체를 강등하지만, 1순위 알림톡의 순간적 5xx·연결 거부 같은 **동일 채널의 일시 오류**는 즉시 1회 재시도로 폴백보다 저렴하게 구제되어 1순위 채널 성공률을 높이는 경우가 있다. 과설계를 피하기 위해 기본값을 `CHANNEL_RETRY_MAX=1`로 고정한다.
+14. **채널 사용가능 상태 투사 (`GET /internal/channel-status`)** — in-scope 채널 `email`·`sms` **각각**에 대해 `{usable, reason}`을 반환한다(`{email:{usable,reason}, sms:{usable,reason}}`). `usable` 판정 규칙: 이메일은 `SMTP_HOST`와 `SMTP_FROM`이 **모두** 존재일 때 `true`, SMS는 `SMS_ENABLED=="true"` **그리고** 자격증명(`NHN_SMS_APP_KEY`·`NHN_SMS_SECRET_KEY`) 존재일 때 `true`다. `ENABLED`가 꺼져 있으면 자격증명이 있어도 `false`다. 미사용 시 `reason`(예: `not_configured`)을 동반한다. **KakaoTalk은 이 집합에 포함되지 않는다.** web-backend admin status(`interface-web-api.md` 계약 16)가 이 결과를 그대로 투사한다.
+15. **단건 동기 테스트 발송 폐집합 (`POST /internal/test-send`)** — 지정 채널 하나로 지정 단일 대상에게 1건만 시도하고(위기 경로의 fallback 체인·연락처 팬아웃 **우회**), 동기적으로 outcome ∈ **`{sent, failed, not_configured}`**(폐집합)를 반환한다. `not_configured`(§출력 14의 usability 판정상 미설정 — 필수 자격 값 부재)는 **발송을 시도하지 않는다**. 설정된 채널이 전송/공급자 오류로 실패하면 `failed`(+사유)다(`not_configured`가 아니다). 성공은 `sent`. 운영 채널 발송과 **동일한 자격증명·전송 구현**을 재사용하며, 채널 타임아웃 예산은 §출력 7(채널당 소요 상한 ≤12s)을 공유한다.
+    - **status 소스 = 발송 소스 (단일 판정 함수)** — 채널 사용가능 판정(§출력 14)과 test-send의 설정/미설정 분기는 **동일한 usability 판정 함수**를 공유한다(email·SMS 각 채널의 `emailChannelUsable`/`smsChannelUsable`). 따라서 status와 실제 발송의 미설정 판정은 서로 어긋날 수 없다. 이메일 채널은 notifier 기존 `POST /api/send-email`(SMTP 미설정 시 `503`, §입력 2)을 재사용해 그 `503`을 outcome `not_configured`로 매핑하는 형태 **또는** 위 공유 usability 함수로 미설정을 판정해 무발송·`not_configured`를 반환하는 형태 둘 다 이 계약을 만족하며, 어느 쪽이든 §출력 14의 status와 동일한 소스를 참조한다. (notifier 프로세스가 이 홉에 응답하지 못하는 도달불가는 이 폐집합의 결과가 아니라 프록시 층 `502`로 표면화된다 — `interface-web-api.md` 계약 16.)
 
 ## 핵심 로직 (동작)
 

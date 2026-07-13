@@ -61,10 +61,11 @@ func main() {
 		w.Write([]byte(`{"status":"ok","service":"web-backend"}`))
 	})
 
-	// Rate limiters for public auth endpoints
+	// Rate limiters for public auth endpoints. Cleanup is started AFTER all
+	// handlers are constructed (below) so it also covers the (channel,target)-keyed
+	// test-send limiter created inside handleNotificationTest (F3).
 	loginLimiter := newRateLimiter(10, time.Minute)   // 10 req/min per IP
 	registerLimiter := newRateLimiter(5, time.Minute) // 5 req/min per IP
-	startRateLimitCleanup(loginLimiter, registerLimiter)
 
 	// Auth routes (public — rate limited)
 	mux.HandleFunc("POST /auth/register", rateLimitMiddleware(registerLimiter, handleRegister(db)))
@@ -146,7 +147,6 @@ func main() {
 	// Incidents (any authenticated user)
 	apiMux.HandleFunc("GET /api/incidents", handleListIncidents(db))
 	apiMux.HandleFunc("GET /api/incidents/active", handleActiveIncidents(db))
-	apiMux.HandleFunc("PATCH /api/incidents/{id}/acknowledge", handleAcknowledgeIncident(db))
 	apiMux.HandleFunc("PATCH /api/incidents/{id}/resolve", handleResolveIncident(db))
 
 	// Equipment restart (any authenticated user)
@@ -155,6 +155,7 @@ func main() {
 	// Devices management
 	apiMux.HandleFunc("GET /api/devices", handleListDevices(db))
 	apiMux.HandleFunc("GET /api/devices/all", handleListDevices(db))
+	apiMux.HandleFunc("GET /api/devices/{id}", handleGetDevice(db))
 	apiMux.HandleFunc("PATCH /api/devices/{id}", handleUpdateDeviceAlias(db))
 	apiMux.HandleFunc("DELETE /api/devices/{id}", handleDeleteDevice(db))
 	apiMux.HandleFunc("POST /api/devices/{id}/restore", handleRestoreDevice(db))
@@ -184,11 +185,21 @@ func main() {
 
 	// Unified health monitoring (any authenticated user)
 	apiMux.HandleFunc("GET /api/health", handleGetHealth(healthMonitor))
+	apiMux.HandleFunc("GET /api/health/summary", handleGetHealthSummary(healthMonitor))
 	apiMux.HandleFunc("GET /api/health/events", handleListHealthEvents(db))
 
 	// Temporary links management (admin only)
 	apiMux.HandleFunc("GET /api/links", handleListTempLinks())
 	apiMux.HandleFunc("DELETE /api/links/{id}", handleRevokeTempLink())
+
+	// Notification channel test-send (admin only) — status read + single test send.
+	apiMux.HandleFunc("GET /api/notifications/channels", handleNotificationChannels(db))
+	apiMux.HandleFunc("POST /api/notifications/test", handleNotificationTest(db))
+
+	// Start rate-limit cleanup now that every limiter exists: auth limiters plus the
+	// (channel,target)-keyed test-send limiter registered by handleNotificationTest
+	// above, whose entry map would otherwise grow unbounded (F3).
+	startRateLimitCleanup(append([]*rateLimiter{loginLimiter, registerLimiter}, testSendLimiterList()...)...)
 
 	// Mount protected routes behind auth middleware
 	mux.Handle("/api/", authMiddleware(db, apiMux))
