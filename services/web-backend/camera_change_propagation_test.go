@@ -2,6 +2,9 @@ package main
 
 import (
 	"database/sql"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -355,6 +358,156 @@ func TestDeleteCamera_NoEvidenceCascade_Static(t *testing.T) {
 	}
 	if regexp.MustCompile(`(?i)archive`).MatchString(body) {
 		t.Errorf("handleDeleteCamera must not touch archive evidence")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Assertion A (static reinforcement) — commit-then-propagate ordering.
+//
+// The runtime gate proves that a DB failure (404) yields no dispatch, but does
+// not statically forbid a "fire the fan-out *before* the DB write succeeds"
+// regression (contract 1 requires propagation strictly *after* a guarded
+// successful write). This AST gate pins that order: in each of the three camera
+// handlers, every reload trigger call must sit *after* both the db.ExecContext
+// write and an early-return success guard that follows it.
+//
+// Non-vacuity (self-verified): temporarily hoisting a trigger call above the
+// ExecContext write in cameras.go makes this test RED —
+//   execPos < firstTriggerPos fails ("... must fire AFTER the DB write") — and
+// removing the intervening `if err != nil { return }` guard also RED
+//   ("... must be guarded by an early-return success check ..."). Reverted after
+// confirming.
+// ---------------------------------------------------------------------------
+
+// handlerClosure returns the returned http.HandlerFunc closure (*ast.FuncLit) of
+// the named handler-factory FuncDecl in f, or nil if not found.
+func handlerClosure(f *ast.File, name string) *ast.FuncLit {
+	for _, decl := range f.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != name {
+			continue
+		}
+		var lit *ast.FuncLit
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			if lit != nil {
+				return false
+			}
+			if l, ok := n.(*ast.FuncLit); ok {
+				lit = l
+				return false
+			}
+			return true
+		})
+		return lit
+	}
+	return nil
+}
+
+// ifReturnsEarly reports whether an IfStmt's body contains a top-level return.
+func ifReturnsEarly(is *ast.IfStmt) bool {
+	for _, stmt := range is.Body.List {
+		if _, ok := stmt.(*ast.ReturnStmt); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCameraHandlers_FanoutAfterDBSuccess_StaticOrder(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "cameras.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse cameras.go: %v", err)
+	}
+
+	triggerNames := map[string]bool{
+		"triggerCCTVReload":      true,
+		"triggerYouTubeReload":   true,
+		"triggerRecordingReload": true,
+	}
+
+	for _, name := range []string{"handleCreateCamera", "handleUpdateCamera", "handleDeleteCamera"} {
+		t.Run(name, func(t *testing.T) {
+			lit := handlerClosure(f, name)
+			if lit == nil {
+				t.Fatalf("could not locate returned handler closure in %s", name)
+			}
+
+			// Position of the DB write (db.ExecContext) — the INSERT/UPDATE/DELETE.
+			var execPos token.Pos
+			// Positions of early-return guards (if ... { return }).
+			var guardPos []token.Pos
+			// Positions and names of reload trigger calls.
+			triggerPos := map[string]token.Pos{}
+
+			ast.Inspect(lit.Body, func(n ast.Node) bool {
+				switch node := n.(type) {
+				case *ast.CallExpr:
+					switch fn := node.Fun.(type) {
+					case *ast.SelectorExpr:
+						if fn.Sel.Name == "ExecContext" {
+							// last ExecContext wins (there is exactly one write per handler)
+							execPos = node.Pos()
+						}
+					case *ast.Ident:
+						if triggerNames[fn.Name] {
+							if _, seen := triggerPos[fn.Name]; !seen {
+								triggerPos[fn.Name] = node.Pos()
+							}
+						}
+					}
+				case *ast.IfStmt:
+					if ifReturnsEarly(node) {
+						guardPos = append(guardPos, node.Pos())
+					}
+				}
+				return true
+			})
+
+			if execPos == token.NoPos {
+				t.Fatalf("%s: no db.ExecContext (DB write) found", name)
+			}
+			// All three triggers must be wired in every handler.
+			for tn := range triggerNames {
+				if _, ok := triggerPos[tn]; !ok {
+					t.Errorf("%s: missing reload trigger %s()", name, tn)
+				}
+			}
+			if t.Failed() {
+				return
+			}
+
+			// First trigger call in source order.
+			firstTrigger := token.Pos(1 << 62)
+			for _, p := range triggerPos {
+				if p < firstTrigger {
+					firstTrigger = p
+				}
+			}
+
+			// (1) Every trigger fires strictly after the DB write.
+			for tn, p := range triggerPos {
+				if p <= execPos {
+					t.Errorf("%s: %s() at %v must fire AFTER the DB write (ExecContext at %v)",
+						name, tn, fset.Position(p), fset.Position(execPos))
+				}
+			}
+
+			// (2) A success guard (early-return if-check) sits between the write and
+			// the fan-out, so reaching the triggers implies the write succeeded.
+			guarded := false
+			for _, gp := range guardPos {
+				if gp > execPos && gp < firstTrigger {
+					guarded = true
+					break
+				}
+			}
+			if !guarded {
+				t.Errorf("%s: reload fan-out must be guarded by an early-return success check "+
+					"between the DB write (%v) and the first trigger (%v)",
+					name, fset.Position(execPos), fset.Position(firstTrigger))
+			}
+		})
 	}
 }
 
