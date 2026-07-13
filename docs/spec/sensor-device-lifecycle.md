@@ -172,7 +172,7 @@
 - **F2 (mutating)** — 재출현 backfill: 관리자 미접속 중 삭제 장치가 재신호 → 이후 관리자 WS 신규 접속 시 `connected` 직후 그 `deviceId`의 `device_reappeared` 프레임을 수신.
 - **G (mutating)** — 존재감 갱신: 이미 미삭제로 존재하는 장치에 `POST /api/devices/seen` → `last_seen` 갱신·온라인 판정, 새 행 미생성(같은 PK), `deleted_at` 불변(null).
 - **H1 (핵심, mutating)** — 삭제≠안전정지(런타임): 삭제된 장치의 `siteId`·`deviceId`로 위기 경보 이벤트 유입 → 사고 정상 생성·전달.
-- **H2 (핵심, static — 비-mutating)** — 삭제≠안전정지(정적, write sticky): 사고 생성 핸들러(`handleCreateIncident`) **본문 범위**에서 device presence upsert의 **SET 절에 `deleted_at = NULL` 대입이 없음**을 판정한다(대입만 대상 — `deleted_at IS NOT NULL` 같은 **읽기**는 재출현 CASE에 정당히 존재하므로 제외). 함수 본문 스코프(go/parser 또는 라인레인지)로 한정해 파일 전역 grep 위양성을 피한다. 무음 복원 회귀를 런타임 스택 없이 막는 정적 게이트. (read 비게이팅은 런타임 H1이 담당하므로 H2는 write 축 단일로 좁힌다.)
+- **H2 (핵심, static — 비-mutating)** — 삭제≠안전정지(정적, write sticky): 사고 생성 핸들러(`handleCreateIncident`) **본문 범위**에서 device presence upsert의 **SET 절에 `deleted_at = NULL` 대입이 없음**을 판정한다(대입만 대상 — `deleted_at IS NOT NULL` 같은 **읽기**는 재출현 CASE에 정당히 존재하므로 제외). 함수 본문 스코프(go/parser 또는 라인레인지)로 한정해 파일 전역 grep 위양성을 피하되, **presence upsert가 공유 헬퍼로 위임되면 그 헬퍼 정의부까지 스코프에 포함**한다(본문 또는 위임 정의부 — 리팩터로 upsert가 본문 밖으로 나가도 게이트가 공허참(vacuous)이 되지 않게). 무음 복원 회귀를 런타임 스택 없이 막는 정적 게이트. (read 비게이팅은 런타임 H1이 담당하므로 H2는 write 축 단일로 좁힌다.)
 - **I (핵심)** — internal 경계(seen 한정): `POST /api/devices/seen`은 `X-Internal-Token` 검증(fail-closed)을 거친다. 헤더 부재·불일치·서버 시크릿 미설정 → `401`. 유효 시크릿 → 통과. (범위 주의: 본 단언은 **seen 경로의** internal 경계만 주장한다. `POST /api/incidents`의 device 자동등록도 `X-Internal-Token`으로 동일 게이트한다 — E2 픽스처가 이 헤더를 사용. 그 외 internal 경로 전반의 앱레벨 차단은 본 잎 범위 밖.)
   ```bash
   curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8080/api/devices/seen \
@@ -181,12 +181,14 @@
     -H "X-Internal-Token: $INTERNAL_TOKEN" -H 'Content-Type: application/json' \
     -d '{"siteId":"s","deviceId":"d"}'   # → 2xx
   ```
+- **I2 (핵심)** — internal 경계(incidents): `POST /api/incidents`의 device 자동등록 경로도 `X-Internal-Token` fail-closed 게이트를 거친다. 헤더 부재·불일치·서버 시크릿 미설정 → `401`(위기 유입의 오구성 유실은 heartbeat보다 치명적이므로 부정 케이스를 명시 판정). 유효 시크릿 → 통과(E2 픽스처가 이 양성 경로 사용). 런타임 직접 호출자는 hw-gateway 단독이므로(web-frontend는 GET/PATCH만) 게이트 확장이 다른 호출자를 깨지 않는다.
+- **L (핵심, static — 비-mutating)** — hw-gateway 헤더 동봉: hw-gateway가 web-backend로 보내는 `POST /api/devices/seen`·`POST /api/incidents` 두 호출 **모두**에 `X-Internal-Token` 헤더를 설정함을 정적 확인(`hw-gateway/main.go` 송신부에 `req.Header.Set("X-Internal-Token", …)` 존재 — go/parser 또는 라인레인지). **fail-closed 게이트의 폭발 반경**(누락 시 프로덕션 heartbeat seen·위기 자동등록이 전면 401)을 상시 정적 게이트로 못박는다 — D·E·F·E2·I·I2 런타임 단언은 하네스가 토큰을 **직접 주입**하므로 이 송신부 누락을 가리지 못한다(그 사각을 L이 메운다).
 - **J (핵심)** — 권한: 모든 생명주기 변이는 admin 전용. `user`·`temp`로 `POST /api/devices`·`DELETE /api/devices/{id}`·`PATCH /api/devices/{id}`(alias) → `403`. `GET /api/devices`는 `user` `200`.
 - **K (핵심, needs-browser SKIP — 의도적)** — 장치 관리 UI: "장치 추가" 액션 렌더 + `POST /api/devices` 호출, 삭제 문구가 sticky 반영, `device_reappeared` 수신 시 재출현 표시 + 원클릭 재활성(`POST /api/devices`), `lastSeen == null` 장치 오프라인 렌더. 브라우저 관측 필요 → needs-browser SKIP.
 
 ## 검증 스킵 선언 (선택)
 
-- **A2 · D · E · E2 · F · F2 · G · H1** — 사유: mutating — `seen`·`incidents`·삭제 전이·WS 통지·위기 유입·health 집계는 `devices`/WS에 부작용. **격리 스택 + admin JWT + `INTERNAL_TOKEN`**(F/F2 WS 관찰자, H1/E2 위기 주입 포함)에서 판정. · 중요도: **핵심(load-bearing)** · 기본 **SKIP**, 격리 스택 준비 시 판정. (A·B·C·H2·I·J는 격리 web-backend + 정적 스캔으로 상시 판정 가능. I는 `X-Internal-Token`으로 상시 판정 가능해졌다. C2는 위생 정적 상시.)
+- **A2 · D · E · E2 · F · F2 · G · H1** — 사유: mutating — `seen`·`incidents`·삭제 전이·WS 통지·위기 유입·health 집계는 `devices`/WS에 부작용. **격리 스택 + admin JWT + `INTERNAL_TOKEN`**(F/F2 WS 관찰자, H1/E2 위기 주입 포함)에서 판정. · 중요도: **핵심(load-bearing)** · 기본 **SKIP**, 격리 스택 준비 시 판정. (A·B·C·C2·H2·I·I2·L·J는 격리 web-backend + 정적 스캔으로 상시 판정 가능. I·I2는 `X-Internal-Token`으로 상시 판정 가능해졌다. C2·L은 정적 상시 게이트 — L은 hw-gateway 송신부 정적 확인이라 mutating이 아니다.)
 - **K** — 사유: 브라우저 렌더 관측 필요. · 중요도: **핵심(load-bearing)** · 해소 조건: Playwright 세션 실행.
 
 ## 델타 (SSOT 정합 — 오케스트레이터 머지 반영분)
