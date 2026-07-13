@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -217,22 +218,26 @@ func TestSensorLifecycle_C_ReactivateSinglePath(t *testing.T) {
 	}
 }
 
-// --- MEDIUM-2 regression: RETURNING-gated reappear guard preserves once-only ------
-// Proves the perf optimization (gate the guard behind the presence upsert's
-// RETURNING deleted_at) preserves the dedup invariants without a WS observer:
-//   - live-device seen (hot path) never writes reappear_alerted_at,
-//   - first seen after delete flips reappear_alerted_at NULL→now exactly once,
-//   - a second (back-to-back) seen leaves it unchanged (once-only, seconds-agnostic),
-//   - reactivation resets it (re-arms the next cycle).
-
+// --- F1: once-only reappearance — ALWAYS-ON, non-vacuous gate ---------------------
+// Proves EXACTLY-ONE device_reappeared per delete→reappear cycle, independent of
+// clock resolution. The vacuity hazard (a back-to-back same-second 2nd seen produces
+// an identical timestamp, so a naive equality check can't tell "not re-stamped" from
+// "re-stamped to the same second") is closed by forcing a DISTINCT past sentinel
+// between the two seens and asserting it stays unchanged, PLUS counting broadcasts.
+// EXPERIMENT (verified, see report): deleting `AND reappear_alerted_at IS NULL` from
+// guardReappear's WHERE turns this test RED (2nd seen re-stamps sentinel→now AND
+// broadcast count becomes 2).
 func TestSensorLifecycle_ReappearGuardOnceOnly(t *testing.T) {
 	db := newTestDB(t)
 	internalToken = "sekret"
 	t.Cleanup(func() { internalToken = "" })
 
-	body := `{"siteId":"site-001","deviceId":"vs-guard"}`
+	var broadcasts int32
+	origB := BroadcastDeviceReappeared
+	BroadcastDeviceReappeared = func(_, _ string, _ *string) { atomic.AddInt32(&broadcasts, 1) }
+	t.Cleanup(func() { BroadcastDeviceReappeared = origB })
 
-	// register + capture id
+	body := `{"siteId":"site-001","deviceId":"vs-guard"}`
 	w := httptest.NewRecorder()
 	handleCreateDevice(db)(w, roleReq("admin", http.MethodPost, "/api/devices", "", body))
 	if w.Code != http.StatusCreated {
@@ -241,32 +246,31 @@ func TestSensorLifecycle_ReappearGuardOnceOnly(t *testing.T) {
 	var created deviceResponse
 	_ = json.Unmarshal(w.Body.Bytes(), &created)
 
-	// Hot path: seen on a LIVE device must not touch reappear_alerted_at.
-	if code := callSeen(db, "sekret", body); code != http.StatusOK {
-		t.Fatalf("seen(live) expected 200, got %d", code)
-	}
-	if ra := reappearAt(t, db, created.ID); ra != nil {
-		t.Errorf("hot path: reappear_alerted_at must stay NULL for a live device, got %v", *ra)
-	}
-
-	// Soft-delete, then first seen → reappear_alerted_at set once.
 	dw := httptest.NewRecorder()
 	handleDeleteDevice(db)(dw, roleReq("admin", http.MethodDelete, "/api/devices/"+idStr(created.ID), idStr(created.ID), ""))
 	if dw.Code != http.StatusNoContent {
 		t.Fatalf("delete expected 204, got %d", dw.Code)
 	}
+
+	// First seen after delete → reappear_alerted_at set, broadcast once.
 	callSeen(db, "sekret", body)
-	first := reappearAt(t, db, created.ID)
-	if first == nil {
+	if reappearAt(t, db, created.ID) == nil {
 		t.Fatalf("first seen after delete must set reappear_alerted_at")
 	}
-	// Second (back-to-back) seen → unchanged (once-only, independent of clock secs).
-	callSeen(db, "sekret", body)
-	second := reappearAt(t, db, created.ID)
-	if second == nil || *second != *first {
-		t.Errorf("second seen must not re-alert: first=%v second=%v", first, second)
+
+	// Force a DISTINCT past sentinel so a spurious re-stamp is detectable even at the
+	// same wall-clock second — this is what makes the gate non-vacuous.
+	const sentinel = "2000-01-01 00:00:00"
+	if _, err := db.Exec(`UPDATE devices SET reappear_alerted_at=? WHERE id=?`, sentinel, created.ID); err != nil {
+		t.Fatalf("stamp sentinel: %v", err)
 	}
-	// Device still soft-deleted (sticky) after both re-signals.
+
+	// Second seen (same cycle) → must NOT re-stamp and must NOT re-broadcast.
+	callSeen(db, "sekret", body)
+	if after := reappearAt(t, db, created.ID); after == nil || *after != sentinel {
+		t.Errorf("once-only: 2nd seen must not re-stamp reappear_alerted_at (want %q, got %v)", sentinel, after)
+	}
+	// Still sticky-deleted after both re-signals.
 	var deletedAt *string
 	if err := db.QueryRow(`SELECT datetime(deleted_at) FROM devices WHERE id=?`, created.ID).Scan(&deletedAt); err != nil {
 		t.Fatalf("read deleted_at: %v", err)
@@ -274,15 +278,72 @@ func TestSensorLifecycle_ReappearGuardOnceOnly(t *testing.T) {
 	if deletedAt == nil {
 		t.Errorf("device must remain soft-deleted after re-signals (sticky)")
 	}
+	if got := atomic.LoadInt32(&broadcasts); got != 1 {
+		t.Errorf("once-only: exactly 1 device_reappeared per cycle, got %d", got)
+	}
 
-	// Reactivate → reappear_alerted_at reset (next cycle re-armed).
+	// Reactivate → reset; delete + seen → alerts AGAIN (new cycle re-armed).
 	rw := httptest.NewRecorder()
 	handleCreateDevice(db)(rw, roleReq("admin", http.MethodPost, "/api/devices", "", body))
 	if rw.Code != http.StatusOK {
 		t.Fatalf("reactivate expected 200, got %d", rw.Code)
 	}
-	if ra := reappearAt(t, db, created.ID); ra != nil {
-		t.Errorf("reactivation must reset reappear_alerted_at, got %v", *ra)
+	if reappearAt(t, db, created.ID) != nil {
+		t.Errorf("reactivation must reset reappear_alerted_at")
+	}
+	dw2 := httptest.NewRecorder()
+	handleDeleteDevice(db)(dw2, roleReq("admin", http.MethodDelete, "/api/devices/"+idStr(created.ID), idStr(created.ID), ""))
+	callSeen(db, "sekret", body)
+	if got := atomic.LoadInt32(&broadcasts); got != 2 {
+		t.Errorf("new cycle after reactivation must alert again (want 2 total), got %d", got)
+	}
+}
+
+// --- F2: hot-path zero-write — ALWAYS-ON gate ------------------------------------
+// Asserts a live-device seen does NOT invoke the reappearance guard at all (the
+// RETURNING deleted_at gate skips it). Counts guard INVOCATIONS via the guardReappearFn
+// seam, because a row-count metric (total_changes) cannot distinguish "guard skipped"
+// from "guard ran but matched 0 rows" — a 0-row UPDATE changes nothing.
+// EXPERIMENT (verified, see report): changing the gate to `if true` (always call the
+// guard) turns this test RED (live seen → guardCalls==1).
+func TestSensorLifecycle_HotPathZeroWrite(t *testing.T) {
+	db := newTestDB(t)
+	internalToken = "sekret"
+	t.Cleanup(func() { internalToken = "" })
+
+	var guardCalls int32
+	orig := guardReappearFn
+	guardReappearFn = func(ctx context.Context, d *sql.DB, s, dev string) (*reappearBroadcast, error) {
+		atomic.AddInt32(&guardCalls, 1)
+		return orig(ctx, d, s, dev)
+	}
+	t.Cleanup(func() { guardReappearFn = orig })
+
+	body := `{"siteId":"site-001","deviceId":"vs-hot"}`
+	w := httptest.NewRecorder()
+	handleCreateDevice(db)(w, roleReq("admin", http.MethodPost, "/api/devices", "", body))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create expected 201, got %d", w.Code)
+	}
+
+	// Hot path: seen on a LIVE device must not invoke the guard.
+	if code := callSeen(db, "sekret", body); code != http.StatusOK {
+		t.Fatalf("seen(live) expected 200, got %d", code)
+	}
+	if got := atomic.LoadInt32(&guardCalls); got != 0 {
+		t.Errorf("hot path: live-device seen must not invoke the reappear guard, got %d call(s)", got)
+	}
+
+	// Gate opens after delete: a deleted-device seen invokes the guard exactly once.
+	var id int64
+	if err := db.QueryRow(`SELECT id FROM devices WHERE site_id='site-001' AND device_id='vs-hot'`).Scan(&id); err != nil {
+		t.Fatalf("read id: %v", err)
+	}
+	dw := httptest.NewRecorder()
+	handleDeleteDevice(db)(dw, roleReq("admin", http.MethodDelete, "/api/devices/"+idStr(id), idStr(id), ""))
+	callSeen(db, "sekret", body)
+	if got := atomic.LoadInt32(&guardCalls); got != 1 {
+		t.Errorf("deleted-device seen must invoke the guard exactly once, got %d", got)
 	}
 }
 
