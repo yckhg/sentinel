@@ -54,7 +54,7 @@ RTSP CCTV 카메라의 영상을 Sentinel streaming 서버의 RTMP 입력 규격
 | `CAMERAS_CONFIG_PATH` | `/config/cameras.json` | 부트 카메라 목록 파일 |
 | `STREAMING_RTMP_URL` | `rtmp://streaming:1935/live` | RTMP push 베이스 URL |
 | `WEB_BACKEND_URL` | `http://web-backend:8080` | reload 시 카메라 목록 조회 대상 |
-| `FFMPEG_TIMEOUT` | `30` (초) | push 프로세스 출력 정지(stall) 판정 임계치. 비정수·0 이하 값은 무시되고 기본값 적용 |
+| `FFMPEG_TIMEOUT` | `30` (초) | push 프로세스 진행(progress) 정지(stall) 판정 임계치 — 진행 업데이트(fd 3) 무수신 지속 시간 기준. 비정수·0 이하 값은 무시되고 기본값 적용 |
 
 ## 출력 (계약)
 
@@ -81,7 +81,7 @@ RTSP CCTV 카메라의 영상을 Sentinel streaming 서버의 RTMP 입력 규격
 
 2. **자동 재연결** — push 프로세스가 어떤 이유로든 종료되면 자동으로 재시작한다. 프로세스 기동 실패가 반복되면 재시도 간격은 1초에서 시작해 2배씩 증가하며 최대 30초로 상한된다. 기동 성공 시 간격은 1초로 초기화된다.
 
-3. **출력 정지 watchdog** — push 프로세스가 `FFMPEG_TIMEOUT` 초 동안 아무 출력(stdout/stderr)도 내지 않으면 hang으로 판정하여 종료시킨다(정상 종료 요청 후 5초 내 미종료 시 강제 종료). 종료된 프로세스는 재연결 규칙(2)에 따라 재시작된다.
+3. **진행 정지 watchdog** — liveness 신호는 push 프로세스의 **진행(progress) 스트림**이다: push 프로세스는 전용 fd(fd 3)로 구조화된 진행 정보(frame=/out_time= 등)를 약 0.5초 간격으로 내보내며, watchdog는 이 진행 업데이트의 **마지막 수신 시각**을 기준으로 한다. `FFMPEG_TIMEOUT` 초 동안 진행 업데이트가 없으면 hang으로 판정하여 종료시킨다(정상 종료 요청 후 5초 내 미종료 시 강제 종료). 종료된 프로세스는 재연결 규칙(2)에 따라 재시작된다. 로그(stdout/stderr)는 liveness 판정에 쓰지 않는다 — `-loglevel warning` + `-c copy` 정상 스트림은 로그가 거의 없어 무출력이 곧 hang이 아니기 때문이다. 프로세스가 얼어붙으면(예: SIGSTOP) 진행 방출도 멈추므로 실제 hang은 여전히 감지된다.
 
 4. **Hot reload (reconcile)** — reload 요청 시 web-backend에서 최신 목록을 가져와 현재 실행 목록과 diff한다:
    - streamKey와 RTSP URL이 **둘 다 동일**한 카메라: push를 중단하지 않는다 (무중단).
@@ -113,7 +113,7 @@ RTSP CCTV 카메라의 영상을 Sentinel streaming 서버의 RTMP 입력 규격
 
 - **I. 자동 재연결** — 단언 C의 상태에서 RTSP 소스를 강제 중단 후 재개하면, 사람 개입 없이 120초 이내에 HLS가 다시 재생 가능(`active=true`)해지면 OK.
 
-- **J. watchdog** — push 프로세스가 `FFMPEG_TIMEOUT` 초 이상 stdout/stderr 출력 없이 유지될 때, `1.5 × FFMPEG_TIMEOUT + 15초` 이내에 해당 프로세스가 종료되고 새 프로세스로 교체되면(프로세스 PID 변경 관측) OK. (시한 근거: watchdog 검사는 `FFMPEG_TIMEOUT/2` 주기이므로 hang 감지가 최대 1.5×timeout까지 지연되고, 종료는 SIGTERM 후 5초 유예를 거친다 — 기본 30초 설정에서 최악 약 50초)
+- **J. watchdog** — push 프로세스가 `FFMPEG_TIMEOUT` 초 이상 진행(progress) 업데이트 없이(fd 3 무수신) 유지될 때, `1.5 × FFMPEG_TIMEOUT + 15초` 이내에 해당 프로세스가 종료되고 새 프로세스로 교체되면(프로세스 PID 변경 관측) OK. (시한 근거: watchdog 검사는 `FFMPEG_TIMEOUT/2` 주기이므로 hang 감지가 최대 1.5×timeout까지 지연되고, 종료는 SIGTERM 후 5초 유예를 거친다 — 기본 30초 설정에서 최악 약 50초.) 테스트는 push 프로세스를 SIGSTOP으로 완전 동결시켜 진행 방출을 멈추고 hang을 유발한다 — 정상 무출력(로그 침묵)과 달리 동결은 진행도 멈추므로 감지된다.
 
 - **K. 환경변수 기본값** — 네 변수 모두 미설정으로 기동해도 기본값(`/config/cameras.json`, `rtmp://streaming:1935/live`, `http://web-backend:8080`, 30초)으로 동작하면 OK. `FFMPEG_TIMEOUT=abc` 또는 `0` 설정 시 기동 로그에 경고가 남고 30초 기본값으로 동작하면 OK.
 
@@ -121,7 +121,7 @@ RTSP CCTV 카메라의 영상을 Sentinel streaming 서버의 RTMP 입력 규격
 
 스펙 본문에 넣지 않은, 구현에서 관찰되었으나 의도인지 불확실한 동작들. 각각 확정 후 본문 반영 또는 수정 대상.
 
-1. **정상 스트리밍 중 watchdog 오탐 가능성** — push 프로세스는 낮은 로그 레벨로 실행되어 정상 스트리밍 중에는 stdout/stderr 출력이 거의 없을 수 있다. watchdog이 "출력 없음 = hang"으로 판정하므로, 건강한 무출력 프로세스가 `FFMPEG_TIMEOUT` 마다 반복 재시작될 위험이 있다. 서비스 가이드는 "조용히 block되는 FFmpeg는 정상 탐지"라고 하지만, 건강한 프로세스도 조용할 수 있다는 점이 구분되지 않는다. → 진행 출력을 강제하거나 다른 liveness 신호를 쓰는 것이 의도였는지 확인 필요.
+1. ~~**정상 스트리밍 중 watchdog 오탐 가능성**~~ — **[해결됨 · #68, B안 확정]** liveness 신호를 로그 출력(stdout/stderr) 유무에서 push 프로세스의 **진행(progress) 스트림(fd 3)** 으로 전환하여 본문(핵심 로직 #3, 단언 J)에 승격했다. `-loglevel warning` + `-c copy` 정상 스트림은 로그가 침묵해도 진행 업데이트를 계속 방출하므로 더 이상 hang으로 오판하지 않으며, 실제 동결(SIGSTOP)은 진행도 멈추므로 여전히 감지된다. `FFMPEG_TIMEOUT` 임계값은 진행 기준으로는 보수적 여유가 크지만 회귀 위험을 피해 30초 기본값을 유지한다.
 
 2. **`connected` 상태의 의미** — 상태가 `connected` 로 바뀌는 시점은 push 프로세스의 기동 성공이며, 실제 RTSP 연결·RTMP push 성립을 의미하지 않는다. 존재하지 않는 RTSP URL이어도 몇 초간 `connected` 로 보인다. 프로세스 수준 상태로 의도된 것인지, 스트림 성립 상태로 보이길 의도한 것인지 확인 필요. (본 스펙은 전자로 기술함)
 
