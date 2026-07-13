@@ -159,6 +159,24 @@ func BroadcastIncidentResolved(payload any) {
 	}, nil)
 }
 
+// BroadcastDeviceReappeared notifies connected admins that a soft-deleted device
+// signaled again (계약 2/3). Admin-filtered (operator-facing management alert). The
+// device is NOT restored — the operator decides whether to reactivate. lastSeen is
+// nullable (a device explicitly registered then deleted has no heartbeat yet).
+func BroadcastDeviceReappeared(siteID, deviceID string, lastSeen *string) {
+	hub.broadcast(WSMessage{
+		Type: "device_reappeared",
+		Payload: map[string]any{
+			"siteId":   siteID,
+			"deviceId": deviceID,
+			"lastSeen": lastSeen,
+		},
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}, func(c *wsClient) bool {
+		return c.role == "admin"
+	})
+}
+
 // BroadcastSystemAlarm sends system_alarm to admin clients only
 func BroadcastSystemAlarm(payload any) {
 	hub.broadcast(WSMessage{
@@ -283,6 +301,11 @@ func handleWebSocket(db *sql.DB) http.HandlerFunc {
 		// start; the send buffer holds them until writePump drains.
 		sendUnhealthySnapshot(client)
 
+		// Reappearance backfill (계약 2 유실 보정): replay device_reappeared for every
+		// device currently soft-deleted AND already alerted at least once, so an admin
+		// offline at reappear time still learns of it.
+		sendReappearedSnapshot(client, db)
+
 		go client.writePump()
 		go client.readPump()
 	}
@@ -305,6 +328,62 @@ func sendUnhealthySnapshot(c *wsClient) {
 		data, err := json.Marshal(WSMessage{
 			Type:      "system_alarm",
 			Payload:   healthAlarmPayload(e.Kind, e.ID, e.Status),
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
+		if err != nil {
+			continue
+		}
+		c.safeSend(data)
+	}
+}
+
+// sendReappearedSnapshot replays device_reappeared frames to a single newly
+// connected admin for every device that is currently soft-deleted AND has already
+// been alerted at least once (deleted_at IS NOT NULL AND reappear_alerted_at IS NOT
+// NULL). This is the reappearance analogue of sendUnhealthySnapshot (계약 2 backfill)
+// — an independent function, not a reuse of the health snapshot. Non-admin clients
+// receive nothing. A device that keeps signaling while the operator declines to
+// reactivate is re-notified on every connect: an intended reminder that a deleted
+// device is still alive.
+func sendReappearedSnapshot(c *wsClient, db *sql.DB) {
+	if c.role != "admin" || db == nil {
+		return
+	}
+	ctx, cancel := dbCtx(context.Background())
+	defer cancel()
+	rows, err := db.QueryContext(ctx, `
+		SELECT site_id, device_id, datetime(last_seen)
+		FROM devices
+		WHERE deleted_at IS NOT NULL AND reappear_alerted_at IS NOT NULL
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		log.Printf("ws: reappeared snapshot query error: %v", err)
+		return
+	}
+	type row struct {
+		siteID, deviceID string
+		lastSeen         *string
+	}
+	var out []row
+	for rows.Next() {
+		var rr row
+		if err := rows.Scan(&rr.siteID, &rr.deviceID, &rr.lastSeen); err != nil {
+			log.Printf("ws: reappeared snapshot scan error: %v", err)
+			continue
+		}
+		out = append(out, rr)
+	}
+	rows.Close()
+
+	for _, rr := range out {
+		data, err := json.Marshal(WSMessage{
+			Type: "device_reappeared",
+			Payload: map[string]any{
+				"siteId":   rr.siteID,
+				"deviceId": rr.deviceID,
+				"lastSeen": rr.lastSeen,
+			},
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		})
 		if err != nil {
