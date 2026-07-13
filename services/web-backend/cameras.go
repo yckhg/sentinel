@@ -356,6 +356,7 @@ func handleCreateCamera(db *sql.DB) http.HandlerFunc {
 		log.Printf("camera created: id=%d name=%s streamKey=%s by user=%d", id, req.Name, streamKey, user.UserID)
 		triggerCCTVReload()
 		triggerYouTubeReload()
+		triggerRecordingReload()
 
 		writeJSON(w, http.StatusCreated, cameraResponse{
 			ID:         id,
@@ -465,6 +466,7 @@ func handleUpdateCamera(db *sql.DB) http.HandlerFunc {
 		log.Printf("camera updated: id=%d by user=%d", id, user.UserID)
 		triggerCCTVReload()
 		triggerYouTubeReload()
+		triggerRecordingReload()
 		writeJSON(w, http.StatusOK, existing)
 	}
 }
@@ -496,6 +498,32 @@ func handleInternalListCameras(db *sql.DB) http.HandlerFunc {
 
 		writeJSON(w, http.StatusOK, cameras)
 	}
+}
+
+// triggerRecordingReload calls recording's reload endpoint asynchronously so the
+// recording service reconciles its recorders against the latest camera list
+// without a restart. Best-effort, fire-and-forget (independent goroutine +
+// client), symmetric with triggerCCTVReload/triggerYouTubeReload.
+func triggerRecordingReload() {
+	go func() {
+		client := &http.Client{Timeout: 10 * time.Second}
+		req, err := http.NewRequest("POST", recordingURL+"/api/cameras/reload", nil)
+		if err != nil {
+			log.Printf("recording reload: failed to create request: %v", err)
+			return
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("recording reload: failed to call recording: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			log.Printf("recording reload: recording reloaded successfully")
+		} else {
+			log.Printf("recording reload: recording returned status %d", resp.StatusCode)
+		}
+	}()
 }
 
 // triggerCCTVReload calls cctv-adapter's reload endpoint asynchronously.
@@ -578,6 +606,7 @@ func handleDeleteCamera(db *sql.DB) http.HandlerFunc {
 		log.Printf("camera deleted: id=%d by user=%d", id, user.UserID)
 		triggerCCTVReload()
 		triggerYouTubeReload()
+		triggerRecordingReload()
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

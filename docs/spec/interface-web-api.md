@@ -307,12 +307,12 @@ GET → `200` 배열 · POST → `201` · PUT → `200` · DELETE → `204`
 
 | Method | Path | Auth | 입력 |
 |--------|------|------|------|
+| POST | `/api/devices` | admin | `{siteId*, deviceId*, alias?}` — 명시 등록 또는 재활성(생성-또는-재활성) |
 | GET | `/api/devices` | user | — (삭제 제외 목록) · query: `siteId`+`deviceId`(합성키→수치 id 사상 필터) |
 | GET | `/api/devices/all` | admin | — (soft-deleted 포함) |
 | GET | `/api/devices/{id}` | user | — (수치 DB id 단건 조회, 장비 현재-상태 검색) |
-| PATCH | `/api/devices/{id}` | user | `{alias: string}` |
-| DELETE | `/api/devices/{id}` | user | — (soft delete) |
-| POST | `/api/devices/{id}/restore` | user | — |
+| PATCH | `/api/devices/{id}` | admin | `{alias: string}` (alias 수정 — admin 전용) |
+| DELETE | `/api/devices/{id}` | admin | — (soft delete, sticky — admin 전용) |
 
 ### 출력 (계약)
 
@@ -327,24 +327,27 @@ Device object:
 }
 ```
 
+- `id`는 서버가 발급하는 **surrogate 수치 PK**이며 경로 파라미터 `{id}`가 이를 가리킨다(합성키 `siteId:deviceId`와 구분). `lastSeen`은 **`string | null`** — 명시 등록됐으나 최초 heartbeat 미수신인 오프라인 대기 장치는 `null`이다.
+- `POST /api/devices` (admin) → 신규 등록 `201` device object · 동일 `(siteId,deviceId)`가 이미 미삭제로 존재 `409` `{"error":"device already registered"}` · soft-deleted였다면 **재활성** `200` device object(`deletedAt`이 `null`로 복귀, `reappear_alerted_at` 리셋, **`lastSeen`은 재활성으로 갱신되지 않음** — 기존값 유지, `alias`는 전송 시에만 갱신). 웹에서 장치를 명시 등록/재활성하는 유일 경로다(sticky 삭제의 유일한 복원 경로)
 - `GET /api/devices/{id}` → `200` device object (미삭제) · 미등록/삭제(`deletedAt`) → `404` · 검색은 합성키 `siteId:deviceId`를 `?siteId=&deviceId=` 필터로 수치 id에 사상 후 단건 조회(spec system-status-aggregate 단언 D)
 - PATCH → `200` `{id, alias}` · 없으면 `404`
 - DELETE → `204` · 이미 삭제/없음 `404`
-- restore → `200` `{id, "status":"restored"}`
 - `GET /api/devices/all`을 user가 호출 → `403` `{"error":"admin access required"}`
 
 ### 핵심 로직 (불변식)
 
-- device 등록의 원천은 hw-gateway의 `POST /api/devices/seen` (계약 13) — 웹에서는 생성 불가, 수정(alias)/soft delete/복원만
+- device 등록 원천은 둘이다 — (a) hw-gateway의 `POST /api/devices/seen`(계약 13) 자동발견, (b) admin의 `POST /api/devices` **명시 등록/재활성**. 웹에서 명시 등록·재활성이 가능하며(기존 "웹 생성 불가"에서 정정), 관리 변이(등록·삭제·alias PATCH)는 admin 전용
 - `alertState`도 `POST /api/devices/seen`(계약 13)이 기록하는 값 — 웹 API로는 수정 불가 (PATCH는 alias만)
-- 삭제는 soft delete(`deletedAt`) — 이후 해당 device의 heartbeat/alert가 다시 오면 **자동 복원**
+- **sticky 삭제 + 재출현 경보**: 삭제는 soft delete(`deletedAt`)이며, 삭제 후 device의 heartbeat/alert(`seen`·`incidents`)가 다시 와도 **자동 복원되지 않는다** — 존재감(`lastSeen`)만 갱신되고 `deletedAt`은 non-null로 유지된다. 삭제 장치가 재신호하면 대신 WS `device_reappeared`(계약 14)가 삭제→재출현 사이클당 **정확히 1회** 발행된다. 복원(재활성)의 유일 경로는 admin의 `POST /api/devices`(200)다
+- **존재감(`lastSeen`)과 생명주기(`deletedAt`)는 직교**한다 — 삭제 여부와 무관하게 관측 보고는 `lastSeen`을 갱신하며, 명시 등록된 미관측 장치는 `lastSeen == null`(오프라인 대기)
 - `GET /api/devices`는 `deletedAt IS NULL`만 반환
 
 ### 검증 단언 (TDD)
 
-- [ ] user 토큰으로 `GET /api/devices/all` → `403`
+- [ ] user 토큰으로 `GET /api/devices/all` → `403`; user 토큰으로 `POST /api/devices`·`DELETE /api/devices/{id}`·`PATCH /api/devices/{id}` → `403`(관리 변이는 admin 전용)
+- [ ] admin `POST /api/devices` `{siteId,deviceId}` (신규) → `201`; 동일 바디 재호출(미삭제 존재) → `409`; 그 device를 DELETE 후 다시 `POST /api/devices` → `200`(`deletedAt == null` 재활성, `lastSeen` 불변)
 - [ ] DELETE 후 `GET /api/devices`에 미포함, `GET /api/devices/all`(admin)에는 `deletedAt` 채워져 포함
-- [ ] soft-deleted device에 `POST /api/devices/seen` (계약 13) → 이후 `GET /api/devices`에 재등장 (`deletedAt == null`)
+- [ ] **sticky**: soft-deleted device에 `POST /api/devices/seen` (계약 13) → 이후 `GET /api/devices`에 **재등장하지 않음**(삭제 유지, `GET /api/devices/all`에서 `deletedAt` 여전히 non-null, `lastSeen`만 갱신); 대신 삭제→재출현 사이클 최초 seen에서 WS `device_reappeared` 1회 발행
 - [ ] 존재하지 않는 id에 PATCH → `404`
 
 ---
@@ -610,9 +613,10 @@ Device object:
 
 ---
 
-## 계약 13: Internal — 무인증, Docker 네트워크 한정
+## 계약 13: Internal — 무인증(일부 앱레벨 토큰), Docker 네트워크 한정
 
-외부 클라이언트 호출 금지가 의도이며, 보호는 Docker 네트워크 격리에 의존한다.
+외부 클라이언트 호출 금지가 의도이며, 대부분 경로의 보호는 Docker 네트워크 격리에 의존한다.
+단 **`POST /api/devices/seen`·`POST /api/incidents` 두 경로는 앱레벨 `X-Internal-Token` fail-closed 게이트**로 추가 방어된다(아래 핵심 로직). 나머지 internal 경로(`/internal/*`, `resolve-from-sensor`, 계약 9 links/temp 폴백 등)는 여전히 네트워크 격리에만 의존한다.
 리버스 프록시 레벨 차단은 현재 스택에 구성되어 있지 않음 — ⚠️ 리뷰 항목 3 참조.
 
 ### 입력
@@ -654,11 +658,12 @@ Device object:
 
 ### 핵심 로직 (불변식)
 
+- **internal 토큰 게이트 (seen·incidents fail-closed)**: `POST /api/devices/seen`과 `POST /api/incidents`는 `X-Internal-Token` 헤더를 fail-closed로 검증한다 — 헤더 부재·서버 시크릿(`INTERNAL_TOKEN`)과 불일치·**서버 시크릿 미설정** 중 하나라도면 `401`(constant-time 비교). 유효 시크릿(hw-gateway가 두 호출에 동봉 — 계약 15 / `hw-gateway.md`)일 때만 통과한다. 위기 유입·heartbeat의 오구성 유실은 치명적이므로 부정 케이스를 명시 `401`로 판정한다. 이 두 경로 외 나머지 internal 엔드포인트는 이 게이트를 적용하지 않는다(네트워크 격리 전제 유지)
 - `POST /api/incidents` **멱등성(alertId dedup)**: `alertId`가 오면 `incidents.alert_id`의 UNIQUE 부분 인덱스(`alert_id IS NOT NULL` 한정) 기준으로 dedup — 동일 alertId 재전송은 기존 incident를 `200`으로 반환하고 새 행을 만들지 않음. `alertId` 없으면 dedup 없음 (재전송마다 새 incident). 이 dedup은 **동시 요청 하에서도 원자적**이다 — 같은 alertId N건이 동시에 도착해도 정확히 1건만 `201`(신규), 나머지 전부 `200`(동일 incident)이며, UNIQUE 충돌로 인한 `5xx`/`SQLITE_BUSY`나 중복 행·유실이 발생하지 않는다
-- `POST /api/incidents`의 `deviceId`는 best-effort device UPSERT 트리거 — `/api/devices/seen`과 동일 의미론(`last_seen` 갱신 + soft-delete 자동 복원). UPSERT 실패가 `201`을 막지 않음
+- `POST /api/incidents`의 `deviceId`는 best-effort device 존재감 UPSERT 트리거 — `/api/devices/seen`과 동일하게 **sticky**(`last_seen` 갱신, `deleted_at` 불변 — 삭제 장치가 위기를 내도 복원되지 않음). 위기 맥락이므로 `alert_state`는 `active`로 기록되며(신규·기존 공통, 이후 heartbeat가 조정), 삭제 장치의 최초 위기 재신호에는 seen과 **공유하는** 재출현 가드로 `device_reappeared`를 1회 발행한다(두 경로가 서로의 경보를 잠식하지 않음). UPSERT 실패가 `201`을 막지 않음
 - **호출자 노트**: hw-gateway는 crisis forward 시 `alertId`를 전송한다 — DB dedup 경로가 운영에서 실사용된다. hw-gateway는 forward가 전송 계층 오류 또는 HTTP 5xx면 재시도하고, 2xx 응답을 받은 후에만 자신의 in-memory dedup을 등록하므로, 5xx로 유실된 이벤트는 펌웨어 재전송으로 복구된다(계약 15 / `docs/services/hw-gateway.md` 참조)
 - `POST /api/incidents` 신규 생성(`201`) 성공 부작용: 전체 WS 클라이언트에 `crisis_alert` 브로드캐스트 — dedup `200` 경로에서는 브로드캐스트 없음
-- `POST /api/devices/seen`: `(site_id, device_id)` UPSERT — 없으면 INSERT(first_seen=last_seen=now), 있으면 `last_seen=now` + `deleted_at=NULL`(soft-delete 자동 복원). `alertState`는 전송값으로 갱신되며 미전송/빈 값이면 `"none"` 처리 — 계약 6 Device 객체의 `alertState`로 노출됨. **멱등**
+- `POST /api/devices/seen`: `(site_id, device_id)` **존재감** UPSERT — 없으면 INSERT(`first_seen=last_seen=now`, `alert_state` 기본 `none`), 있으면 `last_seen=now`만 갱신. **`deleted_at`은 건드리지 않는다**(sticky — soft-delete된 장치는 seen이 와도 복원되지 않고 존재감만 갱신됨, 계약 6). 삭제 장치에 seen이 착지하면 rowcount-가드된 dedup UPDATE(`reappear_alerted_at` NULL→now)로 삭제→재출현 사이클당 **정확히 1회** WS `device_reappeared`를 발행한다(정상 heartbeat 핫패스는 추가 쓰기 없음; seen·incidents가 가드를 공유해 상호 잠식 없음). `alertState`는 전송값으로 갱신(COALESCE)되며 미전송/빈 값이면 기존값 유지(신규 행은 `none`) — 계약 6 Device 객체의 `alertState`로 노출됨. **멱등**
 - `resolve-from-sensor` incident 매칭 폴백 체인: path `{id}`(0 허용) → body `incidentId` → 둘 다 0이면 `siteId`의 가장 최근 **미해결** incident 자동 매칭
 - 폴백(둘 다 0) 경로는 미해결 한정 조회이므로 재전송이 `409`에 도달하지 않음: 남은 미해결 incident가 없으면 `404`, 다른 미해결이 있으면 그것을 해소하며 `200` — `409`는 명시적 non-zero id로 이미 resolved인 incident를 지정할 때만 발생
 - `kind == "web"` echo는 hw-gateway 측에서 차단되어 이 엔드포인트에 도달하지 않는 것이 시스템 전제
@@ -673,6 +678,7 @@ Device object:
   ```bash
   curl -s http://localhost:8080/internal/settings/no_such_key | jq -e '.value == ""'
   ```
+- [ ] **internal 토큰 fail-closed**: `POST /api/devices/seen`·`POST /api/incidents`에 `X-Internal-Token` 헤더 없이(또는 서버 시크릿과 불일치) 호출 → `401`; 유효 `X-Internal-Token` 동봉 → 통과(2xx). 서버 `INTERNAL_TOKEN` 미설정 상태에서도 두 경로 모두 `401`(fail-closed)
 - [ ] `POST /api/devices/seen` 동일 바디 2회 → 둘 다 `200`, device 행은 1개 (멱등)
 - [ ] `POST /api/devices/seen` `alertState: "active"` 전송 → 이후 `GET /api/devices`(계약 6)에서 해당 device의 `alertState == "active"`
 - [ ] `POST /api/incidents` (siteId 있음) → `201` + 접속 중 WS 클라이언트에 `crisis_alert` 도착
@@ -718,6 +724,7 @@ Device object:
 | `crisis_alert` | 전체 (admin/user/temp) | `{incidentId, siteId, description, occurredAt, isTest, site:{address,managerName,managerPhone}}` |
 | `incident_resolved` | 전체 (admin/user/temp) | `{incidentId, siteId, resolvedAt, resolvedByKind, resolvedById, resolvedByLabel}` |
 | `system_alarm` | admin 전용 | `{type, message, details}` — `POST /internal/alarms`(계약 13) 수신 시, **또는 HealthMonitor의 healthy↔unhealthy 전이/재접속 스냅샷 시**(계약 12) 발생. health-출처 `details` 하위 스키마는 아래 고정 |
+| `device_reappeared` | admin 전용 | `{siteId, deviceId, lastSeen: string\|null}` — soft-deleted 장치가 `seen`/`incidents`로 재신호한 삭제→재출현 사이클당 **최초 1회**(계약 6·13, sticky). 장치는 복원되지 않으며 admin이 재활성 여부를 결정한다. `lastSeen`은 명시 등록 후 미관측 삭제 장치면 `null` |
 
 **`system_alarm` payload 세부**
 
@@ -737,6 +744,7 @@ Device object:
 - 서버가 30초마다 ping — 클라이언트는 40초 내 pong 없으면 연결 종료
 - role은 JWT의 `role` 클레임에서 추출 (`admin`/`user`). temp link 토큰은 role 클레임이 없으나 WS 접면이 temp 종류로 식별해 role `"temp"`(read-only)를 부여한다 — `system_alarm`은 admin에게만 전달되고 temp/user에는 전달되지 않는다
 - `crisis_alert`는 `POST /api/incidents`(계약 13) 성공 시, `incident_resolved`는 웹 resolve(계약 2) 또는 센서 resolve(계약 13) 성공 시 발생. `system_alarm`은 (i) `POST /internal/alarms`(계약 13, notifier가 모든 외부 채널 실패 시 호출) 수신 시, 또는 (ii) 감시 대상(서비스/센서)의 healthy↔unhealthy 상태 전이 시(계약 12) admin에게만 발생
+- **`device_reappeared` 발행·backfill(계약 6·13, admin 전용)**: soft-deleted 장치가 `seen`/`incidents`로 재신호한 삭제→재출현 사이클 최초 시점에 1회 브로드캐스트된다(재출현 dedup 가드). 또한 admin WS가 새로 접속하면 `connected` 직후 현재 삭제 상태이면서 이미 경보된(`deletedAt IS NOT NULL AND reappear_alerted_at IS NOT NULL`) 모든 장치에 대해 `device_reappeared`를 backfill 재전달한다 — 전이 순간 미접속이던 admin의 유실 보정(unhealthy 스냅샷 재전달과 동형)
 
 ### 검증 단언 (TDD)
 
@@ -871,6 +879,6 @@ MQTT 발행 페이로드 스키마의 SSOT는 `docs/spec/interface-mqtt.md` — 
 
 1. **~~notifier의 시스템 알람 최후 보루 수신측 부재~~ (해소됨)** — 무인증 internal 라우트 `POST /internal/alarms`가 신설되어 notifier가 이 경로로 호출하고, web-backend가 수신해 WS `system_alarm`(계약 14)을 admin에게 브로드캐스트한다. 계약 13(입력/출력)과 계약 14(WS 발생 경로)에 반영됨. DB 영속은 없으며 보장 동작은 "수신 + admin 브로드캐스트"까지. (번호는 항목 2~4의 교차참조 안정성을 위해 유지)
 2. **~~temp link JWT가 WS에서 temp role 식별·회수 차단·만료 재검증을 우회~~ (WS 접면 해소됨 — 계약 14, 이슈 #82)** — WS 접면은 이제 접속 시점에 temp 토큰을 temp 종류로 식별해 role `temp`를 부여하고 blacklist를 확인하며(회수 토큰 업그레이드 `401`), 수립된 연결은 주기적(≤60초) 재검증(회수·`exp` 만료·비밀번호 변경 경계, 계약 1)으로 무효 토큰 연결을 능동 종료한다. 관련 단언("WS `payload.role == "temp"`"·"회수 토큰 WS 접속 `401`"·"회수/비번변경 후 능동 종료")을 계약 14에 추가했다. **남은 사안(미해소)**: `/api/*` 인증 미들웨어 접면에서 temp 토큰이 일반 JWT 파서를 먼저 통과해 blacklist 확인 없이 `role=""`로 통과하는 문제는 web-backend 스펙 ⚠️1(authz 범위)로 별도 추적한다 — WS 재검증 계약과는 접면이 다르다.
-3. **무인증 internal 엔드포인트가 리버스 프록시를 그대로 통과해 외부 노출됨 (알려진 시스템 갭)** — 현 스택의 유일한 리버스 프록시인 web-frontend nginx는 `/api/` 전체를 web-backend로 무차별 프록시하고, docker-compose가 web-frontend:80을 호스트 `3080`으로 노출한다. 따라서 외부에서 무인증 internal 엔드포인트(계약 13의 `POST /api/incidents`, `POST /api/devices/seen`, `POST /api/incidents/{id}/resolve-from-sensor`와 계약 9의 internal 폴백 `POST /api/links/temp`)가 인증 없이 그대로 호출된다(200/201). 차단 구성이 repo 내 어디에도 없다. → 의도 결정 필요: (a) 리버스 프록시에서 해당 경로 차단(location 규칙), (b) internal 엔드포인트를 `/internal/*` 프리픽스로 이동 + 프록시 미노출, 또는 (c) 내부 호출 인증 도입. 결정 전까지 "외부에서 internal 엔드포인트 `4xx`" 배포 게이트 단언은 계약에 두지 않는다.
+3. **무인증 internal 엔드포인트가 리버스 프록시를 그대로 통과해 외부 노출됨 (알려진 시스템 갭 — 부분 완화)** — 현 스택의 유일한 리버스 프록시인 web-frontend nginx는 `/api/` 전체를 web-backend로 무차별 프록시하고, docker-compose가 web-frontend:80을 호스트 `3080`으로 노출한다. **`POST /api/devices/seen`·`POST /api/incidents` 두 경로는 이제 앱레벨 `X-Internal-Token` fail-closed 게이트로 방어**되어(계약 13), 유효 토큰 없는 외부 호출은 `401`이다(heartbeat 유입·위기 자동등록의 무인증 오남용 경계 차단). 그러나 나머지 internal 경로(계약 13의 `POST /api/incidents/{id}/resolve-from-sensor`, `/internal/*` 카메라 reload/list·contacts·settings, 계약 9의 internal 폴백 `POST /api/links/temp`)는 여전히 무인증으로 그대로 호출된다(200/201). 이들로의 토큰 게이트 확장은 시스템 후속 과제로 남는다(현재 방어는 `seen`·`incidents` 두 경로 한정 — 과대주장 금지). → 의도 결정 필요: (a) 리버스 프록시에서 해당 경로 차단(location 규칙), (b) internal 엔드포인트를 `/internal/*` 프리픽스로 이동 + 프록시 미노출, 또는 (c) 내부 호출 인증(토큰 게이트) 나머지 경로로 확장. 결정 전까지 "외부에서 (미방어) internal 엔드포인트 `4xx`" 배포 게이트 단언은 계약에 두지 않는다.
 4. **`PUT /api/contacts/{id}`의 email만 partial 시맨틱에서 벗어남 (실측 — web-backend 스펙 ⚠️5와 동일 사안)** — name/phone은 빈 값 무시, notifyEmail은 생략 시 유지인데 email은 요청값으로 무조건 덮어써서, email을 생략한 partial PUT이 기존 email을 NULL로 삭제한다. 본문(계약 5)은 이 실측 동작을 계약으로 기술했다. → 의도 결정 필요: (a) email도 생략 시 유지(partial 통일 — email 삭제는 별도 신호 필요), 또는 (b) 현 덮어쓰기 동작 유지. (a)로 결정되면 계약 5 입력 표·불변식·단언을 함께 갱신해야 한다.
 5. **[해소 — 설계자 결정] unhealthy 자동 복구 범위.** unhealthy 상태 전이의 admin 통지(계약 12 → 계약 14 `system_alarm`)까지만 앱이 계약한다. hang 상태 서비스의 자동 컨테이너 재시작은 인프라 계층(docker compose restart policy / healthcheck 연동) 책임으로 두어 앱 계약에서 제외하며, unhealthy 전이의 notifier 외부 채널 팬아웃도 채택하지 않는다.

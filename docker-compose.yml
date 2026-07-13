@@ -67,6 +67,11 @@ services:
       - HEARTBEAT_TIMEOUT_SEC=30
       - EQUIPMENT_MAX_DEVICES=1000
       - EQUIPMENT_EVICT_TTL_SEC=86400
+      # Shared secret sent as X-Internal-Token on POST /api/devices/seen and
+      # POST /api/incidents. web-backend validates it fail-closed, so this MUST
+      # match web-backend's INTERNAL_TOKEN. Inject the SAME value in .env/deploy;
+      # if unset, web-backend rejects seen/incidents with 401. (sensor-device-lifecycle)
+      - INTERNAL_TOKEN=${INTERNAL_TOKEN:-}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 30s
@@ -229,6 +234,11 @@ services:
       - JWT_SECRET=${JWT_SECRET:-}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # Shared secret for the internal seen/incidents trust boundary. Validated
+      # fail-closed: if empty, POST /api/devices/seen and POST /api/incidents
+      # return 401. MUST match hw-gateway's INTERNAL_TOKEN — inject the SAME
+      # value in .env/deploy (do not hardcode). (sensor-device-lifecycle)
+      - INTERNAL_TOKEN=${INTERNAL_TOKEN:-}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 30s
