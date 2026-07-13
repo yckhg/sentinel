@@ -163,7 +163,11 @@ func BroadcastIncidentResolved(payload any) {
 // signaled again (계약 2/3). Admin-filtered (operator-facing management alert). The
 // device is NOT restored — the operator decides whether to reactivate. lastSeen is
 // nullable (a device explicitly registered then deleted has no heartbeat yet).
-func BroadcastDeviceReappeared(siteID, deviceID string, lastSeen *string) {
+//
+// It is a package var (not a plain func) so the once-only gate (F1) can substitute a
+// counting sink and assert the delete→reappear cycle broadcasts EXACTLY once,
+// independent of clock resolution. Production always points at the real broadcast.
+var BroadcastDeviceReappeared = func(siteID, deviceID string, lastSeen *string) {
 	hub.broadcast(WSMessage{
 		Type: "device_reappeared",
 		Payload: map[string]any{
