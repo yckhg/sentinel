@@ -385,7 +385,7 @@ func TestSensorLifecycle_H2_IncidentPresenceSticky(t *testing.T) {
 	// Scope = handleCreateIncident body AND the delegated presence-upsert helper
 	// (upsertIncidentPresence). The spec requires following the delegation so the
 	// gate never becomes vacuous when the upsert moves out of the handler body.
-	scope := funcBody(t, s, "func handleCreateIncident") + funcBody(t, s, "func upsertIncidentPresence")
+	scope := funcBodyBySig(t, s, "func handleCreateIncident") + funcBodyBySig(t, s, "func upsertIncidentPresence")
 	// Normalize: strip all whitespace, lowercase. The forbidden form is the
 	// ASSIGNMENT `deleted_at = NULL` (a SET). A read like `deleted_at IS NOT NULL`
 	// or `RETURNING datetime(deleted_at)` is allowed. After stripping spaces the
@@ -544,9 +544,9 @@ func callIncident(db *sql.DB, token, body string) int {
 	return w.Code
 }
 
-// funcBody extracts the body of the first top-level func whose declaration starts
-// with sig, from its opening `{` to the matching close brace.
-func funcBody(t *testing.T, src, sig string) string {
+// funcBodyBySig extracts the body of the first top-level func whose declaration
+// starts with sig, from its opening `{` to the matching close brace.
+func funcBodyBySig(t *testing.T, src, sig string) string {
 	t.Helper()
 	i := strings.Index(src, sig)
 	if i < 0 {
