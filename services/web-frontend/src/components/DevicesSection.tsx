@@ -9,10 +9,18 @@ interface Device {
   deviceId: string;
   alias: string;
   firstSeen: string;
-  lastSeen: string;
+  // lastSeen is null for a device explicitly registered but not yet seen
+  // (offline 대기) — rendered as offline.
+  lastSeen: string | null;
   deletedAt: string | null;
   alertState?: "none" | "active";
 }
+
+// A reappearance is a soft-deleted device that is still emitting (deletedAt set yet
+// last_seen recent). The backend keeps such a device sticky-deleted and broadcasts
+// a WS device_reappeared + backfills it on admin (re)connect; this panel surfaces
+// the same fact from the polled device list (the app-root single WebSocket lives in
+// CrisisAlertBanner, outside this component) and offers one-click 재활성.
 
 const POLL_INTERVAL_MS = 10_000;
 // Source of truth for the alive/online cutoff is the runtime health config
@@ -31,10 +39,17 @@ function formatDate(s: string | null | undefined): string {
   return formatKstDateTimeSec(s);
 }
 
-function isAlive(lastSeen: string, nowMs: number, thresholdMs: number): boolean {
+function isAlive(lastSeen: string | null, nowMs: number, thresholdMs: number): boolean {
+  if (!lastSeen) return false; // null last_seen = offline 대기
   const t = parseServerTimeMs(lastSeen);
   if (!t) return false;
   return nowMs - t < thresholdMs;
+}
+
+function reappearKey(siteId: string, deviceId: string): string {
+  // JSON.stringify of the pair is a collision-free, git-text-safe composite key
+  // (no control chars; quoting disambiguates any separator inside the values).
+  return JSON.stringify([siteId, deviceId]);
 }
 
 export default function DevicesSection() {
@@ -52,10 +67,25 @@ export default function DevicesSection() {
   const [editLoading, setEditLoading] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
-  // Delete / restore
+  // Delete / reactivate
   const [deleteTarget, setDeleteTarget] = useState<Device | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [restoringId, setRestoringId] = useState<number | null>(null);
+
+  // Add device (계약 1 명시 등록) — mirrors the camera "추가" action.
+  const [showAdd, setShowAdd] = useState(false);
+  const [addSiteId, setAddSiteId] = useState("");
+  const [addDeviceId, setAddDeviceId] = useState("");
+  const [addAlias, setAddAlias] = useState("");
+  const [addLoading, setAddLoading] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+
+  // Reappearance detection: soft-deleted devices still emitting. Polled from
+  // /api/devices/all (independent of the "삭제된 장비 표시" toggle) and filtered to
+  // still-alive in render. dismissedKeys hides a notice the operator acknowledged.
+  const [deletedDevices, setDeletedDevices] = useState<Device[]>([]);
+  const [dismissedKeys, setDismissedKeys] = useState<Set<string>>(new Set());
+  const [reactivatingKey, setReactivatingKey] = useState<string | null>(null);
 
   const showDeletedRef = useRef(showDeleted);
   showDeletedRef.current = showDeleted;
@@ -81,6 +111,22 @@ export default function DevicesSection() {
     }
   };
 
+  // Poll soft-deleted devices for reappearance detection. Uses /api/devices/all
+  // (admin-only); on failure (e.g. non-admin 403) it clears the set silently.
+  const fetchDeletedDevices = async () => {
+    try {
+      const res = await fetchWithTimeout("/api/devices/all", { headers: getAuthHeaders() });
+      if (!res.ok) {
+        setDeletedDevices([]);
+        return;
+      }
+      const data: Device[] = await res.json();
+      setDeletedDevices(Array.isArray(data) ? data.filter((d) => !!d.deletedAt) : []);
+    } catch {
+      // keep last known set
+    }
+  };
+
   // Fetch the alive threshold from the runtime health config. Uses GET /api/settings
   // (admin-only); on any failure (e.g. non-admin 403) the default is kept.
   const fetchAliveThreshold = async () => {
@@ -101,8 +147,10 @@ export default function DevicesSection() {
   useEffect(() => {
     fetchAliveThreshold();
     fetchDevices();
+    fetchDeletedDevices();
     const tick = setInterval(() => {
       fetchDevices();
+      fetchDeletedDevices();
       setNowMs(Date.now());
     }, POLL_INTERVAL_MS);
     // separate fast tick for alive indicator so the threshold feels responsive
@@ -176,24 +224,110 @@ export default function DevicesSection() {
     }
   };
 
+  // reactivateDevice is the single reactivation path (계약 1): POST /api/devices with
+  // the composite key revives a soft-deleted device (200) and resets its reappear
+  // dedup. It replaces the removed POST /api/devices/{id}/restore. Refreshes both
+  // the visible list and the reappearance (deleted) set.
+  const reactivateDevice = async (siteId: string, deviceId: string): Promise<void> => {
+    const res = await fetchWithTimeout("/api/devices", {
+      method: "POST",
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ siteId, deviceId }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.error || `HTTP ${res.status}`);
+    }
+    setDismissedKeys((prev) => {
+      const next = new Set(prev);
+      next.delete(reappearKey(siteId, deviceId));
+      return next;
+    });
+    await fetchDevices();
+    await fetchDeletedDevices();
+  };
+
   const handleRestore = async (d: Device) => {
     setRestoringId(d.id);
     try {
-      const res = await fetchWithTimeout(`/api/devices/${d.id}/restore`, {
-        method: "POST",
-        headers: getAuthHeaders(),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || `HTTP ${res.status}`);
-      }
-      await fetchDevices();
+      await reactivateDevice(d.siteId, d.deviceId);
     } catch (err) {
-      alert(err instanceof Error ? err.message : "복원 실패");
+      alert(err instanceof Error ? err.message : "재활성 실패");
     } finally {
       setRestoringId(null);
     }
   };
+
+  const handleReactivateReappearance = async (d: Device) => {
+    const key = reappearKey(d.siteId, d.deviceId);
+    setReactivatingKey(key);
+    try {
+      await reactivateDevice(d.siteId, d.deviceId);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "재활성 실패");
+    } finally {
+      setReactivatingKey(null);
+    }
+  };
+
+  const dismissReappearance = (d: Device) => {
+    setDismissedKeys((prev) => {
+      const next = new Set(prev);
+      next.add(reappearKey(d.siteId, d.deviceId));
+      return next;
+    });
+  };
+
+  const handleAddDevice = async () => {
+    const siteId = addSiteId.trim();
+    const deviceId = addDeviceId.trim();
+    if (!siteId || !deviceId) {
+      setAddError("사이트 ID와 장치 ID는 필수입니다");
+      return;
+    }
+    setAddLoading(true);
+    setAddError(null);
+    try {
+      const alias = addAlias.trim();
+      const res = await fetchWithTimeout("/api/devices", {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify(alias ? { siteId, deviceId, alias } : { siteId, deviceId }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        // 409 = 이미 등록된(미삭제) 장치
+        if (res.status === 409) {
+          throw new Error("이미 등록된 장치입니다");
+        }
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      setShowAdd(false);
+      setAddSiteId("");
+      setAddDeviceId("");
+      setAddAlias("");
+      await fetchDevices();
+    } catch (err) {
+      setAddError(
+        isTimeoutError(err)
+          ? timeoutMessage()
+          : err instanceof Error
+            ? err.message
+            : "장치 추가 실패"
+      );
+    } finally {
+      setAddLoading(false);
+    }
+  };
+
+  // Reappearances = soft-deleted devices still emitting (deletedAt set yet alive),
+  // minus those the operator dismissed. This mirrors the backend's device_reappeared
+  // fact without opening a second WebSocket (the app-root socket is CrisisAlertBanner).
+  const reappearedDevices = deletedDevices.filter(
+    (d) =>
+      isAlive(d.lastSeen, nowMs, aliveThresholdMs) &&
+      !dismissedKeys.has(reappearKey(d.siteId, d.deviceId))
+  );
 
   // Sort: deleted last → alerting first → alive next → lastSeen desc.
   const sortedDevices = [...devices].sort((a, b) => {
@@ -213,7 +347,17 @@ export default function DevicesSection() {
     <>
       <div className="mgmt-header">
         <h2>장비(센서) 관리</h2>
-        <label className="mgmt-form-checkbox" style={{ marginLeft: "auto" }}>
+        <button
+          className="mgmt-btn mgmt-btn-primary mgmt-btn-small"
+          style={{ marginLeft: "auto" }}
+          onClick={() => {
+            setAddError(null);
+            setShowAdd(true);
+          }}
+        >
+          장치 추가
+        </button>
+        <label className="mgmt-form-checkbox">
           <input
             type="checkbox"
             checked={showDeleted}
@@ -222,6 +366,37 @@ export default function DevicesSection() {
           <span>삭제된 장비 표시</span>
         </label>
       </div>
+
+      {reappearedDevices.length > 0 && (
+        <div className="mgmt-reappear-list">
+          {reappearedDevices.map((r) => {
+            const key = reappearKey(r.siteId, r.deviceId);
+            return (
+              <div key={key} className="mgmt-notice status-badge--warn" role="status">
+                <span>
+                  삭제한 장치 <strong>{r.alias || r.deviceId}</strong> ({r.siteId} / {r.deviceId})가
+                  다시 신호를 보냈습니다. 삭제 상태는 유지됩니다 — 되살리려면 재활성하세요.
+                </span>
+                <div className="mgmt-form-actions">
+                  <button
+                    className="mgmt-btn mgmt-btn-primary mgmt-btn-small"
+                    onClick={() => handleReactivateReappearance(r)}
+                    disabled={reactivatingKey === key}
+                  >
+                    {reactivatingKey === key ? "재활성 중..." : "재활성"}
+                  </button>
+                  <button
+                    className="mgmt-btn mgmt-btn-secondary mgmt-btn-small"
+                    onClick={() => dismissReappearance(r)}
+                  >
+                    닫기
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {loading ? (
         <p className="mgmt-loading">로딩 중...</p>
@@ -348,7 +523,8 @@ export default function DevicesSection() {
               <strong>{deleteTarget.alias || deleteTarget.deviceId}</strong> 장비를 삭제하시겠습니까?
               <br />
               <small>
-                삭제 후 같은 장비가 다시 신호를 보내면 자동으로 복원됩니다.
+                삭제한 장비는 다시 신호를 보내도 자동 복원되지 않습니다(삭제 유지).
+                재출현 시 알림으로 안내되며, 되살리려면 재활성하세요.
               </small>
             </p>
             <div className="mgmt-form-actions">
@@ -366,6 +542,60 @@ export default function DevicesSection() {
                 취소
               </button>
             </div>
+        </Modal>
+      )}
+
+      {showAdd && (
+        <Modal onClose={() => setShowAdd(false)} ariaLabel="장치 추가">
+          <h3 className="mgmt-modal-title">장치 추가</h3>
+          <div className="mgmt-form-field">
+            <label>사이트 ID</label>
+            <input
+              type="text"
+              value={addSiteId}
+              autoFocus
+              placeholder="예: site-001"
+              onChange={(e) => setAddSiteId(e.target.value)}
+            />
+          </div>
+          <div className="mgmt-form-field">
+            <label>장치 ID</label>
+            <input
+              type="text"
+              value={addDeviceId}
+              placeholder="예: vs-01"
+              onChange={(e) => setAddDeviceId(e.target.value)}
+            />
+          </div>
+          <div className="mgmt-form-field">
+            <label>별칭 (선택)</label>
+            <input
+              type="text"
+              value={addAlias}
+              placeholder="예: 북문 음성센서"
+              onChange={(e) => setAddAlias(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleAddDevice();
+              }}
+            />
+          </div>
+          {addError && <p className="mgmt-form-error">{addError}</p>}
+          <div className="mgmt-form-actions">
+            <button
+              className="mgmt-btn mgmt-btn-primary"
+              onClick={handleAddDevice}
+              disabled={addLoading}
+            >
+              {addLoading ? "추가 중..." : "추가"}
+            </button>
+            <button
+              className="mgmt-btn mgmt-btn-secondary"
+              onClick={() => setShowAdd(false)}
+              disabled={addLoading}
+            >
+              취소
+            </button>
+          </div>
         </Modal>
       )}
     </>

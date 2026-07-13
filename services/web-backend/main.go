@@ -33,6 +33,7 @@ func main() {
 	}
 
 	initJWTSecret()
+	initInternalToken()
 	initHWGatewayURL()
 	initServiceURLs()
 	initNotifierURL()
@@ -152,13 +153,14 @@ func main() {
 	// Equipment restart (any authenticated user)
 	apiMux.HandleFunc("POST /api/equipment/restart", handleEquipmentRestart(db))
 
-	// Devices management
+	// Devices management. POST /api/devices is the single explicit register-or-
+	// reactivate path (계약 1); the former per-id soft-delete undo route is removed.
 	apiMux.HandleFunc("GET /api/devices", handleListDevices(db))
 	apiMux.HandleFunc("GET /api/devices/all", handleListDevices(db))
+	apiMux.HandleFunc("POST /api/devices", handleCreateDevice(db))
 	apiMux.HandleFunc("GET /api/devices/{id}", handleGetDevice(db))
 	apiMux.HandleFunc("PATCH /api/devices/{id}", handleUpdateDeviceAlias(db))
 	apiMux.HandleFunc("DELETE /api/devices/{id}", handleDeleteDevice(db))
-	apiMux.HandleFunc("POST /api/devices/{id}/restore", handleRestoreDevice(db))
 
 	// Test alert simulation (admin only)
 	apiMux.HandleFunc("POST /api/test-alert", handleTestAlertProxy())
