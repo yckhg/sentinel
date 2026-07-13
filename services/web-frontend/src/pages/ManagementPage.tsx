@@ -454,7 +454,7 @@ export default function ManagementPage() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || `HTTP ${res.status}`);
       }
-      setTestAlertSuccess("테스트 비상 신호가 발송되었습니다. 사고 이력 탭에서 확인하세요.");
+      setTestAlertSuccess("테스트 비상 신호가 발송되었습니다. 경보 이력 탭에서 확인하세요.");
       setTimeout(() => setTestAlertSuccess(null), 5000);
     } catch (err) {
       setTestAlertError(
