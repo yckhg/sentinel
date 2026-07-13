@@ -171,20 +171,21 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 		incidentID, _ := result.LastInsertId()
 		markWALDirty()
 
-		// Device presence upsert (best-effort). Sticky-safe: last_seen only, NEVER
-		// deleted_at — a soft-deleted device stays deleted even when it emits a crisis
-		// (계약 3, assertion H2). The shared reappear helper then broadcasts
-		// device_reappeared once on the first crisis re-signal after deletion (E2).
+		// Device presence upsert (best-effort) + reappearance dedup in ONE transaction
+		// (계약 2 "두 문장 같은 트랜잭션"). Sticky-safe: last_seen only, NEVER deleted_at —
+		// a soft-deleted device stays deleted even when it emits a crisis (계약 3,
+		// assertion H2). A device BORN from a crisis is created alert_state='active'
+		// (crisis context; a later heartbeat reconciles it); an existing row keeps its
+		// alert_state. RETURNING datetime(deleted_at) gates the shared reappear guard so
+		// only a crisis that landed on a soft-deleted row runs the extra dedup UPDATE,
+		// broadcasting device_reappeared once on the first crisis re-signal after
+		// deletion (E2) — shared with the seen path so neither silently consumes the
+		// other's alert.
 		if req.SiteID != "" && req.DeviceID != "" {
-			if _, upErr := db.ExecContext(ctx, `
-				INSERT INTO devices (site_id, device_id, last_seen)
-				VALUES (?, ?, datetime('now'))
-				ON CONFLICT(site_id, device_id) DO UPDATE SET
-					last_seen = datetime('now')
-			`, req.SiteID, req.DeviceID); upErr != nil {
-				log.Printf("upsert device from incident error: %v", upErr)
+			pending := upsertIncidentPresence(ctx, db, req.SiteID, req.DeviceID)
+			if pending != nil {
+				BroadcastDeviceReappeared(pending.siteID, pending.deviceID, pending.lastSeen)
 			}
-			maybeAlertReappear(ctx, db, req.SiteID, req.DeviceID)
 		}
 
 		// Fetch site info for the broadcast payload
@@ -211,6 +212,50 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 			"occurredAt":  occurredAt,
 		})
 	}
+}
+
+// upsertIncidentPresence records a device's presence from a crisis in ONE
+// transaction and, only when the upsert landed on a soft-deleted row, runs the
+// shared rowcount-guarded reappearance dedup (via guardReappearTx). Best-effort:
+// any error is logged and swallowed (device presence must never fail incident
+// creation). Returns a pending device_reappeared broadcast for the caller to emit
+// after this returns, or nil. A brand-new crisis-born device is created
+// alert_state='active'; an existing row keeps its alert_state (only last_seen moves).
+func upsertIncidentPresence(ctx context.Context, db *sql.DB, siteID, deviceID string) *reappearBroadcast {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		log.Printf("incident presence begin tx error: %v", err)
+		return nil
+	}
+	defer tx.Rollback()
+
+	var deletedAt *string
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO devices (site_id, device_id, last_seen, alert_state)
+		VALUES (?, ?, datetime('now'), 'active')
+		ON CONFLICT(site_id, device_id) DO UPDATE SET
+			last_seen = datetime('now')
+		RETURNING datetime(deleted_at)
+	`, siteID, deviceID).Scan(&deletedAt)
+	if err != nil {
+		log.Printf("upsert device from incident error: %v", err)
+		return nil
+	}
+
+	var pending *reappearBroadcast
+	if deletedAt != nil {
+		pending, err = guardReappearTx(ctx, tx, siteID, deviceID)
+		if err != nil {
+			log.Printf("incident reappear guard error: %v", err)
+			return nil
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("incident presence commit error: %v", err)
+		return nil
+	}
+	markWALDirty()
+	return pending
 }
 
 // handleListIncidents handles GET /api/incidents — paginated incident history
