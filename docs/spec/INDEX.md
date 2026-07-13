@@ -29,7 +29,8 @@
 | [web-frontend.md](web-frontend.md) | `tests/spec/web-frontend/` | **OK O/P/Q/R + 실로그인 회귀 = Playwright 19 pass · NOK 0 · SKIP ⚠#2 세션중401·⚠#3 라이브 incident_resolved(설계자)** (2026-07-11 #92/#104/R 재검증; 로그인 되튕김 CRITICAL 회귀 발견·flushSync fix) |
 | [notification-test-send.md](notification-test-send.md) — 채널별(이메일/SMS) 테스트 발송: admin 전용·채널 독립·요청시점 런타임 설정 판정·미설정=not_configured(무크래시)·설정=실제 발송경로 성패보고·KakaoTalk 범위 밖(interface-web-api 테스트발송 엔드포인트 + 채널 usability status 델타) | `tests/spec/notification-test-send/` | (신규 — 미검증) |
 | [system-status-aggregate.md](system-status-aggregate.md) — 시스템 상태 현재-상태 요약 창(집계: 정상=카운트/예외만 개별·장비 수 무관 경계 불변식·서비스 고정목록·장비 검색·이력 드릴다운·카메라 연결상태; interface-web-api 헬스 접면 델타) | `tests/spec/system-status-aggregate/` | (신규 — 미검증) |
-| [device-management.md](device-management.md) — 장치(카메라·센서) 등록·삭제·교체(교체=의도적 삭제+추가·특별기능 없음; 센서 명시등록 `POST /api/devices`+자동발견 유지+관대한 삭제(재신호 복원)+차단목록(옵트인 영구제외: `block`/`unblock`/`/blocked`); 카메라 reload 팬아웃에 recording 추가; 카메라 삭제 시 사고·보호아카이브 증거 미삭제 가드; interface-web-api/web-backend/hw-gateway/recording 델타) | `tests/spec/device-management/` | (신규 — 미검증) |
+| [sensor-device-lifecycle.md](sensor-device-lifecycle.md) — 센서 장치 생명주기(교체=삭제+추가·특별기능 없음; 존재감(last_seen)↔생명주기 직교; 명시등록/재활성 `POST /api/devices`(생성-또는-재활성); 자동발견 `seen`은 존재감만 갱신·생명주기 불변; **스티키 삭제**(재신호로 복원 안 함)+**재출현 경보** WS `device_reappeared`; 삭제≠안전정지(정적 이중화); `{id}`=surrogate PK; seen internal 경계; interface-web-api/web-backend/hw-gateway 델타) | `tests/spec/sensor-device-lifecycle/` | (신규 — 미검증) |
+| [camera-change-propagation.md](camera-change-propagation.md) — 카메라 변경 전파·삭제 증거 보존(회귀가드; 카메라 CRUD reload 팬아웃을 cctv·youtube·**recording** 3소비자로·**커밋 후**·최선노력+재동기 안전망; 카메라 삭제 시 사고·보호아카이브 증거 비연쇄(stream_key 비정규화 보존); 카메라는 devices/센서모델 대상 아님; interface-web-api/web-backend/recording 델타) | `tests/spec/camera-change-propagation/` | (신규 — 미검증) |
 
 ## 공용 헬퍼
 
