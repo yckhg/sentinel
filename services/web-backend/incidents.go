@@ -214,47 +214,39 @@ func handleCreateIncident(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// upsertIncidentPresence records a device's presence from a crisis in ONE
-// transaction and, only when the upsert landed on a soft-deleted row, runs the
-// shared rowcount-guarded reappearance dedup (via guardReappearTx). Best-effort:
-// any error is logged and swallowed (device presence must never fail incident
-// creation). Returns a pending device_reappeared broadcast for the caller to emit
-// after this returns, or nil. A brand-new crisis-born device is created
-// alert_state='active'; an existing row keeps its alert_state (only last_seen moves).
+// upsertIncidentPresence records a device's presence from a crisis (single
+// autocommit upsert) and, only when the upsert landed on a soft-deleted row, runs the
+// shared reappearance guard serially (계약 2 "직렬 실행" — no tx, so the hot path holds
+// no extra write lock). Best-effort: any error is logged and swallowed (device
+// presence must never fail incident creation). Returns a pending device_reappeared
+// broadcast for the caller to emit after this returns (write already succeeded), or
+// nil. alert_state is set 'active' on BOTH insert and conflict — a crisis inherently
+// means the device is alarming — symmetric with the seen path's alert_state handling
+// (F4); a later heartbeat reconciles it via the seen COALESCE update.
 func upsertIncidentPresence(ctx context.Context, db *sql.DB, siteID, deviceID string) *reappearBroadcast {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		log.Printf("incident presence begin tx error: %v", err)
-		return nil
-	}
-	defer tx.Rollback()
-
 	var deletedAt *string
-	err = tx.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `
 		INSERT INTO devices (site_id, device_id, last_seen, alert_state)
 		VALUES (?, ?, datetime('now'), 'active')
 		ON CONFLICT(site_id, device_id) DO UPDATE SET
-			last_seen = datetime('now')
+			last_seen = datetime('now'),
+			alert_state = 'active'
 		RETURNING datetime(deleted_at)
 	`, siteID, deviceID).Scan(&deletedAt)
 	if err != nil {
 		log.Printf("upsert device from incident error: %v", err)
 		return nil
 	}
+	markWALDirty()
 
-	var pending *reappearBroadcast
-	if deletedAt != nil {
-		pending, err = guardReappearTx(ctx, tx, siteID, deviceID)
-		if err != nil {
-			log.Printf("incident reappear guard error: %v", err)
-			return nil
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		log.Printf("incident presence commit error: %v", err)
+	if deletedAt == nil {
 		return nil
 	}
-	markWALDirty()
+	pending, gErr := guardReappearFn(ctx, db, siteID, deviceID)
+	if gErr != nil {
+		log.Printf("incident reappear guard error: %v", gErr)
+		return nil
+	}
 	return pending
 }
 
