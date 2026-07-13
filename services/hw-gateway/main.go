@@ -62,6 +62,12 @@ var requiredHealthTopics = []string{topicAlert, topicHeartbeat, topicResolved}
 // subackFailure is the MQTT SUBACK return code meaning "subscription failed".
 const subackFailure byte = 0x80
 
+// internalToken is the shared secret sent as X-Internal-Token on every internal
+// web-backend call (POST /api/devices/seen, POST /api/incidents). It is loaded from
+// INTERNAL_TOKEN in main and must match web-backend's INTERNAL_TOKEN or those calls
+// are rejected 401 (fail-closed).
+var internalToken string
+
 // healthState tracks the live MQTT connection + per-topic SUBACK-granted state so
 // that /healthz reflects the real ability to receive field alerts, not merely
 // that the HTTP server is up. All access is in-memory (no network round-trip),
@@ -350,6 +356,10 @@ func main() {
 	brokerURL := getEnv("MQTT_BROKER_URL", "tcp://mosquitto:1883")
 	notifierURL := getEnv("NOTIFIER_URL", "http://notifier:8080")
 	webBackendURL := getEnv("WEB_BACKEND_URL", "http://web-backend:8080")
+	internalToken = strings.TrimSpace(getEnv("INTERNAL_TOKEN", ""))
+	if internalToken == "" {
+		log.Printf("[CONFIG] INTERNAL_TOKEN unset — web-backend seen/incidents calls will be rejected 401 (fail-closed)")
+	}
 
 	// Start background heartbeat checker
 	go heartbeatChecker()
@@ -714,6 +724,9 @@ func forwardToWebBackend(webBackendURL string, alert *AlertPayload) bool {
 			return false
 		}
 		req.Header.Set("Content-Type", "application/json")
+		// Internal trust boundary (계약 2/3): web-backend fail-closes POST /api/incidents
+		// on a missing/mismatched X-Internal-Token.
+		req.Header.Set("X-Internal-Token", internalToken)
 
 		resp, doErr := httpClient.Do(req)
 		if doErr == nil {
@@ -902,6 +915,9 @@ func postDeviceSeen(webBackendURL, siteID, deviceID, alertState string) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// Internal trust boundary (계약 2): web-backend fail-closes POST /api/devices/seen
+	// on a missing/mismatched X-Internal-Token.
+	req.Header.Set("X-Internal-Token", internalToken)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
