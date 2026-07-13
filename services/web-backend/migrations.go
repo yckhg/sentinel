@@ -242,6 +242,46 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_alert_id ON incidents(alert_id) 
 		// value exists anywhere in the incidents table.
 		sql: `UPDATE incidents SET status = 'open', confirmed_at = NULL, confirmed_by = NULL WHERE status = 'acknowledged';`,
 	},
+	{
+		version: 21,
+		name:    "devices_last_seen_nullable_rebuild",
+		// Sensor-device-lifecycle: make last_seen NULLABLE so an explicitly
+		// registered device can sit "offline 대기" (last_seen IS NULL) until its
+		// first heartbeat. SQLite cannot drop a column's NOT NULL with ALTER, so the
+		// table is rebuilt: create a twin with last_seen nullable, copy every row
+		// (preserving surrogate ids and all columns incl. alert_state), drop the old
+		// table, rename. The inline UNIQUE(site_id, device_id) recreates the
+		// composite-key index. No other table has a FK onto devices, so the drop is
+		// safe under foreign_keys=ON.
+		sql: `
+			CREATE TABLE devices_new (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				site_id TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				alias TEXT NOT NULL DEFAULT '',
+				first_seen DATETIME NOT NULL DEFAULT (datetime('now')),
+				last_seen DATETIME,
+				deleted_at DATETIME,
+				alert_state TEXT NOT NULL DEFAULT 'none',
+				UNIQUE(site_id, device_id)
+			);
+			INSERT INTO devices_new (id, site_id, device_id, alias, first_seen, last_seen, deleted_at, alert_state)
+				SELECT id, site_id, device_id, alias, first_seen, last_seen, deleted_at, alert_state FROM devices;
+			DROP TABLE devices;
+			ALTER TABLE devices_new RENAME TO devices;
+		`,
+	},
+	{
+		version: 22,
+		name:    "add_devices_reappear_alerted_at",
+		// Sensor-device-lifecycle: dedup state for the "삭제 후 재출현" alert. A
+		// nullable timestamp set once (NULL→now) via a rowcount-guarded UPDATE when a
+		// soft-deleted device signals again; reset to NULL on reactivation so the next
+		// delete→reappear cycle can alert once more. A dedicated column (not a
+		// last_seen≤deleted_at edge) is required because an explicitly-registered then
+		// deleted device has last_seen IS NULL, which no timestamp edge can express.
+		sql: `ALTER TABLE devices ADD COLUMN reappear_alerted_at DATETIME;`,
+	},
 }
 
 // migrationTimeout bounds each individual migration (and the bookkeeping steps)
