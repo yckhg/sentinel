@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,21 +32,51 @@ type CameraStatus struct {
 	LastError   *string `json:"lastError"`
 }
 
-// watchdogWriter wraps an io.Writer and tracks the last time data was written.
-type watchdogWriter struct {
-	inner    io.Writer
-	lastSeen atomic.Int64 // unix timestamp of last write
+// progressLiveness tracks the last time an ffmpeg `-progress` update was
+// observed. ffmpeg emits key=value progress lines (frame=, fps=, out_time=,
+// progress=continue, ...) to its `-progress` fd roughly twice a second while it
+// is actively moving frames. The watchdog treats the *arrival of these lines* —
+// not general log output — as the liveness signal, so a healthy but quiet
+// stream (`-loglevel warning` + `-c copy`, which is silent on stderr) is not
+// mistaken for a hang and restarted every FFMPEG_TIMEOUT. (#68)
+type progressLiveness struct {
+	lastSeen atomic.Int64 // unix timestamp of last progress line observed
 }
 
-func newWatchdogWriter(inner io.Writer) *watchdogWriter {
-	w := &watchdogWriter{inner: inner}
-	w.lastSeen.Store(time.Now().Unix())
-	return w
+func newProgressLiveness() *progressLiveness {
+	p := &progressLiveness{}
+	p.lastSeen.Store(time.Now().Unix())
+	return p
 }
 
-func (w *watchdogWriter) Write(p []byte) (int, error) {
-	w.lastSeen.Store(time.Now().Unix())
-	return w.inner.Write(p)
+func (p *progressLiveness) mark(t time.Time) {
+	p.lastSeen.Store(t.Unix())
+}
+
+func (p *progressLiveness) last() time.Time {
+	return time.Unix(p.lastSeen.Load(), 0)
+}
+
+// consumeProgress reads ffmpeg `-progress` output line by line and marks
+// liveness (via now()) on every non-empty line. Any progress line is a
+// sufficient liveness signal. It returns when the reader reaches EOF, which for
+// the process pipe happens when ffmpeg exits and every write end is closed.
+func consumeProgress(r io.Reader, live *progressLiveness, now func() time.Time) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		if len(scanner.Bytes()) == 0 {
+			continue
+		}
+		live.mark(now())
+	}
+}
+
+// isStalled reports whether the elapsed time since the last liveness signal has
+// exceeded timeout. A frozen/SIGSTOPped ffmpeg stops emitting progress, so this
+// still detects genuine hangs (spec §J); a healthy stream keeps emitting
+// progress and is never flagged.
+func isStalled(last, now time.Time, timeout time.Duration) bool {
+	return now.Sub(last) > timeout
 }
 
 // CameraManager manages FFmpeg processes for all cameras.
@@ -86,6 +117,11 @@ func defaultFFmpegCmd(cam CameraConfig, destURL string) *exec.Cmd {
 	return exec.Command("ffmpeg",
 		"-hide_banner",
 		"-loglevel", "warning",
+		// Emit machine-readable progress (frame=, out_time=, progress=continue, ...)
+		// to fd 3 ~2×/sec. The watchdog uses the arrival of these updates as the
+		// liveness signal, so a healthy but log-silent stream is not mistaken for a
+		// hang. fd 3 is wired to a pipe via cmd.ExtraFiles in manageCameraStream. (#68)
+		"-progress", "pipe:3",
 		"-rtsp_transport", "tcp",
 		"-i", cam.RtspURL,
 		"-c", "copy",
@@ -131,11 +167,29 @@ func (cm *CameraManager) manageCameraStream(cam CameraConfig, state *cameraState
 		// Build FFmpeg command: pull RTSP, push RTMP to streaming server.
 		destURL := fmt.Sprintf("%s/%s", cm.streamURL, cam.CameraID)
 		cmd := cm.newCmd(cam, destURL)
-		// Wrap stdout/stderr with watchdog writers to detect hung FFmpeg
-		stdoutWatcher := newWatchdogWriter(os.Stdout)
-		stderrWatcher := newWatchdogWriter(os.Stderr)
-		cmd.Stdout = stdoutWatcher
-		cmd.Stderr = stderrWatcher
+		// Logs flow to the container's stdout/stderr unchanged. Liveness is NOT
+		// derived from log output: with `-loglevel warning` + `-c copy` a healthy
+		// stream is silent, so treating "no log output" as a hang restarted a
+		// healthy process every FFMPEG_TIMEOUT (#68). Instead the watchdog reads
+		// ffmpeg's `-progress` stream on fd 3 (see below).
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		// Wire a pipe to the child's fd 3 for `-progress pipe:3`. ExtraFiles[0]
+		// becomes fd 3 in the child. A reader goroutine (started after Start)
+		// marks liveness on each progress update.
+		live := newProgressLiveness()
+		var progressR, progressW *os.File
+		if pr, pw, perr := os.Pipe(); perr == nil {
+			progressR, progressW = pr, pw
+			cmd.ExtraFiles = append(cmd.ExtraFiles, progressW)
+		} else {
+			// fd exhaustion is the only realistic cause. Run without a progress
+			// pipe this cycle; liveness stays at the process start time, so a
+			// truly silent cycle could still trip the watchdog — acceptable for
+			// this rare degraded case.
+			log.Printf("[%s] progress pipe unavailable (%v); liveness falls back to start time", cam.CameraID, perr)
+		}
 
 		// Re-check stopCh right before starting: Reload/Stop close stopCh and kill
 		// the process they snapshotted, but a goroutine sitting between the loop
@@ -153,6 +207,14 @@ func (cm *CameraManager) manageCameraStream(cam CameraConfig, state *cameraState
 
 		err := cmd.Start()
 		if err != nil {
+			// Start failed: no child inherited the pipe, so close both ends here
+			// to avoid leaking fds across reconnect attempts.
+			if progressW != nil {
+				progressW.Close()
+			}
+			if progressR != nil {
+				progressR.Close()
+			}
 			errMsg := fmt.Sprintf("Failed to start FFmpeg: %v", err)
 			log.Printf("[%s] %s", cam.CameraID, errMsg)
 			cm.mu.Lock()
@@ -164,6 +226,17 @@ func (cm *CameraManager) manageCameraStream(cam CameraConfig, state *cameraState
 			time.Sleep(backoff)
 			backoff = min(backoff*2, maxBackoff)
 			continue
+		}
+
+		// The child now holds its own dup of the progress write end. Close the
+		// parent's copy so the reader observes EOF when ffmpeg exits, and start
+		// the reader that converts progress updates into liveness marks. (#68)
+		if progressR != nil {
+			progressW.Close()
+			go func(r *os.File) {
+				defer r.Close()
+				consumeProgress(r, live, time.Now)
+			}(progressR)
 		}
 
 		// Mark as connected once process starts successfully
@@ -188,14 +261,17 @@ func (cm *CameraManager) manageCameraStream(cam CameraConfig, state *cameraState
 			for {
 				select {
 				case <-ticker.C:
-					lastStdout := time.Unix(stdoutWatcher.lastSeen.Load(), 0)
-					lastStderr := time.Unix(stderrWatcher.lastSeen.Load(), 0)
-					lastOutput := lastStdout
-					if lastStderr.After(lastOutput) {
-						lastOutput = lastStderr
-					}
-					if time.Since(lastOutput) > cm.timeout {
-						log.Printf("[%s] FFmpeg output timeout (%v since last output), stopping process gracefully", cam.CameraID, cm.timeout)
+					// Liveness = time since the last `-progress` update on fd 3.
+					// A frozen/SIGSTOPped ffmpeg stops emitting progress, so this
+					// still detects genuine hangs (spec §J); a healthy silent
+					// stream keeps emitting progress and is left alone (#68).
+					//
+					// Threshold note (#68 decision 2): progress arrives ~2×/sec, so
+					// FFMPEG_TIMEOUT (default 30s) is deliberately conservative
+					// slack — far larger than progress-based liveness needs. It is
+					// kept unchanged to avoid regressing the tuned watchdog window.
+					if isStalled(live.last(), time.Now(), cm.timeout) {
+						log.Printf("[%s] FFmpeg progress stalled (%v since last progress update), stopping process gracefully", cam.CameraID, cm.timeout)
 						terminateProcess(cam.CameraID, cmd.Process, processDone)
 						return
 					}
