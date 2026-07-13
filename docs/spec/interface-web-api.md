@@ -39,7 +39,7 @@ web-backend와 통신할 수 있어야 하며, 각 계약의 검증 단언은 OK
   curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/api/cameras   # → 401
   ```
 - [ ] user 토큰으로 admin 전용 엔드포인트(예: `GET /api/settings`) 호출 → `403`
-- [ ] 모든 JSON 응답의 `Content-Type`이 `application/json` — 단 HLS 프록시(계약 8)와 두 `GET /healthz`(계약 13·15)는 제외. healthz 두 곳은 JSON 텍스트 바디를 Content-Type 미설정으로 raw 전송해 `text/plain; charset=utf-8`로 응답 (실측)
+- [ ] 모든 JSON 응답의 `Content-Type`이 `application/json` — 단 HLS 프록시(계약 8)와 두 `GET /healthz`(계약 13·15)는 예외. web-backend healthz(계약 13)는 Content-Type 미설정으로 JSON 텍스트 바디를 raw 전송해 `text/plain; charset=utf-8`로 응답하고, hw-gateway healthz(계약 15)는 Content-Type을 `application/json`으로 명시한다 (실측)
   ```bash
   curl -sI http://localhost:8080/healthz | grep -i '^content-type: text/plain'   # → 매치 (실측 동작)
   ```
@@ -769,7 +769,7 @@ MQTT 발행 페이로드 스키마의 SSOT는 `docs/spec/interface-mqtt.md` — 
 
 ### 출력 (계약)
 
-- `GET /healthz` → `200` `{"status":"ok","service":"hw-gateway"}` — 바디는 JSON 텍스트이나 `Content-Type`은 `text/plain; charset=utf-8` (공통 검증 단언 참조)
+- `GET /healthz` → `200` `{"status":"ok","service":"hw-gateway"}` — `Content-Type`은 `application/json` (공통 검증 단언 참조)
 - MQTT 발행 3종(`restart`/`test-alert`/`alert/resolved`) 공통: 성공 `200` `{"status":"sent","topic":"<발행 토픽>"}` · JSON 파싱 실패/필수 필드 누락 `400` `{"error": ...}` · **최초 브로커 연결 미성립(기동 후 한 번도 연결된 적 없음) `503`** `{"error":"MQTT broker not connected"}` · 발행 실패 `500`
   - 연결이 한 번 성립한 뒤 브로커가 단절된 상태(자동 재연결 진행 중)에서는 `503`이 **아니다** — 발행이 클라이언트 내부 큐에 적재되고 재연결·전송 완료까지 HTTP 응답이 블로킹된다(서버 측 응답 타임아웃 없음). 상세는 `docs/spec/hw-gateway.md`의 "MQTT 발행 API 공통 응답 계약" 참조
   - restart 토픽: `safety/{siteId}/cmd/restart` · test-alert: `safety/{siteId}/alert` · alert/resolved: `safety/{siteId}/alert/resolved`
