@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,38 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// internalToken is the shared secret guarding hw-gateway → web-backend internal
+// side-effect endpoints (POST /api/devices/seen, POST /api/incidents). Set from
+// the INTERNAL_TOKEN env var at startup via initInternalToken.
+var internalToken string
+
+// initInternalToken loads the internal shared secret. An empty value means the
+// gate is fail-closed: every guarded request is rejected (no bypass).
+func initInternalToken() {
+	internalToken = strings.TrimSpace(os.Getenv("INTERNAL_TOKEN"))
+	if internalToken == "" {
+		log.Printf("WARNING: INTERNAL_TOKEN unset — internal device endpoints (seen/incidents) will reject all requests (fail-closed)")
+	}
+}
+
+// checkInternalToken enforces the X-Internal-Token fail-closed gate. It returns
+// true (and writes nothing) when the request carries the correct secret; otherwise
+// it writes 401 and returns false. Fail-closed: an unset server secret rejects
+// everything, a missing/mismatched header rejects. Constant-time comparison avoids
+// leaking the secret through timing.
+func checkInternalToken(w http.ResponseWriter, r *http.Request) bool {
+	if internalToken == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "internal endpoint disabled"})
+		return false
+	}
+	got := r.Header.Get("X-Internal-Token")
+	if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(internalToken)) != 1 {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid internal token"})
+		return false
+	}
+	return true
+}
 
 const dbTimeout = 5 * time.Second
 
