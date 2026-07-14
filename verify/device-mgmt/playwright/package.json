@@ -1,0 +1,12 @@
+{
+  "name": "devverify-device-reappear",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Isolated Playwright harness for sensor-device-lifecycle assertion K (device_reappeared reactivation polling UX)",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1"
+  }
+}

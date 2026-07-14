@@ -1,0 +1,81 @@
+# Isolated device-management verification stack (assertion K, sensor-device-lifecycle).
+#
+# SAFETY / ISOLATION INVARIANT
+# ----------------------------
+# This is a SELF-CONTAINED stack, run ONLY as project `devverify`:
+#   docker compose -p devverify -f verify/device-mgmt/docker-compose.devverify.yml ...
+# It deliberately does NOT `-f docker-compose.yml` overlay the prod file, because an
+# overlay CONCATENATES `ports:` — the prod web-frontend `3080:80` mapping cannot be
+# dropped and would collide with the running prod container. A standalone file gives us
+# a hard guarantee: no prod `sentinel-*` container_name, no prod volume, no prod port,
+# no prod network is ever referenced.
+#
+# Everything here is namespaced:
+#   - container_name: devverify-*         (never sentinel-*)
+#   - volume:         devverify-db-data   (explicit name; NOT prod sentinel_db-data)
+#   - network:        devverify-net       (explicit name; private bridge)
+#   - host ports:     38080 / 38081       (free high ports, NOT prod 3080)
+#
+# Only web-backend + web-frontend are brought up. The frontend's nginx has a static
+# `proxy_pass http://streaming:8080` upstream that must RESOLVE at nginx startup, so
+# web-backend advertises an extra network alias `streaming` (the /live/ route is never
+# exercised by the K test).
+
+services:
+  web-backend:
+    build:
+      context: ../../services/web-backend
+    image: devverify-web-backend
+    container_name: devverify-web-backend
+    restart: "no"
+    environment:
+      # Fixed test secrets (isolated stack only — never production values).
+      - JWT_SECRET=devverify-jwt-secret-K
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=devverify-admin-pw
+      # Shared internal secret: the seen/incidents fail-closed boundary. The
+      # Playwright test injects this same value in the X-Internal-Token header
+      # (mirroring hw-gateway) to make the deleted device re-signal.
+      - INTERNAL_TOKEN=devverify-internal-token
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "38081:8080"
+    volumes:
+      - devverify-db-data:/data
+    networks:
+      devverify-net:
+        aliases:
+          - web-backend
+          - streaming   # satisfies nginx's static /live/ upstream resolution
+
+  web-frontend:
+    build:
+      context: ../../services/web-frontend
+    image: devverify-web-frontend
+    container_name: devverify-web-frontend
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:80/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "38080:80"
+    depends_on:
+      web-backend:
+        condition: service_healthy
+    networks:
+      - devverify-net
+
+networks:
+  devverify-net:
+    name: devverify-net
+    driver: bridge
+
+volumes:
+  devverify-db-data:
+    name: devverify-db-data
