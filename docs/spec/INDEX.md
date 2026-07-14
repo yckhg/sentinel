@@ -32,6 +32,14 @@
 | [sensor-device-lifecycle.md](sensor-device-lifecycle.md) — 센서 장치 생명주기(교체=삭제+추가·특별기능 없음; 존재감(last_seen)↔생명주기 직교; 명시등록/재활성 `POST /api/devices`(생성-또는-재활성); 자동발견 `seen`은 존재감만 갱신·생명주기 불변; **스티키 삭제**(재신호로 복원 안 함)+**재출현 경보** WS `device_reappeared`; 삭제≠안전정지(정적 이중화); `{id}`=surrogate PK; seen internal 경계; interface-web-api/web-backend/hw-gateway 델타) | `tests/spec/sensor-device-lifecycle/` | (신규 — 미검증) |
 | [camera-change-propagation.md](camera-change-propagation.md) — 카메라 변경 전파·삭제 증거 보존(회귀가드; 카메라 CRUD reload 팬아웃을 cctv·youtube·**recording** 3소비자로·**커밋 후**·최선노력+재동기 안전망; 카메라 삭제 시 사고·보호아카이브 증거 비연쇄(stream_key 비정규화 보존); 카메라는 devices/센서모델 대상 아님; interface-web-api/web-backend/recording 델타) | `tests/spec/camera-change-propagation/` | (신규 — 미검증) |
 
+## 관리(/admin) IA 재구성 (프론트 IA/표현 리팩터 — 백엔드·API 무변경)
+
+| Spec | 계약 대상 | 상태 |
+|---|---|---|
+| [admin-management-ia-map.md](admin-management-ia-map.md) — 관리 허브 + 기능별 서브페이지 10개(드릴다운·딥링크) 분할 **설계 맵**; 행위보존·API무변경·admin 게이트 불변식; ManagementPage 분해 | (설계 맵 — 리프 위임 추적) |
+| [admin-routing-navigation-contract.md](admin-routing-navigation-contract.md) — (횡단 접합부) `/admin`·`/admin/<slug>` URL 체계·딥링크·뒤로가기=허브복귀·admin 게이트·open-redirect 가드 확장 | (신규 — 미검증) |
+| 리프 스펙 11종(허브 + 10 페이지: devices·cameras·health·contacts·test-alert·notify-test·system·users·storage·cctv-links) | 각 페이지 행위보존 계약 | 위임 대기 (맵 §작성 현황) |
+
 ## 공용 헬퍼
 
 - `tests/spec/lib-web.sh` — Docker 내 curl 래퍼 (web 계열)
