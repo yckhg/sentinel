@@ -34,15 +34,17 @@
 
 ## SKIPPED 목록 (초록으로 세지 않음 — 항상 표면화)
 
-### ★ 핵심(load-bearing) 스킵 — 사람 승인 대상
+### ★ 핵심(load-bearing) 스킵 — ✅ 전부 판정 완료(2026-07-14), 아래 이력 보존
 
-| 단언ID | 잎 | 종류 | 사유 | 중요도 |
-|--------|-----|------|------|--------|
-| **B2** | camera | mutating · 격리 compose 스택 | 카메라 DELETE 후 recording reconcile 완료를 폴링 관측 → 삭제 stream_key 아카이브(MP4+metadata) **잔존을 능동 조회**로 판정. 별도 DB 볼륨·유효 미디어 픽스처·라이브 recorder가 필요해 상시 판정 불가. | 핵심 |
-| **A2·D·E·E2·F·F2·G·H1** | sensor | mutating · 격리 compose 스택 | 자동발견 등록(D)·sticky 삭제 전이(E·E2)·WS 통지 관찰(F·F2)·위기 유입 자동등록(H1·E2)·health 집계(A2)·재출현(G)는 `devices`/WS에 부작용. **격리 스택 + admin JWT + `INTERNAL_TOKEN`** 하에서만 판정 가능. 상시(A·B·C·C2·H2·I·I2·L·J·migration)는 격리 web-backend + 정적 스캔으로 이미 green. | 핵심 |
-| **K** | sensor | needs-browser (Playwright) | 프론트 `device_reappeared` 재활성 UI. 백엔드 WS broadcast+backfill은 완비이나, 프론트는 app-root 단일 소켓 스코프 밖이라 **`/api/devices/all` 폴링으로 표면화**(WS 실시간 아님). 실시간 WS 표면화·브라우저 E2E 판정은 needs-browser. | 핵심 |
+> **UPDATE 2026-07-14:** 이 절이 "사람 승인 대상·판정 불가"로 남겼던 핵심 SKIP 10개를 실제로 판정했고 **전부 통과(10/10 OK)**. 정찰 결과 sensor 8개(A2·D·E·E2·F·F2·G·H1)의 "격리 compose 스택 필요" 분류는 **과보수적**이었음 — 핸들러 팩토리 함수 직접 호출·admin context 주입·`BroadcastDeviceReappeared`/`sendReappearedSnapshot` func-var 시밍으로 **compose 스택 없이 in-process Go 상시 테스트**로 판정 가능. 라이브 스택이 실제로 필요한 건 B2(recording+ffmpeg)·K(Playwright)뿐. 3갈래 병렬 구현 → **독립 검증자 2개**가 구현자 보고 불신·재실행 + **뮤테이션으로 비공허성 실증**(소스에 회귀 주입 시 각 테스트 red 확인) + 소스 무변경 감사 + 운영 `sentinel-*` 무접촉 증명. 커밋 `19db723`(main, push 미실행): `sensor_device_lifecycle_test.go`(8단언)·`archive_evidence_preservation_test.go`(B2)·`verify/device-mgmt/`(devverify compose + Playwright). 아래 표는 당시 SKIP 사유의 **이력**으로 보존하되, "판정 결과" 열이 현재 상태다.
 
-> **사람 승인 필요 이유**: 위 스킵들은 "커버됐다"로 오인되면 안 되는 load-bearing 단언이다. mutating 격리 compose 스택(`docker compose -p devverify`, 별도 DB 볼륨·mock 수신기, 운영 `sentinel-*` 무접촉) 구성과 Playwright 브라우저 하네스가 준비되면 판정 가능하다. 특히 **sensor K의 프론트 폴링 대체**는 설계상 실시간 WS 이탈이므로(검증 MEDIUM-1로도 표면화), 이 UX 절충을 수용할지 사람이 결정해야 한다.
+| 단언ID | 잎 | 당시 SKIP 사유(이력) | 판정 결과(2026-07-14) |
+|--------|-----|------|------|
+| **B2** | camera | mutating · 격리 compose 스택. 카메라 DELETE 후 아카이브(MP4+metadata) 잔존을 능동 조회로 판정하려면 별도 DB 볼륨·유효 미디어 픽스처·라이브 recorder 필요. | ✅ **OK** — `services/recording/archive_evidence_preservation_test.go`. 실 protect→finalize(ffmpeg concat)→실 `fetchCameras`+`RecordingManager.Reload`(removed 분기, recorder 정지) 재현, finalize 직후·reconcile 후 MP4/metadata 존재 이중 확인(비공허). 뮤테이션: reconcile가 아카이브 purge 시 (b)(c) red. |
+| **A2·D·E·E2·F·F2·G·H1** | sensor | mutating · 격리 compose 스택 필요로 판단(자동발견 D·sticky 삭제 E·E2·WS 통지 F·F2·위기 자동등록 H1·health A2·재출현 G). | ✅ **OK (분류 정정)** — 격리 스택 불필요. `sensor_device_lifecycle_test.go` **in-process 상시 테스트**로 판정. 각 테스트 뮤테이션으로 비공허 실증(silent-revive 재주입→E·E2 red, once-only 가드 제거→F got 2, null 제거→A2 합 불변식 red 등). |
+| **K** | sensor | needs-browser (Playwright). 프론트 `device_reappeared` 재활성 UI, 재출현을 `/api/devices/all` 폴링으로 표면화(WS 실시간 아님). | ✅ **OK** — `verify/device-mgmt/` devverify 격리 스택 + Playwright. 추가→삭제(sticky)→POST seen→폴링 대기→재출현 패널·원클릭 재활성 검증, 운영 무접촉 증명. 뮤테이션: seen 재신호 제거 시 패널 미출현. **폴링↔실시간 WS 절충은 사람 결정 = 폴링 수용 확정.** |
+
+> **결론(갱신됨)**: 위 핵심 SKIP은 더 이상 "사람 승인 대상"이 아니다 — 전부 판정·통과했다. 유일하게 남았던 순수 사람 결정(K의 폴링 대체 수용 여부)은 **수용으로 확정**됐다. 방법론적 교훈: "mutating이라 격리 스택 필요"라는 SKIP 분류는 in-process 시밍 가능성을 먼저 타진해야 한다(8/10이 정찰에서 값싼 in-process로 재분류됨).
 
 ### 비-핵심 스킵 / 수용된 nice-to-have
 - 없음(상시 게이트로 승격 가능했던 항목 I·I2·once-only·zero-write는 모두 R3에서 상시화 완료).
@@ -56,9 +58,9 @@
 
 ## 미해결 / 블록 항목
 - 없음(블록 없음). 두 잎 모두 SPEC-OK → 구현 → 독립 검증 CRITICAL/HIGH 0 → 통합 머지 → SSOT 정합 완료.
-- 잔여 판정은 위 **핵심 스킵**(격리 스택·브라우저 하네스 준비 시)뿐.
+- ~~잔여 판정은 위 **핵심 스킵**(격리 스택·브라우저 하네스 준비 시)뿐.~~ → **해소(2026-07-14): 핵심 스킵 10개 전부 판정·통과.** 잔여 미해결 없음.
 
 ## 결론
-- 모든 작업 단위 **DONE**, 통합 브랜치 `spec/device-mgmt`에 누적 머지 완료.
+- 모든 작업 단위 **DONE**, 통합 브랜치 `spec/device-mgmt`에 누적 머지 완료(main 반영).
 - 통합 최종 sha: **8eb03d3**. 격리 컨테이너 통합 build/vet/test -race green(문서-only 마지막 변경은 코드 무영향).
-- **main 머지·git push는 사람이 결정.** 핵심 스킵(camera B2 / sensor A2·D·E·E2·F·F2·G·H1·K)은 사람 승인 대상.
+- **UPDATE 2026-07-14:** 핵심 스킵(camera B2 / sensor A2·D·E·E2·F·F2·G·H1·K) **10개 전부 판정 완료, 10/10 OK**(독립 검증자 2개 뮤테이션 비공허 실증). 커밋 `19db723`(main, push는 사람이 결정 — 미실행). K 폴링↔실시간 WS 절충은 **폴링 수용 확정**. 상세는 위 SKIPPED 절 UPDATE 참조.
