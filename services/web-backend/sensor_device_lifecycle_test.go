@@ -482,42 +482,489 @@ func TestSensorLifecycle_J_AdminOnly(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// SKIP skeletons — mutating (isolated stack + admin JWT + INTERNAL_TOKEN + WS
-// observer). Surfaced (not silently green): fixture/observation protocol documented
-// as the enabling condition. Run under the isolated-stack harness, not this gate.
+// Mutating, load-bearing assertions — REAL always-on in-process gates.
+//
+// A prior scout confirmed these are judgeable in-process without a compose stack:
+// handlers are factory funcs, admin is injected via the request context (roleReq),
+// the internal-token gate reads the internalToken package var, and the WS broadcast
+// is a func-var seam (BroadcastDeviceReappeared) whose backfill counterpart
+// (sendReappearedSnapshot) drains into a wsClient.send channel. Each test resets any
+// package var it mutates in t.Cleanup, and is non-vacuous (a pre-assertion or a
+// negative control means it fails if the behavior regresses).
+//
+// The broadcast callbacks fire SYNCHRONOUSLY inside the handler call (handleSeenDevice
+// / upsertIncidentPresence invoke BroadcastDeviceReappeared inline, not in a
+// goroutine), and callSeen/callIncident run the handler synchronously — so capture
+// slices need no mutex.
 // -----------------------------------------------------------------------------
 
-func skipMutating(t *testing.T, id, why string) {
-	t.Helper()
-	t.Skipf("%s: SKIP (mutating, load-bearing) — %s. Enable under isolated stack (web-backend + hw-gateway + INTERNAL_TOKEN + admin JWT + WS observer).", id, why)
+// --- assertion A2: null last_seen aggregates as OFFLINE, sum invariant holds ------
+// newHealthMonitor(db) + handleGetHealthSummary. A null-last_seen device (explicitly
+// registered, never-seen) must land in OFFLINE (not healthy/abnormal) and must not be
+// silently dropped from the counts. Non-vacuity: the sum invariant (healthy+abnormal+
+// offline == 미삭제 총수) fails if null falls through all three CASEs, and offline==2
+// (null + stale) pins it to the offline bucket. Uses EXPLICIT past timestamps
+// (datetime('now','-120 seconds')) rather than sleeps, respecting the 60s default.
+func TestSensorLifecycle_A2_NullLastSeenHealthSummary(t *testing.T) {
+	db := newTestDB(t)
+
+	// null-last_seen device via the real create handler (offline 대기).
+	cw := httptest.NewRecorder()
+	handleCreateDevice(db)(cw, roleReq("admin", http.MethodPost, "/api/devices", "",
+		`{"siteId":"site-001","deviceId":"vs-null"}`))
+	if cw.Code != http.StatusCreated {
+		t.Fatalf("A2: create null-device expected 201, got %d body=%s", cw.Code, cw.Body.String())
+	}
+
+	// 1 healthy (recent, non-active), 1 abnormal (recent, active), 1 stale-offline
+	// (>60s past) via direct SQL with explicit timestamps.
+	if _, err := db.Exec(`
+		INSERT INTO devices (site_id, device_id, alias, last_seen, alert_state) VALUES
+		  ('site-001','vs-healthy',  '', datetime('now'),               'none'),
+		  ('site-001','vs-abnormal', '', datetime('now'),               'active'),
+		  ('site-001','vs-stale',    '', datetime('now','-120 seconds'),'none')
+	`); err != nil {
+		t.Fatalf("A2: seed devices: %v", err)
+	}
+
+	mon := newHealthMonitor(db)
+	hw := httptest.NewRecorder()
+	handleGetHealthSummary(mon)(hw, roleReq("user", http.MethodGet, "/api/health/summary", "", ""))
+	if hw.Code != http.StatusOK {
+		t.Fatalf("A2: expected 200 (no 5xx), got %d body=%s", hw.Code, hw.Body.String())
+	}
+	var resp healthSummaryResponse
+	if err := json.Unmarshal(hw.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("A2: decode summary: %v", err)
+	}
+
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM devices WHERE deleted_at IS NULL`).Scan(&total); err != nil {
+		t.Fatalf("A2: count non-deleted: %v", err)
+	}
+	if sum := resp.Summary.Healthy + resp.Summary.Abnormal + resp.Summary.Offline; sum != total {
+		t.Errorf("A2: sum invariant broken: healthy+abnormal+offline=%d != 미삭제 총수 %d (null last_seen dropped?)", sum, total)
+	}
+	if resp.Summary.Offline != 2 { // vs-null + vs-stale
+		t.Errorf("A2: expected offline==2 (null + stale), got %d", resp.Summary.Offline)
+	}
+	if resp.Summary.Healthy != 1 {
+		t.Errorf("A2: expected healthy==1, got %d", resp.Summary.Healthy)
+	}
+	if resp.Summary.Abnormal != 1 {
+		t.Errorf("A2: expected abnormal==1, got %d", resp.Summary.Abnormal)
+	}
+	// The null device must appear as an offline exception (consistent with the count).
+	foundNull := false
+	for _, e := range resp.Exceptions {
+		if e.ID == "site-001:vs-null" {
+			foundNull = true
+			if e.Category != "offline" {
+				t.Errorf("A2: null last_seen device must be offline category, got %q", e.Category)
+			}
+		}
+	}
+	if !foundNull {
+		t.Errorf("A2: null last_seen device missing from exceptions (should surface as offline)")
+	}
 }
 
-func TestSensorLifecycle_A2_NullLastSeenHealthSummary(t *testing.T) {
-	skipMutating(t, "A2", "register a null-last_seen device, then assert GET /api/health/summary counts it as offline and the sum invariant holds (healthy+abnormal+offline==미삭제 총수)")
-}
+// --- assertion D: unknown (siteId,deviceId) seen auto-registers online ------------
+// Non-vacuity: assert the device is ABSENT before the seen.
 func TestSensorLifecycle_D_AutoDiscover(t *testing.T) {
-	skipMutating(t, "D", "POST /api/devices/seen for an unknown (siteId,deviceId) auto-registers it online in GET /api/devices")
+	db := newTestDB(t)
+	internalToken = "sekret"
+	t.Cleanup(func() { internalToken = "" })
+
+	body := `{"siteId":"site-001","deviceId":"vs-auto"}`
+
+	pre := httptest.NewRecorder()
+	handleListDevices(db)(pre, roleReq("admin", http.MethodGet, "/api/devices", "", ""))
+	for _, d := range decodeDevices(t, pre.Body.Bytes()) {
+		if d.SiteID == "site-001" && d.DeviceID == "vs-auto" {
+			t.Fatalf("D: device must be ABSENT before seen (vacuity guard)")
+		}
+	}
+
+	if code := callSeen(db, "sekret", body); code != http.StatusOK {
+		t.Fatalf("D: seen expected 200, got %d", code)
+	}
+
+	lw := httptest.NewRecorder()
+	handleListDevices(db)(lw, roleReq("admin", http.MethodGet, "/api/devices", "", ""))
+	found := false
+	for _, d := range decodeDevices(t, lw.Body.Bytes()) {
+		if d.SiteID == "site-001" && d.DeviceID == "vs-auto" {
+			found = true
+			if d.DeletedAt != nil {
+				t.Errorf("D: auto-discovered device must not be deleted, got %v", *d.DeletedAt)
+			}
+			if d.LastSeen == nil {
+				t.Errorf("D: auto-discovered device must have lastSeen (online), got nil")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("D: seen did not auto-register the unknown device")
+	}
 }
+
+// --- assertion E: sticky delete via seen -----------------------------------------
+// create → delete(204) → seen same pair → ABSENT from default list; direct SQL shows
+// the row with deleted_at NOT NULL. Non-vacuity: a broken sticky (seen revives) puts
+// deleted_at back to NULL, which both surfaces the device in the list and trips the
+// SQL check.
 func TestSensorLifecycle_E_StickyDeleteSeen(t *testing.T) {
-	skipMutating(t, "E", "delete → seen re-signal → device stays absent from GET /api/devices (sticky)")
+	db := newTestDB(t)
+	internalToken = "sekret"
+	t.Cleanup(func() { internalToken = "" })
+
+	body := `{"siteId":"site-001","deviceId":"vs-sticky"}`
+	w := httptest.NewRecorder()
+	handleCreateDevice(db)(w, roleReq("admin", http.MethodPost, "/api/devices", "", body))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("E: create expected 201, got %d", w.Code)
+	}
+	var created deviceResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &created)
+
+	dw := httptest.NewRecorder()
+	handleDeleteDevice(db)(dw, roleReq("admin", http.MethodDelete, "/api/devices/"+idStr(created.ID), idStr(created.ID), ""))
+	if dw.Code != http.StatusNoContent {
+		t.Fatalf("E: delete expected 204, got %d", dw.Code)
+	}
+
+	if code := callSeen(db, "sekret", body); code != http.StatusOK {
+		t.Fatalf("E: seen expected 200, got %d", code)
+	}
+
+	lw := httptest.NewRecorder()
+	handleListDevices(db)(lw, roleReq("admin", http.MethodGet, "/api/devices", "", ""))
+	for _, d := range decodeDevices(t, lw.Body.Bytes()) {
+		if d.DeviceID == "vs-sticky" {
+			t.Errorf("E: device must stay ABSENT (sticky) after seen re-signal")
+		}
+	}
+
+	var deletedAt *string
+	if err := db.QueryRow(`SELECT datetime(deleted_at) FROM devices WHERE id=?`, created.ID).Scan(&deletedAt); err != nil {
+		t.Fatalf("E: read deleted_at: %v", err)
+	}
+	if deletedAt == nil {
+		t.Errorf("E: row must remain soft-deleted (deleted_at NOT NULL) after seen")
+	}
 }
+
+// --- assertion E2: incident-path sticky + exactly ONE reappear --------------------
+// create → delete → POST /api/incidents on the deleted pair → 201, device absent,
+// and exactly ONE device_reappeared with the matching deviceId. Non-vacuity: a silent
+// revive surfaces the device; a missing/duplicate reappear trips the count.
 func TestSensorLifecycle_E2_IncidentStickyReappear(t *testing.T) {
-	skipMutating(t, "E2", "delete → POST /api/incidents → incident created, device stays deleted, admin WS receives device_reappeared once")
+	db := newTestDB(t)
+	internalToken = "sekret"
+	t.Cleanup(func() { internalToken = "" })
+
+	type cap struct{ siteID, deviceID string }
+	var caps []cap
+	origB := BroadcastDeviceReappeared
+	BroadcastDeviceReappeared = func(s, d string, _ *string) { caps = append(caps, cap{s, d}) }
+	t.Cleanup(func() { BroadcastDeviceReappeared = origB })
+
+	cw := httptest.NewRecorder()
+	handleCreateDevice(db)(cw, roleReq("admin", http.MethodPost, "/api/devices", "",
+		`{"siteId":"site-001","deviceId":"vs-e2"}`))
+	if cw.Code != http.StatusCreated {
+		t.Fatalf("E2: create expected 201, got %d", cw.Code)
+	}
+	var created deviceResponse
+	_ = json.Unmarshal(cw.Body.Bytes(), &created)
+
+	dw := httptest.NewRecorder()
+	handleDeleteDevice(db)(dw, roleReq("admin", http.MethodDelete, "/api/devices/"+idStr(created.ID), idStr(created.ID), ""))
+	if dw.Code != http.StatusNoContent {
+		t.Fatalf("E2: delete expected 204, got %d", dw.Code)
+	}
+
+	if code := callIncident(db, "sekret", `{"siteId":"site-001","deviceId":"vs-e2","description":"crisis"}`); code != http.StatusCreated {
+		t.Fatalf("E2: incident on deleted pair expected 201, got %d", code)
+	}
+
+	lw := httptest.NewRecorder()
+	handleListDevices(db)(lw, roleReq("admin", http.MethodGet, "/api/devices", "", ""))
+	for _, d := range decodeDevices(t, lw.Body.Bytes()) {
+		if d.DeviceID == "vs-e2" {
+			t.Errorf("E2: device must stay deleted after incident (sticky)")
+		}
+	}
+
+	if len(caps) != 1 {
+		t.Fatalf("E2: expected exactly 1 device_reappeared, got %d", len(caps))
+	}
+	if caps[0].deviceID != "vs-e2" || caps[0].siteID != "site-001" {
+		t.Errorf("E2: reappear payload mismatch, got %+v", caps[0])
+	}
 }
+
+// --- assertion F: reappear exactly once via seen ----------------------------------
+// Captures the broadcast payload deviceId, asserts exactly 1 per cycle even with
+// back-to-back same-second re-signals, the device stays deleted with last_seen
+// updated, and the alert re-arms after reactivate→redelete→seen.
 func TestSensorLifecycle_F_ReappearOnceSeen(t *testing.T) {
-	skipMutating(t, "F", "deleted device seen → admin WS gets device_reappeared once; back-to-back re-signals (same second) emit no extra; reactivate→redelete→signal alerts again")
+	db := newTestDB(t)
+	internalToken = "sekret"
+	t.Cleanup(func() { internalToken = "" })
+
+	var payloads []string // captured deviceIds
+	origB := BroadcastDeviceReappeared
+	BroadcastDeviceReappeared = func(_, deviceID string, _ *string) { payloads = append(payloads, deviceID) }
+	t.Cleanup(func() { BroadcastDeviceReappeared = origB })
+
+	body := `{"siteId":"site-001","deviceId":"vs-f"}`
+	cw := httptest.NewRecorder()
+	handleCreateDevice(db)(cw, roleReq("admin", http.MethodPost, "/api/devices", "", body))
+	if cw.Code != http.StatusCreated {
+		t.Fatalf("F: create expected 201, got %d", cw.Code)
+	}
+	var created deviceResponse
+	_ = json.Unmarshal(cw.Body.Bytes(), &created)
+
+	dw := httptest.NewRecorder()
+	handleDeleteDevice(db)(dw, roleReq("admin", http.MethodDelete, "/api/devices/"+idStr(created.ID), idStr(created.ID), ""))
+	if dw.Code != http.StatusNoContent {
+		t.Fatalf("F: delete expected 204, got %d", dw.Code)
+	}
+
+	// Two back-to-back re-signals (same wall-clock second) → still exactly one.
+	callSeen(db, "sekret", body)
+	callSeen(db, "sekret", body)
+
+	if len(payloads) != 1 {
+		t.Fatalf("F: exactly 1 device_reappeared per cycle, got %d", len(payloads))
+	}
+	if payloads[0] != "vs-f" {
+		t.Errorf("F: reappear payload deviceId mismatch, got %q", payloads[0])
+	}
+
+	var deletedAt, lastSeen *string
+	if err := db.QueryRow(`SELECT datetime(deleted_at), datetime(last_seen) FROM devices WHERE id=?`, created.ID).
+		Scan(&deletedAt, &lastSeen); err != nil {
+		t.Fatalf("F: read-back: %v", err)
+	}
+	if deletedAt == nil {
+		t.Errorf("F: device must stay deleted after re-signal (sticky)")
+	}
+	if lastSeen == nil {
+		t.Errorf("F: last_seen must be updated by seen")
+	}
+
+	// Reactivate → redelete → seen: a new cycle re-arms and alerts again.
+	rw := httptest.NewRecorder()
+	handleCreateDevice(db)(rw, roleReq("admin", http.MethodPost, "/api/devices", "", body))
+	if rw.Code != http.StatusOK {
+		t.Fatalf("F: reactivate expected 200, got %d", rw.Code)
+	}
+	dw2 := httptest.NewRecorder()
+	handleDeleteDevice(db)(dw2, roleReq("admin", http.MethodDelete, "/api/devices/"+idStr(created.ID), idStr(created.ID), ""))
+	if dw2.Code != http.StatusNoContent {
+		t.Fatalf("F: redelete expected 204, got %d", dw2.Code)
+	}
+	callSeen(db, "sekret", body)
+
+	if len(payloads) != 2 {
+		t.Errorf("F: new cycle after reactivation must alert again (want 2 total), got %d", len(payloads))
+	}
+	if len(payloads) == 2 && payloads[1] != "vs-f" {
+		t.Errorf("F: second-cycle payload deviceId mismatch, got %q", payloads[1])
+	}
 }
+
+// --- assertion F2: reappear backfill on admin (re)connect -------------------------
+// delete → seen (stamps reappear_alerted_at) with the broadcast stubbed to a no-op
+// (no observer) → build an admin wsClient and drain sendReappearedSnapshot's frames:
+// one device_reappeared for that deviceId. Negative control: a user client gets none.
 func TestSensorLifecycle_F2_ReappearBackfill(t *testing.T) {
-	skipMutating(t, "F2", "deleted device re-signals while no admin connected → a newly connecting admin receives device_reappeared right after `connected`")
+	db := newTestDB(t)
+	internalToken = "sekret"
+	t.Cleanup(func() { internalToken = "" })
+
+	// No observer at reappear time: stub the live broadcast to a no-op.
+	origB := BroadcastDeviceReappeared
+	BroadcastDeviceReappeared = func(_, _ string, _ *string) {}
+	t.Cleanup(func() { BroadcastDeviceReappeared = origB })
+
+	body := `{"siteId":"site-001","deviceId":"vs-f2"}`
+	cw := httptest.NewRecorder()
+	handleCreateDevice(db)(cw, roleReq("admin", http.MethodPost, "/api/devices", "", body))
+	if cw.Code != http.StatusCreated {
+		t.Fatalf("F2: create expected 201, got %d", cw.Code)
+	}
+	var created deviceResponse
+	_ = json.Unmarshal(cw.Body.Bytes(), &created)
+
+	dw := httptest.NewRecorder()
+	handleDeleteDevice(db)(dw, roleReq("admin", http.MethodDelete, "/api/devices/"+idStr(created.ID), idStr(created.ID), ""))
+	if dw.Code != http.StatusNoContent {
+		t.Fatalf("F2: delete expected 204, got %d", dw.Code)
+	}
+
+	callSeen(db, "sekret", body) // stamps reappear_alerted_at; no observer present
+	if reappearAt(t, db, created.ID) == nil {
+		t.Fatalf("F2: seen after delete must stamp reappear_alerted_at")
+	}
+
+	// A newly connecting admin receives the backfill frame.
+	admin := &wsClient{role: "admin", db: db, send: make(chan []byte, 64)}
+	sendReappearedSnapshot(admin, db)
+	if frames := drainWSFrames(admin.send); !containsReappearFor(frames, "site-001", "vs-f2") {
+		t.Errorf("F2: newly connected admin must receive a device_reappeared backfill for vs-f2, got %d frame(s)", len(frames))
+	}
+
+	// Negative control: a non-admin (user) client receives nothing.
+	user := &wsClient{role: "user", db: db, send: make(chan []byte, 64)}
+	sendReappearedSnapshot(user, db)
+	if uf := drainWSFrames(user.send); len(uf) != 0 {
+		t.Errorf("F2: non-admin client must receive no backfill frames, got %d", len(uf))
+	}
 }
+
+// --- assertion G: presence update, no revive, no new row --------------------------
+// create + seed last_seen → seen twice → COUNT==1 for the pair, last_seen advanced,
+// deleted_at IS NULL. Non-vacuity: the seed-then-advance check fails if presence isn't
+// updated; the deleted_at check fails on an accidental delete.
 func TestSensorLifecycle_G_PresenceUpdate(t *testing.T) {
-	skipMutating(t, "G", "seen on an existing live device updates last_seen/online, creates no new row, leaves deleted_at NULL")
+	db := newTestDB(t)
+	internalToken = "sekret"
+	t.Cleanup(func() { internalToken = "" })
+
+	body := `{"siteId":"site-001","deviceId":"vs-presence"}`
+	w := httptest.NewRecorder()
+	handleCreateDevice(db)(w, roleReq("admin", http.MethodPost, "/api/devices", "", body))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("G: create expected 201, got %d", w.Code)
+	}
+	var created deviceResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &created)
+	const seed = "2020-01-01 00:00:00"
+	if _, err := db.Exec(`UPDATE devices SET last_seen=? WHERE id=?`, seed, created.ID); err != nil {
+		t.Fatalf("G: seed last_seen: %v", err)
+	}
+
+	if code := callSeen(db, "sekret", body); code != http.StatusOK {
+		t.Fatalf("G: first seen expected 200, got %d", code)
+	}
+	if code := callSeen(db, "sekret", body); code != http.StatusOK {
+		t.Fatalf("G: second seen expected 200, got %d", code)
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM devices WHERE site_id='site-001' AND device_id='vs-presence'`).Scan(&count); err != nil {
+		t.Fatalf("G: count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("G: seen must not create a new row (same PK), got count=%d", count)
+	}
+
+	var lastSeen, deletedAt *string
+	if err := db.QueryRow(`SELECT datetime(last_seen), datetime(deleted_at) FROM devices WHERE id=?`, created.ID).
+		Scan(&lastSeen, &deletedAt); err != nil {
+		t.Fatalf("G: read-back: %v", err)
+	}
+	if lastSeen == nil || *lastSeen == seed {
+		t.Errorf("G: last_seen must advance from seed, got %v", lastSeen)
+	}
+	if deletedAt != nil {
+		t.Errorf("G: deleted_at must stay NULL for a live device, got %v", *deletedAt)
+	}
 }
+
+// --- assertion H1: delete ≠ safety stop (runtime) ---------------------------------
+// create → delete → POST /api/incidents (internal token) → 201, incident row exists,
+// device stays deleted. Non-vacuity: an incident-gating regression would 4xx/skip the
+// insert (no row); a silent revive would clear deleted_at.
 func TestSensorLifecycle_H1_DeleteNotSafetyStop(t *testing.T) {
-	skipMutating(t, "H1", "crisis event for a deleted device's (siteId,deviceId) still creates and forwards the incident (runtime)")
+	db := newTestDB(t)
+	internalToken = "sekret"
+	t.Cleanup(func() { internalToken = "" })
+
+	origB := BroadcastDeviceReappeared
+	BroadcastDeviceReappeared = func(_, _ string, _ *string) {}
+	t.Cleanup(func() { BroadcastDeviceReappeared = origB })
+
+	cw := httptest.NewRecorder()
+	handleCreateDevice(db)(cw, roleReq("admin", http.MethodPost, "/api/devices", "",
+		`{"siteId":"site-001","deviceId":"vs-h1"}`))
+	if cw.Code != http.StatusCreated {
+		t.Fatalf("H1: create expected 201, got %d", cw.Code)
+	}
+	var created deviceResponse
+	_ = json.Unmarshal(cw.Body.Bytes(), &created)
+
+	dw := httptest.NewRecorder()
+	handleDeleteDevice(db)(dw, roleReq("admin", http.MethodDelete, "/api/devices/"+idStr(created.ID), idStr(created.ID), ""))
+	if dw.Code != http.StatusNoContent {
+		t.Fatalf("H1: delete expected 204, got %d", dw.Code)
+	}
+
+	if code := callIncident(db, "sekret", `{"siteId":"site-001","deviceId":"vs-h1","description":"crisis"}`); code != http.StatusCreated {
+		t.Fatalf("H1: incident for a deleted device must still be created (201), got %d", code)
+	}
+
+	var incCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM incidents WHERE site_id='site-001' AND description='crisis'`).Scan(&incCount); err != nil {
+		t.Fatalf("H1: count incidents: %v", err)
+	}
+	if incCount != 1 {
+		t.Errorf("H1: expected exactly 1 incident for the deleted device, got %d", incCount)
+	}
+
+	var deletedAt *string
+	if err := db.QueryRow(`SELECT datetime(deleted_at) FROM devices WHERE id=?`, created.ID).Scan(&deletedAt); err != nil {
+		t.Fatalf("H1: read deleted_at: %v", err)
+	}
+	if deletedAt == nil {
+		t.Errorf("H1: device must remain deleted after incident (sticky)")
+	}
 }
+
 func TestSensorLifecycle_K_ManagementUI(t *testing.T) {
 	t.Skip("K: SKIP (needs-browser, load-bearing) — Playwright: '장치 추가' action + POST /api/devices, sticky delete copy, device_reappeared → one-click reactivate, lastSeen==null offline render")
+}
+
+// drainWSFrames non-blockingly drains all buffered frames from a wsClient send
+// channel (safeSend is a non-blocking buffered send, so the frames are already
+// enqueued by the time sendReappearedSnapshot returns).
+func drainWSFrames(ch chan []byte) [][]byte {
+	var out [][]byte
+	for {
+		select {
+		case f := <-ch:
+			out = append(out, f)
+		default:
+			return out
+		}
+	}
+}
+
+// containsReappearFor reports whether any frame is a device_reappeared for the given
+// (siteId, deviceId).
+func containsReappearFor(frames [][]byte, siteID, deviceID string) bool {
+	for _, f := range frames {
+		var m WSMessage
+		if json.Unmarshal(f, &m) != nil {
+			continue
+		}
+		if m.Type != "device_reappeared" {
+			continue
+		}
+		p, ok := m.Payload.(map[string]any)
+		if !ok {
+			continue
+		}
+		if p["siteId"] == siteID && p["deviceId"] == deviceID {
+			return true
+		}
+	}
+	return false
 }
 
 // -----------------------------------------------------------------------------
