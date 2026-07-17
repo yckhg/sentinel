@@ -368,6 +368,136 @@ func TestEvictArchives_F2_Idempotent(t *testing.T) {
 	}
 }
 
+// --- env parse helpers (pure) — warn-on-misconfig contract -------------------
+func TestParseEvictInt64(t *testing.T) {
+	cases := []struct {
+		raw      string
+		wantVal  int64
+		wantWarn bool
+	}{
+		{"", 0, false},      // unset → legitimate disable
+		{"0", 0, false},     // explicit disable → no warn
+		{"50", 50, false},   // valid positive
+		{"100GiB", 0, true}, // typo → warn
+		{"abc", 0, true},    // garbage → warn
+		{"-5", 0, true},     // non-positive → warn
+	}
+	for _, c := range cases {
+		gotVal, gotWarn := parseEvictInt64(c.raw)
+		if gotVal != c.wantVal || gotWarn != c.wantWarn {
+			t.Errorf("parseEvictInt64(%q) = (%d,%v), want (%d,%v)", c.raw, gotVal, gotWarn, c.wantVal, c.wantWarn)
+		}
+	}
+}
+
+func TestParseEvictInt(t *testing.T) {
+	cases := []struct {
+		raw      string
+		wantVal  int
+		wantWarn bool
+	}{
+		{"", 0, false},
+		{"0", 0, false},
+		{"50", 50, false},
+		{"100GiB", 0, true},
+		{"abc", 0, true},
+		{"-5", 0, true},
+	}
+	for _, c := range cases {
+		gotVal, gotWarn := parseEvictInt(c.raw)
+		if gotVal != c.wantVal || gotWarn != c.wantWarn {
+			t.Errorf("parseEvictInt(%q) = (%d,%v), want (%d,%v)", c.raw, gotVal, gotWarn, c.wantVal, c.wantWarn)
+		}
+	}
+}
+
+// archiveDirSet returns the set of archive-DIRECTORY entry names under arcDir,
+// excluding non-archive items (metadata.json, *.tmp, plain files).
+func archiveDirSet(t *testing.T, arcDir string) map[string]bool {
+	t.Helper()
+	entries, err := os.ReadDir(arcDir)
+	if err != nil {
+		t.Fatalf("read archives dir: %v", err)
+	}
+	set := map[string]bool{}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue // metadata.json / *.tmp / stray files are not archives
+		}
+		set[e.Name()] = true
+	}
+	return set
+}
+
+func metadataIDSet(t *testing.T, arcDir string) map[string]bool {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(arcDir, "metadata.json"))
+	if err != nil {
+		t.Fatalf("read metadata.json: %v", err)
+	}
+	var archives []ArchiveMetadata
+	if err := json.Unmarshal(data, &archives); err != nil {
+		t.Fatalf("unmarshal metadata.json: %v", err)
+	}
+	set := map[string]bool{}
+	for _, a := range archives {
+		set[a.ID] = true
+	}
+	return set
+}
+
+// --- F (bijection): directory set ↔ metadata id set exact correspondence ------
+// Strengthens F beyond per-id spot checks: after a cycle the archives-data
+// sub-directory set (non-archive files excluded) equals the metadata id set —
+// deleted ids absent from BOTH, survivors present in BOTH, zero orphan/dangling
+// (no dir without meta, no meta without dir).
+func TestEvictArchives_F_Bijection(t *testing.T) {
+	archives := []ArchiveMetadata{
+		mkTarget("a1", retBase.Add(-3*time.Hour), 60),
+		mkTarget("a2", retBase.Add(-2*time.Hour), 60),
+		mkTarget("a3", retBase.Add(-1*time.Hour), 60),
+	}
+	am, arcDir := seedManager(t, archives)
+	am.evictMaxBytes = 100 // total 180 > 100 → evict a1,a2; keep a3
+
+	// Non-vacuity: before the cycle the sets already correspond (3 dirs ↔ 3 ids)
+	// AND a non-archive file exists to prove it is excluded from the comparison.
+	if err := os.WriteFile(filepath.Join(arcDir, "orphan.tmp"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	preDirs, preMeta := archiveDirSet(t, arcDir), metadataIDSet(t, arcDir)
+	if !mapsEqual(preDirs, preMeta) || len(preDirs) != 3 {
+		t.Fatalf("F-bijection(pre): dir set %v must equal meta set %v (3 entries)", preDirs, preMeta)
+	}
+
+	am.EvictArchives(retBase)
+
+	dirs, meta := archiveDirSet(t, arcDir), metadataIDSet(t, arcDir)
+	if !mapsEqual(dirs, meta) {
+		t.Fatalf("F-bijection: dir set %v != meta id set %v (orphan/dangling present)", dirs, meta)
+	}
+	// And the surviving set is exactly {a3}.
+	if len(dirs) != 1 || !dirs["a3"] {
+		t.Fatalf("F-bijection: expected survivor set {a3}, got %v", dirs)
+	}
+	// The excluded non-archive file must still be on disk (proves exclusion, not deletion).
+	if _, err := os.Stat(filepath.Join(arcDir, "orphan.tmp")); err != nil {
+		t.Errorf("F-bijection: non-archive file was wrongly removed: %v", err)
+	}
+}
+
+func mapsEqual(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
+}
+
 // --- B (disk round-trip): non-target on-disk survival ------------------------
 // Closes the "비대상 보존 불변식" over the real DeleteArchive round-trip: a
 // manual (IncidentTime=="") + a failed + a protecting archive, alongside
