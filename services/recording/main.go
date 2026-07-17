@@ -1168,6 +1168,34 @@ func (am *ArchiveManager) DeleteArchive(archiveID string) error {
 	return nil
 }
 
+// parseEvictInt64 parses an ARCHIVE_MAX_BYTES-style env value. It returns the
+// effective value (0 = disabled) and whether the raw value is a MISCONFIGURATION
+// worth warning about. Empty/unset and an explicit "0" are legitimate disables
+// per the spec input table ("0 또는 미설정 → 비활성") and never warn; a non-empty
+// value that is neither "0" nor a positive integer (e.g. "100GiB", "abc", "-5")
+// is silently ignored today, so it returns warn=true to surface the footgun.
+func parseEvictInt64(raw string) (int64, bool) {
+	if raw == "" || raw == "0" {
+		return 0, false
+	}
+	if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v > 0 {
+		return v, false
+	}
+	return 0, true
+}
+
+// parseEvictInt is the int counterpart for ARCHIVE_RETENTION_DAYS. Same warn
+// contract as parseEvictInt64.
+func parseEvictInt(raw string) (int, bool) {
+	if raw == "" || raw == "0" {
+		return 0, false
+	}
+	if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+		return v, false
+	}
+	return 0, true
+}
+
 // selectEvictions is the pure, total, side-effect-free core of the archive
 // retention policy (archive-retention-policy.md). It returns the deduped set of
 // archive IDs to evict, in deterministic oldest-first order, given the current
@@ -1742,24 +1770,18 @@ func main() {
 	// Archive retention thresholds (archive-retention-policy.md). Same env
 	// convention as ROLLING_WINDOW_MINUTES (strconv + >0 guard); unset/non-positive
 	// disables that policy (opt-in).
-	var archiveMaxBytes int64
-	if env := os.Getenv("ARCHIVE_MAX_BYTES"); env != "" {
-		if v, err := strconv.ParseInt(env, 10, 64); err == nil && v > 0 {
-			archiveMaxBytes = v
-		} else {
-			// Non-empty but unparseable/non-positive: surface the misconfiguration
-			// so a typo (e.g. "100GiB") is not silently treated as disabled, which
-			// would quietly regress to unbounded archive growth.
-			log.Printf("[archive] WARNING: ARCHIVE_MAX_BYTES=%q is not a positive integer (bytes) — capacity eviction stays DISABLED", env)
-		}
+	rawMaxBytes := os.Getenv("ARCHIVE_MAX_BYTES")
+	archiveMaxBytes, warnMaxBytes := parseEvictInt64(rawMaxBytes)
+	if warnMaxBytes {
+		// Non-empty, not an explicit "0", and not a positive integer (e.g. a typo
+		// like "100GiB"): surface it so the value is not silently treated as
+		// disabled, which would quietly regress to unbounded archive growth.
+		log.Printf("[archive] WARNING: ARCHIVE_MAX_BYTES=%q is not \"0\" or a positive integer (bytes) — capacity eviction stays DISABLED", rawMaxBytes)
 	}
-	archiveRetentionDays := 0
-	if env := os.Getenv("ARCHIVE_RETENTION_DAYS"); env != "" {
-		if v, err := strconv.Atoi(env); err == nil && v > 0 {
-			archiveRetentionDays = v
-		} else {
-			log.Printf("[archive] WARNING: ARCHIVE_RETENTION_DAYS=%q is not a positive integer (days) — age eviction stays DISABLED", env)
-		}
+	rawRetentionDays := os.Getenv("ARCHIVE_RETENTION_DAYS")
+	archiveRetentionDays, warnRetentionDays := parseEvictInt(rawRetentionDays)
+	if warnRetentionDays {
+		log.Printf("[archive] WARNING: ARCHIVE_RETENTION_DAYS=%q is not \"0\" or a positive integer (days) — age eviction stays DISABLED", rawRetentionDays)
 	}
 
 	manager := NewRecordingManager(rtmpBaseURL, recordingsDir, ffmpegTimeout)
