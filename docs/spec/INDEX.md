@@ -38,7 +38,17 @@
 |---|---|---|
 | [admin-management-ia-map.md](admin-management-ia-map.md) — 관리 허브 + 기능별 서브페이지 10개(드릴다운·딥링크) 분할 **설계 맵**; 행위보존·API무변경·admin 게이트 불변식; ManagementPage 분해 | (설계 맵 — 리프 위임 추적) |
 | [admin-routing-navigation-contract.md](admin-routing-navigation-contract.md) — (횡단 접합부) `/admin`·`/admin/<slug>` URL 체계·딥링크·뒤로가기=허브복귀·admin 게이트·open-redirect 가드 확장 | (신규 — 미검증) |
-| 리프 스펙 11종(허브 + 10 페이지: devices·cameras·health·contacts·test-alert·notify-test·system·users·storage·cctv-links) | 각 페이지 행위보존 계약 | 위임 대기 (맵 §작성 현황) |
+| [admin-hub.md](admin-hub.md) — 관리 허브(4그룹 라벨 + 10항목 목록·드릴다운); admin 전용 | `tests/spec/admin-ia/` (A~G) | (신규 — 미검증) |
+| [admin-page-devices.md](admin-page-devices.md) — 장비(센서) 관리(CRUD·스티키삭제·재출현/재활성); [[sensor-device-lifecycle]] 참조 | `tests/spec/admin-ia/` | (신규 — 미검증) |
+| [admin-page-cameras.md](admin-page-cameras.md) — 카메라 관리(CRUD·source-type·enabled·삭제확인); [[camera-change-propagation]] 참조 | `tests/spec/admin-ia/` | (신규 — 미검증) |
+| [admin-page-health.md](admin-page-health.md) — 장비 상태·예외(요약·서비스·검색·예외목록·이력·카메라연결) + **#112 예외목록 레이아웃 개선(단언 J 배타 소유)**; [[system-status-aggregate]] 참조 | `tests/spec/admin-ia/` | (신규 — 미검증) |
+| [admin-page-contacts.md](admin-page-contacts.md) — 비상연락망(CRUD·전화형식·notifyEmail 채널) | `tests/spec/admin-ia/` | (신규 — 미검증) |
+| [admin-page-test-alert.md](admin-page-test-alert.md) — 비상 신호 시뮬레이션(전체 체인 [테스트] 트리거) | `tests/spec/admin-ia/` | (신규 — 미검증) |
+| [admin-page-notify-test.md](admin-page-notify-test.md) — 알림 채널 테스트 발송(채널가용·단건발송·outcome 3종); [[notification-test-send]] 참조 | `tests/spec/admin-ia/` | (신규 — 미검증) |
+| [admin-page-system.md](admin-page-system.md) — 시스템 설정(현장 정보 + 시스템 설정 합침) | `tests/spec/admin-ia/` | (신규 — 미검증) |
+| [admin-page-users.md](admin-page-users.md) — 사용자(계정 관리 + 초대 관리 합침) | `tests/spec/admin-ia/` | (신규 — 미검증) |
+| [admin-page-storage.md](admin-page-storage.md) — 저장소 관리(사용량·아카이브·다운로드); [[archive-download-ux]] 참조 | `tests/spec/admin-ia/` | (신규 — 미검증) |
+| [admin-page-cctv-links.md](admin-page-cctv-links.md) — 임시 CCTV 링크(생성·목록·복사·폐기) | `tests/spec/admin-ia/` | (신규 — 미검증) |
 
 ## 공용 헬퍼
 
