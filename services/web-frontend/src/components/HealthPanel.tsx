@@ -217,6 +217,34 @@ export default function HealthPanel() {
 
   return (
     <>
+      {/*
+        #112 (spec admin-page-health assertion J): the exception list must not be
+        trapped in a single narrow column when items are many. Scoped health-only
+        class — mobile-first 1 column, ≥2 columns on desktop (≥1024px). This does
+        NOT redefine any shared .mgmt-* class (those are shared with the seam/other
+        leaves), it only styles the health-owned exceptions container.
+      */}
+      <style>{`
+        .health-exceptions-grid {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 8px;
+        }
+        .health-exceptions-grid > .mgmt-card {
+          width: 100%;
+          margin: 0;
+        }
+        @media (min-width: 1024px) {
+          .health-exceptions-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+        }
+        @media (min-width: 1440px) {
+          .health-exceptions-grid {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+          }
+        }
+      `}</style>
       <div className="mgmt-header">
         <h2>시스템 상태</h2>
         <div style={{ marginLeft: "auto", display: "flex", gap: "0.5rem", alignItems: "center" }}>
@@ -304,7 +332,7 @@ export default function HealthPanel() {
           {exceptions.length === 0 ? (
             <p className="mgmt-empty">예외 장비가 없습니다 (모든 장비 정상)</p>
           ) : (
-            <div className="mgmt-list">
+            <div className="health-exceptions-grid" data-testid="health-exceptions">
               {exceptions.map((ex) => {
                 const offline = ex.category === "offline";
                 return (
