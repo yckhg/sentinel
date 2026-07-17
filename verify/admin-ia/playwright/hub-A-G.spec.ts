@@ -1,5 +1,16 @@
 import { test, expect, type Page } from "@playwright/test";
-import { login, createNonAdminUser, FRONTEND } from "./_helpers";
+import {
+  login,
+  createNonAdminUser,
+  readAdminToken,
+  clearAuthOnOrigin,
+  FRONTEND,
+} from "./_helpers";
+
+// Auth model: playwright.config `use.storageState` seeds every test already
+// authenticated as admin (single globalSetup login), so admin-only specs no longer
+// log in. Only hub-F clears that state (unauth path) and logs in once as a seeded
+// non-admin, keeping the whole-suite login count under the backend's 10/min cap.
 
 // ---------------------------------------------------------------------------
 // Hub gate specs [hub-A]~[hub-G] — the admin hub contract
@@ -32,7 +43,7 @@ const slugsFromLinks = async (page: Page, scope = ""): Promise<string[]> => {
 
 // [hub-A] admin at /admin sees the hub with all 4 group labels present.
 test("[hub-A] 허브 렌더 + 4개 그룹 라벨 존재", async ({ page }) => {
-  await login(page);
+  // Already admin-authed via storageState.
   await page.goto(`${FRONTEND}/admin`);
   await expect(page.getByTestId("admin-hub")).toBeVisible();
   await expect(page.getByTestId("admin-hub-group")).toHaveCount(4);
@@ -46,14 +57,14 @@ test("[hub-A] 허브 렌더 + 4개 그룹 라벨 존재", async ({ page }) => {
 
 // [hub-B] Exactly 10 function items are listed (none missing).
 test("[hub-B] 허브에 10개 기능 항목이 모두 나열", async ({ page }) => {
-  await login(page);
+  // Already admin-authed via storageState.
   await page.goto(`${FRONTEND}/admin`);
   await expect(page.getByTestId("admin-hub-link")).toHaveCount(10);
 });
 
 // [hub-C] Each item sits under its exact group (group→item set matches the table).
 test("[hub-C] 그룹별 항목 집합이 스펙 표와 일치", async ({ page }) => {
-  await login(page);
+  // Already admin-authed via storageState.
   await page.goto(`${FRONTEND}/admin`);
   for (const [label, expectedSlugs] of Object.entries(GROUPS)) {
     const scope = `[data-testid="admin-hub-group"][data-group="${label}"]`;
@@ -65,7 +76,7 @@ test("[hub-C] 그룹별 항목 집합이 스펙 표와 일치", async ({ page })
 // [hub-D] Item↔slug 1:1 — every slug appears exactly once, no two items share a
 // target, and the full set equals the 10-slug allowlist.
 test("[hub-D] 항목↔slug 1:1 · 전 slug 정확히 1회", async ({ page }) => {
-  await login(page);
+  // Already admin-authed via storageState.
   await page.goto(`${FRONTEND}/admin`);
   const got = await slugsFromLinks(page);
   expect(got.slice().sort(), "all slugs present exactly once").toEqual(
@@ -80,7 +91,7 @@ test("[hub-E] 항목 활성화 시 /admin/<slug> 도달 + admin-page 렌더", as
   page,
 }) => {
   test.setTimeout(180_000);
-  await login(page);
+  // Already admin-authed via storageState.
   for (const slug of ALL_SLUGS) {
     await page.goto(`${FRONTEND}/admin`);
     await page
@@ -104,7 +115,9 @@ test("[hub-F] 비-admin은 허브 항목 미렌더 + 게이트 유도", async ({
 }) => {
   test.setTimeout(180_000);
 
-  // Unauthenticated: no hub items rendered; redirected to login.
+  // Unauthenticated: drop the storageState-seeded admin token first (on a real
+  // origin — never about:blank), then no hub items rendered; redirected to login.
+  await clearAuthOnOrigin(page);
   await page.goto(`${FRONTEND}/admin`);
   await page.waitForURL(
     (u) => u.pathname === "/login" && u.searchParams.get("returnTo") === "/admin",
@@ -113,13 +126,13 @@ test("[hub-F] 비-admin은 허브 항목 미렌더 + 게이트 유도", async ({
   await expect(page.getByTestId("admin-hub-link")).toHaveCount(0);
   await expect(page.getByTestId("admin-hub")).toHaveCount(0);
 
-  // Authenticated non-admin: no hub items rendered; redirected to /cctv.
-  const adminToken = await login(page);
+  // Authenticated non-admin: no hub items rendered; redirected to /cctv. Reuse the
+  // shared admin bearer (from storageState) for API seeding — no admin login here.
+  const adminToken = readAdminToken();
   const nonAdmin = await createNonAdminUser(request, adminToken, {
     username: `nonadmin_${Date.now()}`,
     password: "NonAdmin-pw-123",
   });
-  await page.evaluate(() => localStorage.removeItem("token"));
   await login(page, nonAdmin.username, nonAdmin.password);
   await page.goto(`${FRONTEND}/admin`);
   await page.waitForURL((u) => u.pathname === "/cctv", { timeout: 15_000 });
@@ -131,7 +144,7 @@ test("[hub-F] 비-admin은 허브 항목 미렌더 + 게이트 유도", async ({
 // same 10-item grouped list (seam C smoke reference; judged at integration).
 test("[hub-G] 서브페이지에서 허브 복귀 시 10개 항목 재관측", async ({ page }) => {
   test.setTimeout(180_000);
-  await login(page);
+  // Already admin-authed via storageState.
   for (const slug of ["devices", "cctv-links"]) {
     await page.goto(`${FRONTEND}/admin/${slug}`);
     await page.getByTestId("admin-back").click();

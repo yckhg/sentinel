@@ -1,4 +1,6 @@
 import { expect, type Page, type APIRequestContext } from "@playwright/test";
+import * as fs from "fs";
+import * as path from "path";
 
 // ---------------------------------------------------------------------------
 // Shared helpers for the admin-IA isolated harness (adminverify stack).
@@ -14,6 +16,47 @@ export const BACKEND = process.env.BACKEND_URL || "http://web-backend:8080";
 export const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 export const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "adminverify-admin-pw";
 export const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || "adminverify-internal-token";
+
+// ---------------------------------------------------------------------------
+// Shared admin authentication (storageState) — rate-limit avoidance.
+//
+// The web-backend caps /auth/login at 10 req/min per IP (main.go newRateLimiter).
+// Running every gate spec with its own admin login blows past that. Instead a single
+// globalSetup logs in once and persists the authed browser state (localStorage token,
+// scoped to the FRONTEND origin) to this file; playwright.config `use.storageState`
+// then seeds most specs already-authenticated as admin — zero per-test login.
+// The file is git-ignored (.auth/).
+// ---------------------------------------------------------------------------
+export const adminStatePath = path.join(__dirname, ".auth", "admin.json");
+
+/**
+ * Read the admin JWT straight out of the persisted storageState, so specs that need
+ * an admin bearer for API seeding (e.g. createNonAdminUser) don't have to log in.
+ */
+export function readAdminToken(): string {
+  const raw = JSON.parse(fs.readFileSync(adminStatePath, "utf-8")) as {
+    origins?: Array<{ localStorage?: Array<{ name: string; value: string }> }>;
+  };
+  for (const origin of raw.origins || []) {
+    for (const item of origin.localStorage || []) {
+      if (item.name === "token") return item.value;
+    }
+  }
+  throw new Error(`admin token not found in storageState (${adminStatePath})`);
+}
+
+/**
+ * Drop any authenticated state (the storageState-seeded admin token) for specs that
+ * must observe the UNAUTHENTICATED path (seam-E unauth, seam-G, hub-F unauth).
+ *
+ * CRITICAL: localStorage is only reachable on a real origin — touching it on
+ * about:blank throws SecurityError. So we navigate to a real FRONTEND page FIRST,
+ * THEN clear. Callers goto their target path afterwards.
+ */
+export async function clearAuthOnOrigin(page: Page): Promise<void> {
+  await page.goto(`${FRONTEND}/login`);
+  await page.evaluate(() => localStorage.clear());
+}
 
 /**
  * Browser login. Fills the login form, submits, waits for the JWT to land in
