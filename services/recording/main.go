@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -806,6 +807,13 @@ type ArchiveManager struct {
 	// ARCHIVE_RETENTION_DAYS in main() and consumed by EvictArchives.
 	evictMaxBytes      int64
 	evictRetentionDays int
+
+	// Retention diagnostic dedup state (touched only from the single ticker
+	// goroutine via EvictArchives). They suppress per-cycle log spam: a warning is
+	// re-emitted only when the underlying condition CHANGES, not every 30s while a
+	// persistent floor/unparseable condition stays the same.
+	lastFloorWarnedID   string          // last floor-preserved archive id warned ("" = none)
+	warnedUnparsableIDs map[string]bool // set of unparseable-CreatedAt ids already warned
 }
 
 // storageCacheTTL bounds how stale /api/storage size figures may be.
@@ -1128,6 +1136,11 @@ func downloadGateCode(am *ArchiveManager, id string) int {
 	return http.StatusNotFound
 }
 
+// errArchiveNotFound is returned by DeleteArchive when no archive with the given
+// ID exists. It is a sentinel so callers (e.g. evictIDs) can distinguish a benign
+// concurrent-delete race from a genuine deletion failure via errors.Is.
+var errArchiveNotFound = errors.New("archive not found")
+
 // DeleteArchive removes an archive and unprotects its segments.
 func (am *ArchiveManager) DeleteArchive(archiveID string) error {
 	am.mu.Lock()
@@ -1141,7 +1154,7 @@ func (am *ArchiveManager) DeleteArchive(archiveID string) error {
 		}
 	}
 	if idx == -1 {
-		return fmt.Errorf("archive not found: %s", archiveID)
+		return fmt.Errorf("%w: %s", errArchiveNotFound, archiveID)
 	}
 
 	archive := am.archives[idx]
@@ -1196,36 +1209,53 @@ func parseEvictInt(raw string) (int, bool) {
 	return 0, true
 }
 
-// selectEvictions is the pure, total, side-effect-free core of the archive
-// retention policy (archive-retention-policy.md). It returns the deduped set of
-// archive IDs to evict, in deterministic oldest-first order, given the current
-// archive list, the capacity cap (bytes) and age cap (days). It never deletes;
-// EvictArchives wires the result to DeleteArchive.
+// evictionPlan is the full, side-effect-free result of a retention pass: the
+// victim ids to delete plus the diagnostics EvictArchives needs to log (with
+// dedup). It carries no logging itself so the selection core stays pure.
+type evictionPlan struct {
+	victims []string // deduped, deterministic oldest-first order
+	// floorID is the newest capacity-preserved target that alone still exceeds
+	// the cap and genuinely SURVIVES this pass ("" if none). It is the subject of
+	// the "floor preserved" warning.
+	floorID string
+	// unparsableIDs are target-shaped archives (completed ∧ IncidentTime!="")
+	// whose CreatedAt could not be parsed, so they were excluded from selection
+	// (never mis-deleted). Sorted for deterministic diagnostics.
+	unparsableIDs []string
+}
+
+// planEvictions is the pure, total, side-effect-free core of the archive
+// retention policy (archive-retention-policy.md): given the archive list, the
+// capacity cap (bytes) and age cap (days), it computes the victim set AND the
+// diagnostics, deleting nothing and logging nothing.
 //
 // Target set = Status=="completed" ∧ IncidentTime!="" ∧ CreatedAt parseable as
 // RFC3339. Everything else (manual/non-auto/in-flight/failed/legacy/unparseable)
 // is excluded from capacity accounting, age accounting and deletion. maxBytes<=0
 // disables the capacity policy; retentionDays<=0 disables the age policy. The
 // two eviction sets are unioned (deduped).
-func selectEvictions(archives []ArchiveMetadata, maxBytes int64, retentionDays int, now time.Time) []string {
+func planEvictions(archives []ArchiveMetadata, maxBytes int64, retentionDays int, now time.Time) evictionPlan {
 	type target struct {
 		id      string
 		created time.Time
 		size    int64
 	}
 	var targets []target
+	var unparsable []string
 	for _, a := range archives {
 		if a.Status != "completed" || a.IncidentTime == "" {
 			continue
 		}
 		created, err := time.Parse(time.RFC3339, a.CreatedAt)
 		if err != nil {
-			// Never mis-delete evidence on an unparseable timestamp — surface it.
-			log.Printf("[archive] retention: skipping %s with unparseable CreatedAt %q: %v", a.ID, a.CreatedAt, err)
+			// Never mis-delete evidence on an unparseable timestamp — record it for
+			// the (deduped) diagnostic emitted by the stateful wrapper.
+			unparsable = append(unparsable, a.ID)
 			continue
 		}
 		targets = append(targets, target{id: a.ID, created: created, size: a.SizeBytes})
 	}
+	sort.Strings(unparsable)
 
 	// Deterministic oldest-first order: (CreatedAt asc, ID asc).
 	sort.Slice(targets, func(i, j int) bool {
@@ -1250,6 +1280,7 @@ func selectEvictions(archives []ArchiveMetadata, maxBytes int64, retentionDays i
 
 	// Capacity policy (primary): if the target total exceeds the cap, delete
 	// oldest-first until within the cap, but always keep the newest 1 (floor).
+	var floorID string
 	if maxBytes > 0 {
 		var total int64
 		for _, tg := range targets {
@@ -1260,45 +1291,86 @@ func selectEvictions(archives []ArchiveMetadata, maxBytes int64, retentionDays i
 			total -= targets[i].size
 		}
 		// Single-archive floor: capacity kept the newest target even though it alone
-		// exceeds the cap. Warn ONLY when that item actually survives the final
-		// eviction decision — if the age policy also evicts it, it is truly deleted
-		// and no "floor preserved" warning should be emitted.
+		// exceeds the cap. It is the floor subject ONLY when it actually survives the
+		// final eviction decision — if the age policy also evicts it, it is truly
+		// deleted and there is no floor to warn about.
 		if total > maxBytes && len(targets) > 0 {
 			newest := targets[len(targets)-1]
 			if !evict[newest.id] {
-				log.Printf("[archive] retention: capacity still over limit (%d > %d) after keeping the newest target %s — floor preserved", total, maxBytes, newest.id)
+				floorID = newest.id
 			}
 		}
 	}
 
-	// Return in deterministic oldest-first order, deduped by the map.
-	out := make([]string, 0, len(evict))
+	// Victims in deterministic oldest-first order, deduped by the map.
+	victims := make([]string, 0, len(evict))
 	for _, tg := range targets {
 		if evict[tg.id] {
-			out = append(out, tg.id)
+			victims = append(victims, tg.id)
 		}
 	}
-	return out
+	return evictionPlan{victims: victims, floorID: floorID, unparsableIDs: unparsable}
+}
+
+// selectEvictions is the pure victim selector — the assertion-gate entry point.
+// It returns the deduped set of archive IDs to evict in deterministic
+// oldest-first order and, like planEvictions, has zero side effects (no logging,
+// no deletion). Diagnostics live on the stateful EvictArchives wrapper.
+func selectEvictions(archives []ArchiveMetadata, maxBytes int64, retentionDays int, now time.Time) []string {
+	return planEvictions(archives, maxBytes, retentionDays, now).victims
+}
+
+// floorWarnTransition decides whether a "floor preserved" warning should be
+// emitted this cycle, given the previously-warned floor id and the current one,
+// and returns the next state to store. It fires only on a CHANGE to a non-empty
+// floor id, so a persistent floor condition is logged once, not every cycle; a
+// cleared ("") or changed floor resets/re-arms the warning. Pure — unit-testable.
+func floorWarnTransition(prev, cur string) (warn bool, next string) {
+	return cur != "" && cur != prev, cur
+}
+
+// newUnparsableWarnings returns the ids to warn about this cycle (present now but
+// not previously warned) and the next warned-set state. A persistent set is
+// warned once; ids that disappear are dropped so a later reappearance re-warns.
+// Pure — unit-testable.
+func newUnparsableWarnings(prev map[string]bool, cur []string) (toWarn []string, next map[string]bool) {
+	next = make(map[string]bool, len(cur))
+	for _, id := range cur {
+		next[id] = true
+		if !prev[id] {
+			toWarn = append(toWarn, id)
+		}
+	}
+	return toWarn, next
 }
 
 // evictIDs deletes each id via the shared DeleteArchive path (directory removal
-// + segment unprotect + atomic metadata save). A not-found (the snapshot's
-// target was concurrently DELETEd before its turn) is absorbed and the cycle
-// continues — eviction is idempotent.
+// + segment unprotect + atomic metadata save). Only a not-found
+// (errArchiveNotFound — the snapshot's target was concurrently DELETEd before
+// its turn) is absorbed as benign and the cycle continues (eviction is
+// idempotent). Any OTHER error is surfaced at error level (self-heal retries on
+// the next cycle) and does not stop the loop.
 func (am *ArchiveManager) evictIDs(ids []string) {
 	for _, id := range ids {
-		if err := am.DeleteArchive(id); err != nil {
-			log.Printf("[archive] retention: %s already gone, continuing (%v)", id, err)
-			continue
+		err := am.DeleteArchive(id)
+		switch {
+		case err == nil:
+			log.Printf("[archive] retention: evicted %s", id)
+		case errors.Is(err, errArchiveNotFound):
+			// Concurrent DELETE won the race — the eviction goal is already met.
+			log.Printf("[archive] retention: %s already gone (concurrent delete), continuing", id)
+		default:
+			// Genuine failure — surface it (do NOT mislabel as "already gone").
+			log.Printf("[archive] retention: ERROR evicting %s: %v (will retry next cycle)", id, err)
 		}
-		log.Printf("[archive] retention: evicted %s", id)
 	}
 }
 
 // EvictArchives runs one retention cycle: snapshot the archive list under the
-// lock, release it, compute the eviction set purely, then delete each target via
-// DeleteArchive (which takes the lock itself — no re-entrancy, no deletion while
-// holding the lock). now is injectable for deterministic age/self-heal judging.
+// lock, release it, compute the eviction plan purely, emit deduped diagnostics,
+// then delete each victim via DeleteArchive (which takes the lock itself — no
+// re-entrancy, no deletion while holding the lock). now is injectable for
+// deterministic age/self-heal judging.
 func (am *ArchiveManager) EvictArchives(now time.Time) {
 	if am.evictMaxBytes <= 0 && am.evictRetentionDays <= 0 {
 		return // both policies disabled → no-op (opt-in unbounded retention)
@@ -1308,8 +1380,27 @@ func (am *ArchiveManager) EvictArchives(now time.Time) {
 	copy(snapshot, am.archives)
 	am.mu.RUnlock()
 
-	ids := selectEvictions(snapshot, am.evictMaxBytes, am.evictRetentionDays, now)
-	am.evictIDs(ids)
+	plan := planEvictions(snapshot, am.evictMaxBytes, am.evictRetentionDays, now)
+	am.reportEvictionDiagnostics(plan)
+	am.evictIDs(plan.victims)
+}
+
+// reportEvictionDiagnostics emits the floor-preserved and unparseable-CreatedAt
+// warnings with change-detection so a persistent condition is logged once, not
+// every 30s ticker cycle. Called from the single ticker goroutine, so its state
+// fields need no extra locking.
+func (am *ArchiveManager) reportEvictionDiagnostics(plan evictionPlan) {
+	warn, nextFloor := floorWarnTransition(am.lastFloorWarnedID, plan.floorID)
+	if warn {
+		log.Printf("[archive] retention: capacity still over limit after keeping newest target %s — floor preserved (single archive exceeds ARCHIVE_MAX_BYTES)", plan.floorID)
+	}
+	am.lastFloorWarnedID = nextFloor
+
+	toWarn, next := newUnparsableWarnings(am.warnedUnparsableIDs, plan.unparsableIDs)
+	for _, id := range toWarn {
+		log.Printf("[archive] retention: WARNING archive %s has an unparseable CreatedAt — excluded from eviction (not deleted)", id)
+	}
+	am.warnedUnparsableIDs = next
 }
 
 // DeleteIncidentArchives removes ALL archives for a given incident ID.
