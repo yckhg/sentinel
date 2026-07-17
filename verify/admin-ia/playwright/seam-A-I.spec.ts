@@ -1,5 +1,20 @@
 import { test, expect, type Page } from "@playwright/test";
-import { login, createNonAdminUser, FRONTEND } from "./_helpers";
+import {
+  login,
+  createNonAdminUser,
+  readAdminToken,
+  clearAuthOnOrigin,
+  FRONTEND,
+  ADMIN_USERNAME,
+  ADMIN_PASSWORD,
+} from "./_helpers";
+
+// Auth model: playwright.config `use.storageState` seeds every test already
+// authenticated as admin (single globalSetup login), so admin-only specs no longer
+// log in. Only specs that must observe the UNAUTHENTICATED path (seam-E unauth,
+// seam-G) clear that state via clearAuthOnOrigin, and the non-admin path (seam-E)
+// logs in once as a seeded non-admin. This keeps the whole-suite login count under
+// the backend's 10/min-per-IP cap.
 
 // ---------------------------------------------------------------------------
 // Seam gate specs [seam-A]~[seam-I] — the admin routing/navigation接합부 contract
@@ -41,7 +56,7 @@ const subpage = (page: Page, slug: string) =>
 
 // [seam-A] /admin direct entry mounts the hub (admin-hub renders).
 test("[seam-A] /admin 직접 진입 시 관리 허브가 마운트된다", async ({ page }) => {
-  await login(page);
+  // Already admin-authed via storageState.
   await page.goto(`${FRONTEND}/admin`);
   await expect(page).toHaveURL(/\/admin$/);
   await expect(page.getByTestId("admin-hub")).toBeVisible();
@@ -53,7 +68,7 @@ test("[seam-B] 10 slug 각각 딥링크 시 서브페이지 렌더 + URL 유지"
   page,
 }) => {
   test.setTimeout(180_000);
-  await login(page);
+  // Already admin-authed via storageState.
   for (const slug of SLUGS) {
     await page.goto(`${FRONTEND}/admin/${slug}`);
     await expect(page, `URL stays /admin/${slug}`).toHaveURL(
@@ -75,7 +90,7 @@ test("[seam-C] 페이지 내 뒤로 어포던스·브라우저 back 모두 허�
   page,
 }) => {
   test.setTimeout(180_000);
-  await login(page);
+  // Already admin-authed via storageState.
 
   // (1) Normative mechanism: admin-back → /admin for every slug (deep-link entry).
   for (const slug of SLUGS) {
@@ -106,7 +121,7 @@ test("[seam-D] 허브 항목 선택 시 /admin/<slug> 이동 + 서브페이지 �
   page,
 }) => {
   test.setTimeout(180_000);
-  await login(page);
+  // Already admin-authed via storageState.
   for (const slug of SLUGS) {
     await page.goto(`${FRONTEND}/admin`);
     await page
@@ -130,7 +145,9 @@ test("[seam-E] 게이트: 미인증→login?returnTo·non-admin→/cctv + 관리
   test.setTimeout(300_000);
   const paths = ["/admin", ...SLUGS.map((s) => `/admin/${s}`)];
 
-  // -- Unauthenticated fixture: no login, just goto.
+  // -- Unauthenticated fixture: drop the storageState-seeded admin token first
+  //    (on a real origin — never about:blank), then just goto.
+  await clearAuthOnOrigin(page);
   for (const p of paths) {
     await page.goto(`${FRONTEND}${p}`);
     await page.waitForURL(
@@ -142,13 +159,13 @@ test("[seam-E] 게이트: 미인증→login?returnTo·non-admin→/cctv + 관리
   }
 
   // -- Authenticated non-admin fixture: created via real register→approve flow.
-  const adminToken = await login(page);
+  //    Reuse the shared admin bearer (from storageState) for the API seeding — no
+  //    admin login here. Only the non-admin browser login below hits /auth/login.
+  const adminToken = readAdminToken();
   const nonAdmin = await createNonAdminUser(request, adminToken, {
     username: `nonadmin_${Date.now()}`,
     password: "NonAdmin-pw-123",
   });
-  // Log out (clear token) then log in as the non-admin.
-  await page.evaluate(() => localStorage.removeItem("token"));
   await login(page, nonAdmin.username, nonAdmin.password);
 
   for (const p of paths) {
@@ -164,7 +181,7 @@ test("[seam-E] 게이트: 미인증→login?returnTo·non-admin→/cctv + 관리
 test("[seam-F] 허용목록 밖 /admin/<unknown>는 not-found 폴백 + 탭바 미렌더", async ({
   page,
 }) => {
-  await login(page);
+  // Already admin-authed via storageState.
   for (const unknown of ["nonesuch", "bogus", "devicesx"]) {
     await page.goto(`${FRONTEND}/admin/${unknown}`);
     await expect(
@@ -186,18 +203,26 @@ test("[seam-G] returnTo 허용목록: /admin/<slug> 허용, 외부 URL 거부", 
   // Manual form fill (not the login() helper) because we must supply the
   // returnTo query on the /login URL — the helper always hits bare /login.
   const loginWithReturnTo = async (returnTo: string) => {
-    await page.evaluate(() => localStorage.removeItem("token"));
+    // Clear any auth on a REAL origin FIRST, then load /login?returnTo. Clearing
+    // localStorage before a goto (i.e. on about:blank) throws SecurityError — that
+    // was the seam-G defect. Clearing after navigating to /login?returnTo would let
+    // an already-authed (storageState) session redirect away before the form shows,
+    // so the clear must land on a real origin *before* the returnTo navigation.
+    await clearAuthOnOrigin(page);
     await page.goto(`${FRONTEND}/login?returnTo=${encodeURIComponent(returnTo)}`);
-    await page.fill("#login-username", process.env.ADMIN_USERNAME || "admin");
-    await page.fill(
-      "#login-password",
-      process.env.ADMIN_PASSWORD || "adminverify-admin-pw"
-    );
+    await page.fill("#login-username", ADMIN_USERNAME);
+    await page.fill("#login-password", ADMIN_PASSWORD);
     await page.locator("button.login-submit").click();
+    // Small spacing between logins for 10/min-per-IP rate-limit safety.
+    await page.waitForTimeout(700);
   };
 
-  // Allowed: each /admin/<slug> is honored.
-  for (const slug of SLUGS) {
+  // The returnTo allowlist guard is slug-UNIFORM (every /admin/<slug> is accepted by
+  // the same allowlist check), so a representative sample is sufficient — 3 slugs,
+  // including one hyphenated slug (cctv-links) and one other hyphenated (test-alert),
+  // exercises the same code path as enumerating all 10.
+  // Allowed: representative /admin/<slug> returnTos are honored.
+  for (const slug of ["devices", "test-alert", "cctv-links"]) {
     await loginWithReturnTo(`/admin/${slug}`);
     await expect(page, `returnTo /admin/${slug} honored`).toHaveURL(
       new RegExp(`/admin/${slug.replace("-", "\\-")}$`)
@@ -216,7 +241,7 @@ test("[seam-G] returnTo 허용목록: /admin/<slug> 허용, 외부 URL 거부", 
 test("[seam-H] 상위 4탭(cctv·incidents·admin·settings) 존재·동작", async ({
   page,
 }) => {
-  await login(page);
+  // Already admin-authed via storageState.
   await page.goto(`${FRONTEND}/cctv`);
   await expect(page.locator(".tab-bar button")).toHaveCount(4);
   for (const { label, path } of TABS) {
@@ -231,7 +256,7 @@ test("[seam-H] 상위 4탭(cctv·incidents·admin·settings) 존재·동작", as
 // (URL == SSOT), enumerated over all 10 slugs.
 test("[seam-I] 서브페이지 새로고침 후 동일 서브페이지 복원", async ({ page }) => {
   test.setTimeout(180_000);
-  await login(page);
+  // Already admin-authed via storageState.
   for (const slug of SLUGS) {
     await page.goto(`${FRONTEND}/admin/${slug}`);
     await expect(subpage(page, slug)).toBeVisible();

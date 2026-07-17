@@ -102,7 +102,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("ManagementPage — 채널별 테스트 발송 UI (spec notification-test-send)", () => {
+// RETIRED (admin-IA master): ManagementPage was removed from the App render path
+// and frozen pending leaf decomposition — its notify-test UI is being relocated to
+// pages/admin/NotifyTestPage.tsx (page-notify-test leaf), which will re-own these
+// assertions against its own subpage + feature markers. Skipped (not deleted) so
+// the frozen source + intended contract stay as a reference for that leaf.
+describe.skip("ManagementPage — 채널별 테스트 발송 UI (spec notification-test-send)", () => {
   it("이메일/SMS 독립 '테스트 전송' 컨트롤을 제공하고 KakaoTalk은 제공하지 않는다 (§출력 13·단언 G)", async () => {
     installFetch({ email: { usable: true }, sms: { usable: true } });
     render(<ManagementPage />);
