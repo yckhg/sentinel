@@ -92,6 +92,7 @@ export default function HealthPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cameras, setCameras] = useState<CameraStatus[]>([]);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   const firstLoadRef = useRef(true);
 
   // Device search (assertion D) — current-state lookup, not a listing.
@@ -138,11 +139,19 @@ export default function HealthPanel() {
   const fetchCameras = async () => {
     try {
       const res = await fetchWithTimeout("/api/cameras", { headers: getAuthHeaders() });
-      if (!res.ok) return;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body: CameraStatus[] = await res.json();
       setCameras(Array.isArray(body) ? body : []);
-    } catch {
-      // camera status is non-critical and outside the aggregate — ignore failures.
+      setCameraError(null);
+    } catch (err) {
+      // Assertion K: camera connection lookup is one of the four read接면 whose
+      // failure must surface an observable error state — never a silent empty
+      // (#103 무음 삼킴 방지 균질화, matching summary/search/history handling).
+      setCameraError(
+        isTimeoutError(err)
+          ? timeoutMessage()
+          : "카메라 상태를 불러올 수 없습니다",
+      );
     }
   };
 
@@ -367,10 +376,12 @@ export default function HealthPanel() {
             </p>
           )}
 
-          {/* Camera connection status — observed separately (assertion G, 계약 3). */}
-          {cameras.length > 0 && (
+          {/* Camera connection status — observed separately (assertion G, 계약 3).
+              Lookup failure surfaces an error state (assertion K), not silence. */}
+          {(cameras.length > 0 || cameraError) && (
             <>
               <h3 className="mgmt-sub-header">카메라 연결</h3>
+              {cameraError && <p className="mgmt-error">{cameraError}</p>}
               <div className="mgmt-list">
                 {cameras.map((cam) => {
                   const connected = cam.status === "connected";
