@@ -41,8 +41,11 @@
   편집하지 않는다 — 각 리프는 `pages/admin/<Slug>Page.tsx` **신규 파일**을 작성한다. 마스터가
   App.tsx `case 'management'`를 허브+slug 해석기로 교체하며 ManagementPage 렌더 경로를 제거하고,
   기존 `ManagementPage.*.test.tsx`의 은퇴도 마스터가 소유한다. (b) contacts·system 두 리프가
-  공유하는 전화번호 검증 규칙(`^01[016789]-\d{3,4}-\d{4}$`)은 `utils/phone.ts` 공유 유틸로 두며
-  **소유자=마스터**, 두 리프는 이를 참조한다.
+  공유하는 전화번호 검증 규칙(`^01[016789]-\d{3,4}-\d{4}$`)과 **라이브 하이픈 포매터**(입력 중
+  자동 하이픈 삽입, 현행 `formatPhoneInput` 대응)는 `utils/phone.ts` 공유 유틸로 두며 **소유자=마스터**
+  (검증자·포매터를 함께 export), 두 리프는 이를 **import 참조**한다(각자 복제 금지). (c) 기존 공유
+  컴포넌트 `components/HealthPanel.tsx`·`components/DevicesSection.tsx`는 각각 **대응 리프(health·devices)가
+  배타 소유**하며, 신규 `<Slug>Page`가 이를 소비·이관한다(1:1 매핑이라 병렬 충돌 없음).
 - **구현 순서(선후):** 접합부+허브(마스터 — App.tsx 라우트 테이블·게이트·slug 해석기)를 1순위로
   구현·머지하고, 그 후 리프를 병렬 구현한다. App.tsx는 모든 리프 라우팅 단언의 공유 파일이므로,
   마스터가 들어오기 전에는 `/admin/<slug>` 딥링크가 404가 되어 리프의 라우팅계열 단언(A/B/C·
