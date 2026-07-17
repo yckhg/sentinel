@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -408,6 +409,103 @@ func TestParseEvictInt(t *testing.T) {
 		if gotVal != c.wantVal || gotWarn != c.wantWarn {
 			t.Errorf("parseEvictInt(%q) = (%d,%v), want (%d,%v)", c.raw, gotVal, gotWarn, c.wantVal, c.wantWarn)
 		}
+	}
+}
+
+// DeleteArchive on an absent id returns errArchiveNotFound (sentinel) so evictIDs
+// can classify a benign concurrent-delete race via errors.Is rather than string
+// matching or blanket "already gone" absorption.
+func TestDeleteArchive_NotFoundSentinel(t *testing.T) {
+	am, _ := seedManager(t, []ArchiveMetadata{mkTarget("present", retBase, 10)})
+	err := am.DeleteArchive("absent")
+	if err == nil || !errors.Is(err, errArchiveNotFound) {
+		t.Fatalf("expected errArchiveNotFound for absent id, got %v", err)
+	}
+	if err := am.DeleteArchive("present"); err != nil {
+		t.Fatalf("deleting a present archive must succeed, got %v", err)
+	}
+}
+
+// --- diagnostic dedup helpers (pure) — change-detection contract ------------
+func TestFloorWarnTransition(t *testing.T) {
+	cases := []struct {
+		prev, cur string
+		wantWarn  bool
+		wantNext  string
+	}{
+		{"", "", false, ""},    // no floor → no warn
+		{"", "A", true, "A"},   // floor A appears → warn once
+		{"A", "A", false, "A"}, // A persists → NO re-warn (spam suppressed)
+		{"A", "B", true, "B"},  // floor changes A→B → warn
+		{"A", "", false, ""},   // floor cleared → no warn, state reset
+		{"", "A", true, "A"},   // A reappears after clear → warn again (re-armed)
+	}
+	for _, c := range cases {
+		gotWarn, gotNext := floorWarnTransition(c.prev, c.cur)
+		if gotWarn != c.wantWarn || gotNext != c.wantNext {
+			t.Errorf("floorWarnTransition(%q,%q) = (%v,%q), want (%v,%q)", c.prev, c.cur, gotWarn, gotNext, c.wantWarn, c.wantNext)
+		}
+	}
+}
+
+func TestNewUnparsableWarnings(t *testing.T) {
+	// {} + [A] → warn [A]
+	toWarn, next := newUnparsableWarnings(map[string]bool{}, []string{"A"})
+	if len(toWarn) != 1 || toWarn[0] != "A" || !next["A"] {
+		t.Fatalf("appear: toWarn=%v next=%v", toWarn, next)
+	}
+	// {A} + [A] → no re-warn (persist), state keeps A
+	toWarn, next = newUnparsableWarnings(map[string]bool{"A": true}, []string{"A"})
+	if len(toWarn) != 0 || !next["A"] {
+		t.Fatalf("persist: toWarn=%v next=%v", toWarn, next)
+	}
+	// {A} + [A,B] → warn only the new B
+	toWarn, next = newUnparsableWarnings(map[string]bool{"A": true}, []string{"A", "B"})
+	if len(toWarn) != 1 || toWarn[0] != "B" || !next["A"] || !next["B"] {
+		t.Fatalf("grow: toWarn=%v next=%v", toWarn, next)
+	}
+	// {A} + [] → cleared, no warn, A dropped so it re-warns if it returns
+	toWarn, next = newUnparsableWarnings(map[string]bool{"A": true}, nil)
+	if len(toWarn) != 0 || len(next) != 0 {
+		t.Fatalf("clear: toWarn=%v next=%v", toWarn, next)
+	}
+	toWarn, _ = newUnparsableWarnings(next, []string{"A"})
+	if len(toWarn) != 1 || toWarn[0] != "A" {
+		t.Fatalf("re-arm: expected A re-warned, got %v", toWarn)
+	}
+}
+
+// planEvictions surfaces diagnostics without mutating anything AND the victim
+// set is byte-identical to selectEvictions (logging move must not change victims).
+func TestPlanEvictions_DiagnosticsAndPurity(t *testing.T) {
+	archives := []ArchiveMetadata{
+		// unparseable CreatedAt but target-shaped → excluded, surfaced as diagnostic.
+		{ID: "bad", CreatedAt: "not-a-time", SizeBytes: 10, Status: "completed", IncidentTime: rfc(retBase)},
+		// sole parseable target, alone exceeds cap → floor preserved.
+		mkTarget("solo", retBase.Add(-1*time.Hour), 500),
+	}
+	plan := planEvictions(archives, 100, 0, retBase)
+	if plan.floorID != "solo" {
+		t.Errorf("expected floorID=solo, got %q", plan.floorID)
+	}
+	if len(plan.unparsableIDs) != 1 || plan.unparsableIDs[0] != "bad" {
+		t.Errorf("expected unparsableIDs=[bad], got %v", plan.unparsableIDs)
+	}
+	if len(plan.victims) != 0 {
+		t.Errorf("floor case must evict nothing, got victims=%v", plan.victims)
+	}
+	// selectEvictions must equal plan.victims (thin wrapper, no divergence).
+	sel := selectEvictions(archives, 100, 0, retBase)
+	if len(sel) != len(plan.victims) {
+		t.Errorf("selectEvictions=%v diverges from plan.victims=%v", sel, plan.victims)
+	}
+	// Age-evicting the sole/floor target clears the floor diagnostic (truly deleted).
+	plan2 := planEvictions([]ArchiveMetadata{mkTarget("old", retBase.Add(-10*24*time.Hour), 500)}, 100, 7, retBase)
+	if plan2.floorID != "" {
+		t.Errorf("age-evicted sole target must NOT be a floor subject, got floorID=%q", plan2.floorID)
+	}
+	if len(plan2.victims) != 1 || plan2.victims[0] != "old" {
+		t.Errorf("expected age eviction {old}, got %v", plan2.victims)
 	}
 }
 
