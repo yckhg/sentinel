@@ -800,6 +800,12 @@ type ArchiveManager struct {
 	// TTL caches for the expensive directory-size walks behind /api/storage. (#81)
 	recSizeCache *sizeCache
 	arcSizeCache *sizeCache
+
+	// Archive retention policy thresholds (archive-retention-policy.md). Both are
+	// opt-in: <=0 disables that policy. Wired from ARCHIVE_MAX_BYTES /
+	// ARCHIVE_RETENTION_DAYS in main() and consumed by EvictArchives.
+	evictMaxBytes      int64
+	evictRetentionDays int
 }
 
 // storageCacheTTL bounds how stale /api/storage size figures may be.
@@ -1160,6 +1166,117 @@ func (am *ArchiveManager) DeleteArchive(archiveID string) error {
 
 	log.Printf("[archive] Deleted: %s", archiveID)
 	return nil
+}
+
+// selectEvictions is the pure, total, side-effect-free core of the archive
+// retention policy (archive-retention-policy.md). It returns the deduped set of
+// archive IDs to evict, in deterministic oldest-first order, given the current
+// archive list, the capacity cap (bytes) and age cap (days). It never deletes;
+// EvictArchives wires the result to DeleteArchive.
+//
+// Target set = Status=="completed" ∧ IncidentTime!="" ∧ CreatedAt parseable as
+// RFC3339. Everything else (manual/non-auto/in-flight/failed/legacy/unparseable)
+// is excluded from capacity accounting, age accounting and deletion. maxBytes<=0
+// disables the capacity policy; retentionDays<=0 disables the age policy. The
+// two eviction sets are unioned (deduped).
+func selectEvictions(archives []ArchiveMetadata, maxBytes int64, retentionDays int, now time.Time) []string {
+	type target struct {
+		id      string
+		created time.Time
+		size    int64
+	}
+	var targets []target
+	for _, a := range archives {
+		if a.Status != "completed" || a.IncidentTime == "" {
+			continue
+		}
+		created, err := time.Parse(time.RFC3339, a.CreatedAt)
+		if err != nil {
+			// Never mis-delete evidence on an unparseable timestamp — surface it.
+			log.Printf("[archive] retention: skipping %s with unparseable CreatedAt %q: %v", a.ID, a.CreatedAt, err)
+			continue
+		}
+		targets = append(targets, target{id: a.ID, created: created, size: a.SizeBytes})
+	}
+
+	// Deterministic oldest-first order: (CreatedAt asc, ID asc).
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].created.Equal(targets[j].created) {
+			return targets[i].id < targets[j].id
+		}
+		return targets[i].created.Before(targets[j].created)
+	})
+
+	evict := make(map[string]bool)
+
+	// Age policy (secondary): evict every target older than the retention window.
+	// Ignores the capacity floor — even a sole/newest target over retention goes.
+	if retentionDays > 0 {
+		cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+		for _, tg := range targets {
+			if tg.created.Before(cutoff) {
+				evict[tg.id] = true
+			}
+		}
+	}
+
+	// Capacity policy (primary): if the target total exceeds the cap, delete
+	// oldest-first until within the cap, but always keep the newest 1 (floor).
+	if maxBytes > 0 {
+		var total int64
+		for _, tg := range targets {
+			total += tg.size
+		}
+		for i := 0; i < len(targets)-1 && total > maxBytes; i++ {
+			evict[targets[i].id] = true
+			total -= targets[i].size
+		}
+		if total > maxBytes {
+			// Single-archive floor: the newest (or sole) target alone exceeds the
+			// cap. It is preserved (latest evidence is never dropped by capacity).
+			log.Printf("[archive] retention: capacity still over limit (%d > %d) after keeping the newest target — floor preserved", total, maxBytes)
+		}
+	}
+
+	// Return in deterministic oldest-first order, deduped by the map.
+	out := make([]string, 0, len(evict))
+	for _, tg := range targets {
+		if evict[tg.id] {
+			out = append(out, tg.id)
+		}
+	}
+	return out
+}
+
+// evictIDs deletes each id via the shared DeleteArchive path (directory removal
+// + segment unprotect + atomic metadata save). A not-found (the snapshot's
+// target was concurrently DELETEd before its turn) is absorbed and the cycle
+// continues — eviction is idempotent.
+func (am *ArchiveManager) evictIDs(ids []string) {
+	for _, id := range ids {
+		if err := am.DeleteArchive(id); err != nil {
+			log.Printf("[archive] retention: %s already gone, continuing (%v)", id, err)
+			continue
+		}
+		log.Printf("[archive] retention: evicted %s", id)
+	}
+}
+
+// EvictArchives runs one retention cycle: snapshot the archive list under the
+// lock, release it, compute the eviction set purely, then delete each target via
+// DeleteArchive (which takes the lock itself — no re-entrancy, no deletion while
+// holding the lock). now is injectable for deterministic age/self-heal judging.
+func (am *ArchiveManager) EvictArchives(now time.Time) {
+	if am.evictMaxBytes <= 0 && am.evictRetentionDays <= 0 {
+		return // both policies disabled → no-op (opt-in unbounded retention)
+	}
+	am.mu.RLock()
+	snapshot := make([]ArchiveMetadata, len(am.archives))
+	copy(snapshot, am.archives)
+	am.mu.RUnlock()
+
+	ids := selectEvictions(snapshot, am.evictMaxBytes, am.evictRetentionDays, now)
+	am.evictIDs(ids)
 }
 
 // DeleteIncidentArchives removes ALL archives for a given incident ID.
@@ -1617,8 +1734,27 @@ func main() {
 
 	log.Printf("Recording service starting (rolling window: %dm, ffmpeg timeout: %v)", rollingMinutes, ffmpegTimeout)
 
+	// Archive retention thresholds (archive-retention-policy.md). Same env
+	// convention as ROLLING_WINDOW_MINUTES (strconv + >0 guard); unset/non-positive
+	// disables that policy (opt-in).
+	var archiveMaxBytes int64
+	if env := os.Getenv("ARCHIVE_MAX_BYTES"); env != "" {
+		if v, err := strconv.ParseInt(env, 10, 64); err == nil && v > 0 {
+			archiveMaxBytes = v
+		}
+	}
+	archiveRetentionDays := 0
+	if env := os.Getenv("ARCHIVE_RETENTION_DAYS"); env != "" {
+		if v, err := strconv.Atoi(env); err == nil && v > 0 {
+			archiveRetentionDays = v
+		}
+	}
+
 	manager := NewRecordingManager(rtmpBaseURL, recordingsDir, ffmpegTimeout)
 	archiveManager := NewArchiveManager(archivesDir, recordingsDir, manager)
+	archiveManager.evictMaxBytes = archiveMaxBytes
+	archiveManager.evictRetentionDays = archiveRetentionDays
+	log.Printf("Archive retention config (max bytes: %d, retention days: %d; 0 = disabled)", archiveMaxBytes, archiveRetentionDays)
 
 	// Startup recovery for in-flight archives. MUST run before the rolling cleanup
 	// loop starts so recovery-target segments are protected before the first
@@ -1666,15 +1802,24 @@ func main() {
 		}
 	}()
 
-	// Start protection refresh + auto-finalize goroutine
+	// Start protection refresh + auto-finalize + archive retention goroutine
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
+		first := true
 		for range ticker.C {
+			if first {
+				// Ordering marker (sibling of "Rolling cleanup started"): makes the
+				// ticker→EvictArchives wiring observable.
+				log.Println("Archive retention started")
+				first = false
+			}
 			// Re-protect new segments for active incidents
 			archiveManager.RefreshProtection()
 			// Auto-finalize incidents protecting for > 2 hours
 			archiveManager.AutoFinalizeExpired(2 * time.Hour)
+			// Evict archives past the capacity/age caps (self-heals each cycle).
+			archiveManager.EvictArchives(time.Now().UTC())
 		}
 	}()
 
