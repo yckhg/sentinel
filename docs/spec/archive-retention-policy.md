@@ -64,7 +64,7 @@
 ## 핵심 로직 (동작)
 
 - **주기 실행**: 축출은 외부 요청 없이 기존 `archiveManager` 30초 티커 고루틴에서 `AutoFinalizeExpired` 다음에 반복 실행된다(신규 스케줄러 없음, 첫 실행 순서 마커 로그 추가). 초과 상태는 다음 주기 안에 자기수복(self-heal)된다.
-- **결정적 진입점**: 축출 로직은 티커와 분리된 **직접 호출 가능 함수**로 노출한다 — 순수 선정 함수 `selectEvictions(archives []ArchiveMetadata, maxBytes int64, retentionDays int, now time.Time) []string`(삭제 대상 ID를 **중복 제거된 집합**으로 반환 — 나이·용량 삭제집합의 교집합 id가 두 번 들어가지 않는다, 부작용 0)과 그것을 `DeleteArchive`에 결선하는 얇은 래퍼 `EvictArchives(now time.Time)`. `now`는 주입 가능(나이/자기수복 판정 결정성). 이는 `CleanupOldSegments(window)`가 인자를 받아 티커 없이 1회 실행 가능한 것과 대칭이다.
+- **결정적 진입점**: 축출 로직은 티커와 분리된 **직접 호출 가능 함수**로 노출한다 — 순수 선정 함수 `selectEvictions(archives []ArchiveMetadata, maxBytes int64, retentionDays int, now time.Time) []string`(삭제 대상 ID를 **중복 제거된 집합**으로 반환 — 나이·용량 삭제집합의 교집합 id가 두 번 들어가지 않는다; 삭제·상태 변경 등 상태 부작용 없음, 진단 로그만 방출)과 그것을 `DeleteArchive`에 결선하는 얇은 래퍼 `EvictArchives(now time.Time)`. `now`는 주입 가능(나이/자기수복 판정 결정성). 이는 `CleanupOldSegments(window)`가 인자를 받아 티커 없이 1회 실행 가능한 것과 대칭이다.
 - **대상 필터(순수·전함수)**: `selectEvictions`는 먼저 대상 집합(= `Status=="completed"` ∧ `IncidentTime!=""` ∧ `CreatedAt` 파싱가능)만 남긴다. 그 외(수동·비자동·진행중·failed·파싱불가)는 용량·나이 산정과 삭제에서 제외한다. `CreatedAt` 파싱 불가분은 경고 로그로 표면화한다(파싱 불가를 근거로 증거를 오삭제하지 않는다). 이로써 함수는 전함수이고 정렬·나이 판정이 결정적이다(신규 경로는 create·protect 양쪽에서 항상 `CreatedAt`를 채우므로 실무 대상은 파싱 가능).
 - **용량 우선(주 정책)**: 대상 총 `SizeBytes`가 `ARCHIVE_MAX_BYTES`를 초과하면, `(CreatedAt, ID)` 오름차순으로 가장 오래된 것부터 삭제해 총 용량을 상한 이하로 되돌린다(용량 루프의 하한: 최신 1건은 보존).
 - **나이(보조 정책)**: `ARCHIVE_RETENTION_DAYS`를 초과한 대상은 용량이 상한 이내여도 삭제한다. 두 정책이 함께 켜져 있으면 합집합으로 축출한다(나이 초과분 ∪ 용량 초과분). "최신 1건 보존" 바닥은 **용량 정책에만** 적용되고 나이 집합에는 적용되지 않는다.
