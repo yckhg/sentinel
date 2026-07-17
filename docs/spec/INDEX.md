@@ -31,6 +31,7 @@
 | [system-status-aggregate.md](system-status-aggregate.md) — 시스템 상태 현재-상태 요약 창(집계: 정상=카운트/예외만 개별·장비 수 무관 경계 불변식·서비스 고정목록·장비 검색·이력 드릴다운·카메라 연결상태; interface-web-api 헬스 접면 델타) | `tests/spec/system-status-aggregate/` | (신규 — 미검증) |
 | [sensor-device-lifecycle.md](sensor-device-lifecycle.md) — 센서 장치 생명주기(교체=삭제+추가·특별기능 없음; 존재감(last_seen)↔생명주기 직교; 명시등록/재활성 `POST /api/devices`(생성-또는-재활성); 자동발견 `seen`은 존재감만 갱신·생명주기 불변; **스티키 삭제**(재신호로 복원 안 함)+**재출현 경보** WS `device_reappeared`; 삭제≠안전정지(정적 이중화); `{id}`=surrogate PK; seen internal 경계; interface-web-api/web-backend/hw-gateway 델타) | `tests/spec/sensor-device-lifecycle/` | (신규 — 미검증) |
 | [camera-change-propagation.md](camera-change-propagation.md) — 카메라 변경 전파·삭제 증거 보존(회귀가드; 카메라 CRUD reload 팬아웃을 cctv·youtube·**recording** 3소비자로·**커밋 후**·최선노력+재동기 안전망; 카메라 삭제 시 사고·보호아카이브 증거 비연쇄(stream_key 비정규화 보존); 카메라는 devices/센서모델 대상 아님; interface-web-api/web-backend/recording 델타) | `tests/spec/camera-change-propagation/` | (신규 — 미검증) |
+| [archive-retention-policy.md](archive-retention-policy.md) — 영구 아카이브(`archives-data`) 무한증가 방지(GH #114; 용량 상한 `ARCHIVE_MAX_BYTES` oldest-first 주정책 + 나이 상한 `ARCHIVE_RETENTION_DAYS` 보조; `manual_*` 축출 제외; 롤링청소와 대칭·주기 자기수복; 삭제=기존 아카이브삭제 부작용 재사용·댕글링 없음; recording 델타) | `tests/spec/archive-retention-policy/` | (신규 — 미검증) |
 
 ## 관리(/admin) IA 재구성 (프론트 IA/표현 리팩터 — 백엔드·API 무변경)
 
