@@ -1231,10 +1231,15 @@ func selectEvictions(archives []ArchiveMetadata, maxBytes int64, retentionDays i
 			evict[targets[i].id] = true
 			total -= targets[i].size
 		}
-		if total > maxBytes {
-			// Single-archive floor: the newest (or sole) target alone exceeds the
-			// cap. It is preserved (latest evidence is never dropped by capacity).
-			log.Printf("[archive] retention: capacity still over limit (%d > %d) after keeping the newest target — floor preserved", total, maxBytes)
+		// Single-archive floor: capacity kept the newest target even though it alone
+		// exceeds the cap. Warn ONLY when that item actually survives the final
+		// eviction decision — if the age policy also evicts it, it is truly deleted
+		// and no "floor preserved" warning should be emitted.
+		if total > maxBytes && len(targets) > 0 {
+			newest := targets[len(targets)-1]
+			if !evict[newest.id] {
+				log.Printf("[archive] retention: capacity still over limit (%d > %d) after keeping the newest target %s — floor preserved", total, maxBytes, newest.id)
+			}
 		}
 	}
 
@@ -1741,12 +1746,19 @@ func main() {
 	if env := os.Getenv("ARCHIVE_MAX_BYTES"); env != "" {
 		if v, err := strconv.ParseInt(env, 10, 64); err == nil && v > 0 {
 			archiveMaxBytes = v
+		} else {
+			// Non-empty but unparseable/non-positive: surface the misconfiguration
+			// so a typo (e.g. "100GiB") is not silently treated as disabled, which
+			// would quietly regress to unbounded archive growth.
+			log.Printf("[archive] WARNING: ARCHIVE_MAX_BYTES=%q is not a positive integer (bytes) — capacity eviction stays DISABLED", env)
 		}
 	}
 	archiveRetentionDays := 0
 	if env := os.Getenv("ARCHIVE_RETENTION_DAYS"); env != "" {
 		if v, err := strconv.Atoi(env); err == nil && v > 0 {
 			archiveRetentionDays = v
+		} else {
+			log.Printf("[archive] WARNING: ARCHIVE_RETENTION_DAYS=%q is not a positive integer (days) — age eviction stays DISABLED", env)
 		}
 	}
 
