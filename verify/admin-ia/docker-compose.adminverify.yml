@@ -1,0 +1,81 @@
+# Isolated admin-IA verification stack (routing assertions A~I + per-page behavior).
+#
+# SAFETY / ISOLATION INVARIANT
+# ----------------------------
+# This is a SELF-CONTAINED stack, run ONLY as project `adminverify`:
+#   docker compose -p adminverify -f verify/admin-ia/docker-compose.adminverify.yml ...
+# It deliberately does NOT `-f docker-compose.yml` overlay the prod file, because an
+# overlay CONCATENATES `ports:` — the prod web-frontend `3080:80` mapping cannot be
+# dropped and would collide with the running prod container. A standalone file gives us
+# a hard guarantee: no prod `sentinel-*` container_name, no prod volume, no prod port,
+# no prod network is ever referenced. It also stays clear of the device-mgmt harness
+# (`devverify-*` / ports 38080·38081) so both can run side by side.
+#
+# Everything here is namespaced:
+#   - container_name: adminverify-*         (never sentinel-* / devverify-*)
+#   - volume:         adminverify-db-data   (explicit name; NOT prod sentinel_db-data)
+#   - network:        adminverify-net       (explicit name; private bridge)
+#   - host ports:     38082 / 38083         (free high ports, NOT prod 3080, NOT 38080/38081)
+#
+# Only web-backend + web-frontend are brought up. The frontend's nginx has a static
+# `proxy_pass http://streaming:8080` upstream that must RESOLVE at nginx startup, so
+# web-backend advertises an extra network alias `streaming` (the /live/ route is never
+# exercised by the admin-IA routing tests).
+
+services:
+  web-backend:
+    build:
+      context: ../../services/web-backend
+    image: adminverify-web-backend
+    container_name: adminverify-web-backend
+    restart: "no"
+    environment:
+      # Fixed test secrets (isolated stack only — never production values).
+      - JWT_SECRET=adminverify-jwt-secret
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=adminverify-admin-pw
+      # Shared internal secret: the seen/incidents fail-closed boundary. Injected into
+      # the Playwright run so any X-Internal-Token seeding path passes the gate.
+      - INTERNAL_TOKEN=adminverify-internal-token
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "38083:8080"
+    volumes:
+      - adminverify-db-data:/data
+    networks:
+      adminverify-net:
+        aliases:
+          - web-backend
+          - streaming   # satisfies nginx's static /live/ upstream resolution
+
+  web-frontend:
+    build:
+      context: ../../services/web-frontend
+    image: adminverify-web-frontend
+    container_name: adminverify-web-frontend
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:80/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "38082:80"
+    depends_on:
+      web-backend:
+        condition: service_healthy
+    networks:
+      - adminverify-net
+
+networks:
+  adminverify-net:
+    name: adminverify-net
+    driver: bridge
+
+volumes:
+  adminverify-db-data:
+    name: adminverify-db-data

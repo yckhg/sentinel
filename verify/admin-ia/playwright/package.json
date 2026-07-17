@@ -1,0 +1,12 @@
+{
+  "name": "adminverify",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Isolated Playwright harness for admin-IA routing assertions A~I + per-page behavior preservation",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1"
+  }
+}
