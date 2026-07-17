@@ -368,6 +368,60 @@ func TestEvictArchives_F2_Idempotent(t *testing.T) {
 	}
 }
 
+// --- B (disk round-trip): non-target on-disk survival ------------------------
+// Closes the "비대상 보존 불변식" over the real DeleteArchive round-trip: a
+// manual (IncidentTime=="") + a failed + a protecting archive, alongside
+// over-cap completed incident targets, all materialized on disk. After a cycle
+// the non-targets' directories AND metadata.json entries survive; only targets
+// are deleted.
+func TestEvictArchives_NonTargetSurvivesOnDisk(t *testing.T) {
+	archives := []ArchiveMetadata{
+		// Non-targets (must all survive):
+		{ID: "manual_keep", CreatedAt: rfc(retBase.Add(-6 * time.Hour)), SizeBytes: 5000, Status: "completed", IncidentTime: ""},
+		{ID: "failed_keep", CreatedAt: rfc(retBase.Add(-5 * time.Hour)), SizeBytes: 5000, Status: "failed", IncidentTime: rfc(retBase.Add(-5 * time.Hour))},
+		{ID: "protecting_keep", CreatedAt: rfc(retBase.Add(-4 * time.Hour)), SizeBytes: 5000, Status: "protecting", IncidentTime: rfc(retBase.Add(-4 * time.Hour))},
+		// Over-cap completed incident targets (some must be evicted):
+		mkTarget("t1", retBase.Add(-3*time.Hour), 60),
+		mkTarget("t2", retBase.Add(-2*time.Hour), 60),
+		mkTarget("t3", retBase.Add(-1*time.Hour), 60),
+	}
+	am, arcDir := seedManager(t, archives)
+	am.evictMaxBytes = 100 // targets total 180 > 100 → t1,t2 evicted, t3 kept
+	am.evictRetentionDays = 0
+
+	nonTargets := []string{"manual_keep", "failed_keep", "protecting_keep"}
+	// Non-vacuity: every seeded dir exists before the cycle.
+	for _, id := range append(append([]string{}, nonTargets...), "t1", "t2", "t3") {
+		if !dirExists(t, filepath.Join(arcDir, id)) {
+			t.Fatalf("pre: seeded dir for %s missing", id)
+		}
+	}
+
+	am.EvictArchives(retBase)
+
+	// Non-targets survive on both sides (directory + metadata.json + list).
+	for _, id := range nonTargets {
+		if !dirExists(t, filepath.Join(arcDir, id)) {
+			t.Errorf("non-target %s directory was purged", id)
+		}
+		if !metadataContains(t, arcDir, id) {
+			t.Errorf("non-target %s missing from metadata.json", id)
+		}
+		if !listContains(am, id) {
+			t.Errorf("non-target %s missing from list SSOT", id)
+		}
+	}
+	// Only targets evicted: t1,t2 gone, t3 survivor.
+	for _, id := range []string{"t1", "t2"} {
+		if dirExists(t, filepath.Join(arcDir, id)) || metadataContains(t, arcDir, id) {
+			t.Errorf("target %s should have been evicted", id)
+		}
+	}
+	if !dirExists(t, filepath.Join(arcDir, "t3")) || !metadataContains(t, arcDir, "t3") {
+		t.Errorf("survivor target t3 was wrongly removed")
+	}
+}
+
 // --- H: periodicity/self-heal — one ticker-body EvictArchives restores cap ----
 func TestEvictArchives_H_SelfHeal(t *testing.T) {
 	archives := []ArchiveMetadata{
