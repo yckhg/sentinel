@@ -192,6 +192,8 @@ services:
       - ARCHIVES_DIR=/archives
       - ROLLING_WINDOW_MINUTES=60
       - FFMPEG_TIMEOUT=60
+      - ARCHIVE_RETENTION_DAYS=90
+      - ARCHIVE_MAX_BYTES=161061273600
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 30s
